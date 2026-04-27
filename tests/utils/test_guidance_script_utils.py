@@ -112,7 +112,6 @@ def test_save_everything_uses_model_atom_array_for_mismatch(
         refined_structure=refined_structure,
         traj_denoised=[],
         traj_next_step=[],
-        scaler_type="pure_guidance",
         final_state=final_state,
         model_atom_array=model_atom_array,
         deposit=guidance_script_utils._load_deposit(args.protein),
@@ -291,7 +290,6 @@ def test_save_everything_writes_validated_metadata_to_all_cifs(
         refined_structure={"asym_unit": atom_array},
         traj_denoised=[coords],
         traj_next_step=[coords],
-        scaler_type="pure_guidance",
         final_state=coords,
         deposit=guidance_script_utils._load_deposit(args.protein),
     )
@@ -659,7 +657,7 @@ def test_build_step_scaler_takes_pure_guidance_step_size_and_type(
     args.step_scaler_type = step_scaler_type
     args.gradient_normalization = True
 
-    scaler = _build_step_scaler(args, GuidanceType.PURE_GUIDANCE)
+    scaler = _build_step_scaler(args)
 
     assert isinstance(scaler, expected_type)
     assert scaler.step_size == 0.25
@@ -671,9 +669,7 @@ def test_build_step_scaler_none_type_applies_no_guidance():
     args = _guidance_config("boltz2", "pure_guidance")
     args.step_scaler_type = "none"
 
-    # TODO https://github.com/prism-science/sampleworks/issues/590 guidance type
-    #  should already be included in args
-    assert type(_build_step_scaler(args, GuidanceType.PURE_GUIDANCE)) is NoScalingScaler
+    assert type(_build_step_scaler(args)) is NoScalingScaler
 
 
 def test_build_step_scaler_rejects_an_unknown_step_scaler_type():
@@ -682,7 +678,7 @@ def test_build_step_scaler_rejects_an_unknown_step_scaler_type():
     args.step_scaler_type = "realspace"
 
     with pytest.raises(ValueError, match="Invalid step_scaler_type"):
-        _build_step_scaler(args, GuidanceType.PURE_GUIDANCE)
+        _build_step_scaler(args)
 
 
 def test_build_step_scaler_steers_fk_steering_in_noise_space_by_its_guidance_weight():
@@ -690,7 +686,7 @@ def test_build_step_scaler_steers_fk_steering_in_noise_space_by_its_guidance_wei
     args = _guidance_config("boltz2", "fk_steering")
     args.guidance_weight = 0.05
 
-    scaler = _build_step_scaler(args, GuidanceType.FK_STEERING)
+    scaler = _build_step_scaler(args)
 
     assert type(scaler) is NoiseSpaceDPSScaler
     assert scaler.step_size == 0.05
@@ -700,7 +696,7 @@ def test_build_step_scaler_gives_latent_optimization_no_guidance():
     """Latent optimization ignores the step scaler, so it gets one that applies no guidance."""
     args = _guidance_config("protenix", "latent_opt")
 
-    assert type(_build_step_scaler(args, GuidanceType.LATENT_OPT)) is NoScalingScaler
+    assert type(_build_step_scaler(args)) is NoScalingScaler
 
 
 @pytest.mark.parametrize(
@@ -719,4 +715,4 @@ def test_build_step_scaler_raises_for_a_missing_argument(
     delattr(args, attribute)
 
     with pytest.raises(AttributeError, match=attribute):
-        _build_step_scaler(args, guidance_type)
+        _build_step_scaler(args)

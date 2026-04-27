@@ -674,8 +674,6 @@ class DiffuseBraggLossFunction:
         elements: Int[torch.Tensor, "batch n_atoms"],
         b_factors: Float[torch.Tensor, "batch n_atoms"],
         occupancies: Float[torch.Tensor, "batch n_atoms"],
-        unique_combinations: torch.Tensor | None = None,
-        inverse_indices: torch.Tensor | None = None,
     ) -> Float[torch.Tensor, ""]:
         """Score one ensemble.
 

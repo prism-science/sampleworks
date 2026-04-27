@@ -143,9 +143,24 @@ def detect_gpus() -> list[str]:
     """Return CUDA GPU identifiers visible to this grid-search process.
 
     ``CUDA_VISIBLE_DEVICES`` wins when set because CUDA remaps those entries to
-    local process ordinals. Explicit CUDA "no device" sentinel values return an
-    empty list. Otherwise, ``nvidia-smi`` is used as a best-effort discovery
-    mechanism and ``["0"]`` is returned as a CPU/test fallback.
+    local process ordinals. Its numeric entries are checked against the indices
+    ``nvidia-smi`` reports, which ignore ``CUDA_VISIBLE_DEVICES`` and so share its
+    numbering; PyTorch would report the remapped ordinals ``0..n-1`` instead.
+    Explicit CUDA "no device" sentinel values return an empty list. Otherwise,
+    PyTorch or ``nvidia-smi`` is used as a best-effort discovery mechanism and
+    ``["0"]`` is returned as a CPU/test fallback.
+
+    Returns
+    -------
+    list of str
+        GPU entries for the workers; worker ``i`` runs on local CUDA ordinal
+        ``i % len(gpus)``.
+
+    Raises
+    ------
+    ValueError
+        If ``CUDA_VISIBLE_DEVICES`` names GPU indices that ``nvidia-smi`` does
+        not list in this container.
     """
     cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
     cuda_visible_key = cuda_visible.lower()
@@ -155,7 +170,7 @@ def detect_gpus() -> list[str]:
         return _discover_gpu_indices() or ["0"]
     if cuda_visible and cuda_visible_key != "all":
         gpus = [g.strip() for g in cuda_visible.split(",") if g.strip()]
-        visible = _discover_gpu_indices()
+        visible = _gpu_indices_from_nvidia_smi()
         if visible and all(g.isdigit() for g in gpus + visible):
             missing = sorted(set(gpus).difference(visible), key=int)
             if missing:

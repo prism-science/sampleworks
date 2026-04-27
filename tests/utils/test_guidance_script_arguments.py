@@ -448,7 +448,7 @@ def test_job_result_migrates_legacy_model_pickle() -> None:
 # ============================================================================
 
 
-def test_latent_opt_cli_flags_reach_the_config():
+def test_latent_opt_cli_flags_reach_the_config(tmp_path: Path):
     """Every --guidance-type latent_opt flag must land on the GuidanceConfig.
 
     Regression guard: these attribute names have to be listed in
@@ -456,6 +456,8 @@ def test_latent_opt_cli_flags_reach_the_config():
     ``_run_guidance`` reads the defaults instead, making every flag a no-op.
     Passing *non-default* values here catches that.
     """
+    density = tmp_path / "d.ccp4"
+    density.touch()
     config = GuidanceConfig.from_cli(
         argv=[
             "--protein",
@@ -463,7 +465,7 @@ def test_latent_opt_cli_flags_reach_the_config():
             "--structure",
             "s.cif",
             "--density",
-            "d.ccp4",
+            str(density),
             "--resolution",
             "1.8",
             "--output-dir",

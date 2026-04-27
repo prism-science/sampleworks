@@ -125,9 +125,20 @@ class TestValidation:
         with pytest.raises(ValueError, match="needs at least one loss"):
             LossConfig(())
 
-    def test_negative_weight_is_rejected(self):
-        with pytest.raises(ValueError, match="must be non-negative"):
-            LossConfig((LossEntry(Losses.REAL_SPACE_DENSITY, -1.0),))
+    @pytest.mark.parametrize("weight", [-1.0, float("nan"), float("inf")])
+    def test_negative_or_non_finite_weight_is_rejected(self, weight):
+        with pytest.raises(ValueError, match="must be non-negative and finite"):
+            LossConfig((LossEntry(Losses.REAL_SPACE_DENSITY, weight),))
+
+    @pytest.mark.parametrize("bragg_weight", [-0.1, 1.5, float("nan"), "0.5"])
+    def test_bragg_weight_outside_the_unit_interval_is_rejected(self, bragg_weight):
+        with pytest.raises(ValueError, match=r"bragg_weight must lie in \[0, 1\]"):
+            LossConfig.single(Losses.DIFFUSE_BRAGG, bragg_weight=bragg_weight)
+
+    @pytest.mark.parametrize("batch_partition", [0, -2, 2.5, True])
+    def test_non_positive_integer_batch_partition_is_rejected(self, batch_partition):
+        with pytest.raises(ValueError, match="batch_partition must be a positive integer"):
+            LossConfig.single(Losses.STRUCTURE_FACTOR, batch_partition=batch_partition)
 
     def test_unsupported_file_format_is_rejected(self, tmp_path):
         config_file = tmp_path / "losses.ini"
@@ -175,6 +186,37 @@ class TestWeights:
                     LossEntry(Losses.REAL_SPACE_DENSITY, options={"loss_order": 1}),
                 )
             )
+
+
+class TestMissingInputFiles:
+    """Path options naming files that do not exist are reported before any work."""
+
+    def test_reports_each_path_that_does_not_exist(self, tmp_path):
+        present = tmp_path / "bragg.mtz"
+        present.touch()
+        absent = tmp_path / "diffuse.mtz"
+        config = LossConfig.from_mapping(
+            {
+                "diffuse_bragg": {
+                    "loss_options": {"bragg_target": str(present), "diffuse_target": str(absent)}
+                },
+                "real_space_density": {"loss_options": {"resolution": 1.8}},
+            }
+        )
+
+        assert config.missing_input_files() == {"diffuse_bragg": {"diffuse_target": str(absent)}}
+
+    def test_existing_and_unset_paths_are_not_reported(self, tmp_path):
+        density = tmp_path / "map.ccp4"
+        density.touch()
+        config = LossConfig.from_mapping(
+            {
+                "real_space_density": {"loss_options": {"density": str(density)}},
+                "structure_factor": {},
+            }
+        )
+
+        assert config.missing_input_files() == {}
 
 
 class TestPerProteinOptions:

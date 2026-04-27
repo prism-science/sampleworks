@@ -182,3 +182,44 @@ def resize_to_ensemble(tensor: torch.Tensor, ensemble_size: int) -> torch.Tensor
     if tensor.ndim < 2:
         tensor = tensor.unsqueeze(0)
     return tensor.repeat(ensemble_size, *[1] * (tensor.ndim - 1))
+
+
+def gaussian_prior(
+    batch_size: int,
+    num_atoms: int | None,
+    device: DeviceLikeType,
+    *,
+    shape: tuple[int, ...] | None = None,
+) -> torch.Tensor:
+    """Draw standard Gaussian coordinates, the prior of the flow model wrappers.
+
+    Parameters
+    ----------
+    batch_size : int
+        Number of samples to draw.
+    num_atoms : int | None
+        Atom count taken from the model's features, or ``None`` when no features are
+        available.
+    device : DeviceLikeType
+        Device on which to allocate the samples.
+    shape : tuple[int, ...] | None, optional
+        Explicit ``(num_atoms, 3)`` shape of one sample. Overrides ``num_atoms``.
+
+    Returns
+    -------
+    torch.Tensor
+        Gaussian coordinates, shape ``(batch_size, atoms, 3)``.
+
+    Raises
+    ------
+    ValueError
+        If ``shape`` is not of the form ``(num_atoms, 3)``, or if both ``shape`` and
+        ``num_atoms`` are ``None``.
+    """
+    if shape is not None:
+        if len(shape) != 2 or shape[1] != 3:
+            raise ValueError("shape must be of the form (num_atoms, 3)")
+        return torch.randn((batch_size, *shape), device=device)
+    if num_atoms is None:
+        raise ValueError("Either features or shape must be provided to initialize_from_prior()")
+    return torch.randn((batch_size, num_atoms, 3), device=device)

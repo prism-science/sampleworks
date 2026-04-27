@@ -557,7 +557,6 @@ def save_everything(
     refined_structure: dict,
     traj_denoised: list[Any],
     traj_next_step: list[Any],
-    scaler_type: str,
     final_state: torch.Tensor | None = None,
     model_atom_array: AtomArray | None = None,
     *,
@@ -585,9 +584,6 @@ def save_everything(
         Denoised-prediction trajectory tensors, one per diffusion step.
     traj_next_step : list[Any]
         Next-step (noisy) trajectory tensors, one per diffusion step.
-    scaler_type : str
-        Scaler/guidance identifier, forwarded to ``save_trajectory`` for
-        scaler-specific handling. # TODO: handle more gracefully
     final_state : torch.Tensor | None
         Final coordinates with shape ``(ensemble, atoms, 3)``.  If ``None``,
         the `refined_structure`'s existing coordinates are saved as-is.
@@ -635,7 +631,7 @@ def save_everything(
 
     # Two calls to save_trajectory, very similar, but saving different trajectories!
     save_trajectory(
-        scaler_type,
+        args.guidance_type,
         traj_denoised,  # <--- the difference is here!
         atom_array_for_saving,
         output_dir,
@@ -644,7 +640,7 @@ def save_everything(
         deposit=deposit,
     )
     save_trajectory(
-        scaler_type,
+        args.guidance_type,
         traj_next_step,  # <--- and here!
         atom_array_for_saving,
         output_dir,
@@ -667,15 +663,13 @@ def save_everything(
 # Methods for running model guidance in separate processes, avoiding reloading of the model.
 #####################
 # These args are passed from run_grid_search.py via GuidanceConfig.
-def run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, device) -> JobResult:
+def run_guidance(args: GuidanceConfig, model_wrapper, device) -> JobResult:
     """Wrapper around ``_run_guidance`` to redirect logs and generate a JobResult.
 
     Parameters
     ----------
     args : GuidanceConfig
-        Configuration for the guidance run.
-    guidance_type : str
-        Type of guidance/scaler to apply.
+        Configuration for the guidance run, including its ``guidance_type``.
     model_wrapper
         Loaded model wrapper instance.
     device
@@ -700,7 +694,7 @@ def run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, device
     started_at = datetime.now()
     try:
         with logger.contextualize(special=True):
-            _run_guidance(args, guidance_type, model_wrapper, device)
+            _run_guidance(args, model_wrapper, device)
         logger.info("Guidance run successfully!")
         job_result = get_job_result(args, device, started_at, datetime.now(), 0, "success")
     except Exception as e:
@@ -720,16 +714,14 @@ def _three_state_resolver(value: str | bool | None, default: bool) -> bool:
     return bool(value)
 
 
-def _build_step_scaler(args: GuidanceConfig, guidance_type: str) -> StepScalerProtocol:
+def _build_step_scaler(args: GuidanceConfig) -> StepScalerProtocol:
     """Build the step scaler that applies gradient-based guidance at each step.
 
     Parameters
     ----------
     args : GuidanceConfig
-        Run configuration. Pure guidance reads ``step_size`` and ``step_scaler_type``
-        from it, FK steering reads ``guidance_weight``.
-    guidance_type : str
-        The run's :class:`GuidanceType`.
+        Run configuration. Its ``guidance_type`` selects the scaler; pure guidance reads
+        ``step_size`` and ``step_scaler_type`` from it, FK steering reads ``guidance_weight``.
 
     Returns
     -------
@@ -741,9 +733,10 @@ def _build_step_scaler(args: GuidanceConfig, guidance_type: str) -> StepScalerPr
     Raises
     ------
     ValueError
-        If ``guidance_type`` is unknown, or ``step_scaler_type`` is not one of
+        If ``args.guidance_type`` is unknown, or ``step_scaler_type`` is not one of
         ``"dataspace"``, ``"noisespace"`` or ``"none"``.
     """
+    guidance_type = args.guidance_type
     # TODO: unify step_size and guidance_weight, no need for both of them now
     if guidance_type == GuidanceType.PURE_GUIDANCE:
         step_size, step_scaler_type = args.step_size, args.step_scaler_type
@@ -770,8 +763,9 @@ def _build_step_scaler(args: GuidanceConfig, guidance_type: str) -> StepScalerPr
 
 
 # "guidance_type" is also called "scaler" in many places
-def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, device):
+def _run_guidance(args: GuidanceConfig, model_wrapper, device):
     """Run one configured guidance trajectory and save its outputs."""
+    guidance_type = args.guidance_type
     structure = load_guidance_structure(args.structure)
     logger.info("Creating loss function")
     loss_function = build_loss(
@@ -860,7 +854,7 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
         config=sampler_config,
     )
 
-    step_scaler = _build_step_scaler(args, guidance_type)
+    step_scaler = _build_step_scaler(args)
 
     num_steps = args.num_diffusion_steps
 
@@ -1009,7 +1003,6 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
         refined_structure,
         traj_denoised,
         traj_next_step,
-        guidance_type,
         final_state=torch.as_tensor(result.final_state),
         model_atom_array=model_atom_array,
         deposit=deposit,
@@ -1131,7 +1124,7 @@ def run_guidance_job_queue(job_queue_path: str) -> list[JobResult]:
     for i, job in enumerate(job_queue):
         logger.info(f"Running job {i + 1}/{len(job_queue)}: {job}")
 
-        job_result = run_guidance(job, job.guidance_type, model_wrapper, device)
+        job_result = run_guidance(job, model_wrapper, device)
 
         job_results.append(job_result)
         torch.cuda.empty_cache()  # just in case
