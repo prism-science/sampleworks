@@ -7,7 +7,7 @@ they run against every loss function. What remains here is specific to
 real-space density forward model:
 
 1. Scattering-parameter setup / element normalization (forward model).
-2. ``precompute_unique_combinations`` / vmap support (``PrecomputableLossFunctionProtocol``).
+2. ``prepare()``, which makes the loss vmap-compatible.
 3. ``structure_to_loss_input`` (not implemented by SFC). (Batch=1 occupancy gradients are
    now loss-agnostic and live in ``test_loss_function_contract.py``.)
 4. The single-atom case (SFC fixes topology at ``prepare()``).
@@ -28,6 +28,7 @@ from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.sf import
 )
 from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.volume import XMap
 from sampleworks.core.losses.options import RealSpaceDensityOptions
+from sampleworks.core.losses.protocol import LossInputs
 from sampleworks.core.losses.real_space_density import (
     build_real_space_density_loss,
     extract_density_inputs_from_atomarray,
@@ -35,6 +36,8 @@ from sampleworks.core.losses.real_space_density import (
     setup_scattering_params,
 )
 from sampleworks.core.losses.registry import LossBuildContext
+
+from tests.losses.conftest import _build_loss_function_1vme
 
 
 class TestSetupScatteringParams:
@@ -259,12 +262,28 @@ class TestStructureToLossInput:
         torch.testing.assert_close(inputs["b_factors"], torch.full((2, 1), 20.0, device=device))
 
 
+class TestPrepare:
+    def test_rejects_inputs_of_another_shape(self, density_map_1vme, test_coordinates_1vme, device):
+        """A loss prepared for one ensemble size refuses another instead of misindexing."""
+        _, atom_array = test_coordinates_1vme
+        loss_function_1vme = _build_loss_function_1vme(density_map_1vme, device)
+        loss_function_1vme.prepare(
+            LossInputs.from_atom_array(atom_array, ensemble_size=1, device=device), device=device
+        )
+        other = LossInputs.from_atom_array(atom_array, ensemble_size=2, device=device)
+
+        with pytest.raises(ValueError, match=r"prepare\(\) was given loss inputs of shape"):
+            loss_function_1vme(
+                other.input_coords, other.elements, other.b_factors, other.occupancies
+            )
+
+
 @pytest.mark.gpu
 @pytest.mark.slow
 class TestVmapCompatibility:
     """Test vmap functionality for use in FK steering and particle methods."""
 
-    def test_vmap_over_particle_dimension(self, loss_function_1vme, test_coordinates_1vme, device):
+    def test_vmap_over_particle_dimension(self, density_map_1vme, test_coordinates_1vme, device):
         """Test vmap over particle dimension as used in FK steering."""
         coords, atom_array = test_coordinates_1vme
 
@@ -289,14 +308,15 @@ class TestVmapCompatibility:
             "n -> p e n", occupancies, p=num_particles, e=ensemble_size
         )
 
-        unique_combinations, inverse_indices = loss_function_1vme.precompute_unique_combinations(
-            elements_batch[0], b_factors_batch[0]
-        )
-
-        rf_partial = partial(
-            loss_function_1vme,
-            unique_combinations=unique_combinations,
-            inverse_indices=inverse_indices,
+        loss_function_1vme = _build_loss_function_1vme(density_map_1vme, device)
+        loss_function_1vme.prepare(
+            LossInputs(
+                elements=elements_batch[0],
+                b_factors=b_factors_batch[0],
+                occupancies=occupancies_batch[0],
+                input_coords=coords_batch[0],
+            ),
+            device=device,
         )
 
         result = cast(
@@ -307,17 +327,17 @@ class TestVmapCompatibility:
                 elements_batch,
                 b_factors_batch,
                 occupancies_batch,
-                op=rf_partial,
+                op=loss_function_1vme,
             ),
         )
 
         assert result.shape == torch.Size([num_particles])
         assert torch.all(torch.isfinite(result))
 
-    def test_vmap_with_precomputed_combinations(
-        self, loss_function_1vme, test_coordinates_1vme, device
+    def test_prepared_loss_matches_unprepared_loss(
+        self, density_map_1vme, test_coordinates_1vme, device
     ):
-        """Test vmap with pre-computed unique combinations."""
+        """Finding the unique pairs once in prepare() does not change the score."""
         coords, atom_array = test_coordinates_1vme
 
         elements = torch.tensor(
@@ -331,29 +351,25 @@ class TestVmapCompatibility:
         b_factors = torch.from_numpy(atom_array.b_factor).to(device=device, dtype=torch.float32)
         occupancies = torch.from_numpy(atom_array.occupancy).to(device=device, dtype=torch.float32)
 
-        unique_combinations, inverse_indices = loss_function_1vme.precompute_unique_combinations(
-            elements, b_factors
-        )
-
-        loss_with_precompute = loss_function_1vme(
-            coordinates=coords.unsqueeze(0),
+        inputs = LossInputs(
             elements=elements.unsqueeze(0),
             b_factors=b_factors.unsqueeze(0),
             occupancies=occupancies.unsqueeze(0),
-            unique_combinations=unique_combinations,
-            inverse_indices=inverse_indices,
+            input_coords=coords.unsqueeze(0),
+        )
+        loss_unprepared = _build_loss_function_1vme(density_map_1vme, device)
+        loss_prepared = _build_loss_function_1vme(density_map_1vme, device)
+        loss_prepared.prepare(inputs, device=device)
+        per_atom = dict(
+            coordinates=inputs.input_coords,
+            elements=inputs.elements,
+            b_factors=inputs.b_factors,
+            occupancies=inputs.occupancies,
         )
 
-        loss_without_precompute = loss_function_1vme(
-            coordinates=coords.unsqueeze(0),
-            elements=elements.unsqueeze(0),
-            b_factors=b_factors.unsqueeze(0),
-            occupancies=occupancies.unsqueeze(0),
-        )
+        torch.testing.assert_close(loss_prepared(**per_atom), loss_unprepared(**per_atom))
 
-        torch.testing.assert_close(loss_with_precompute, loss_without_precompute)
-
-    def test_vmap_output_shape(self, loss_function_1vme, test_coordinates_1vme, device):
+    def test_vmap_output_shape(self, density_map_1vme, test_coordinates_1vme, device):
         """Test vmap returns correct shape (num_particles,)."""
         coords, atom_array = test_coordinates_1vme
 
@@ -374,17 +390,15 @@ class TestVmapCompatibility:
             b_factors_batch = einx.rearrange("n -> p e n", b_factors, p=num_particles, e=1)
             occupancies_batch = einx.rearrange("n -> p e n", occupancies, p=num_particles, e=1)
 
-            unique_combinations, inverse_indices = (
-                loss_function_1vme.precompute_unique_combinations(
-                    elements_batch[0, 0],
-                    b_factors_batch[0, 0],
-                )
-            )
-
-            rf_partial = partial(
-                loss_function_1vme,
-                unique_combinations=unique_combinations,
-                inverse_indices=inverse_indices,
+            loss_function_1vme = _build_loss_function_1vme(density_map_1vme, device)
+            loss_function_1vme.prepare(
+                LossInputs(
+                    elements=elements_batch[0],
+                    b_factors=b_factors_batch[0],
+                    occupancies=occupancies_batch[0],
+                    input_coords=coords_batch[0],
+                ),
+                device=device,
             )
 
             result = einx.vmap(
@@ -393,12 +407,12 @@ class TestVmapCompatibility:
                 elements_batch,
                 b_factors_batch,
                 occupancies_batch,
-                op=rf_partial,
+                op=loss_function_1vme,
             )
 
             assert result.shape == torch.Size([num_particles])
 
-    def test_vmap_consistency(self, loss_function_1vme, test_coordinates_1vme, device):
+    def test_vmap_consistency(self, density_map_1vme, test_coordinates_1vme, device):
         """Test vmap results match sequential calls."""
         coords, atom_array = test_coordinates_1vme
 
@@ -419,15 +433,15 @@ class TestVmapCompatibility:
         b_factors_batch = einx.rearrange("n -> p e n", b_factors, p=num_particles, e=1)
         occupancies_batch = einx.rearrange("n -> p e n", occupancies, p=num_particles, e=1)
 
-        unique_combinations, inverse_indices = loss_function_1vme.precompute_unique_combinations(
-            elements_batch[0, 0],
-            b_factors_batch[0, 0],
-        )
-
-        rf_partial = partial(
-            loss_function_1vme,
-            unique_combinations=unique_combinations,
-            inverse_indices=inverse_indices,
+        loss_function_1vme = _build_loss_function_1vme(density_map_1vme, device)
+        loss_function_1vme.prepare(
+            LossInputs(
+                elements=elements_batch[0],
+                b_factors=b_factors_batch[0],
+                occupancies=occupancies_batch[0],
+                input_coords=coords_batch[0],
+            ),
+            device=device,
         )
 
         result_vmap = einx.vmap(
@@ -436,12 +450,12 @@ class TestVmapCompatibility:
             elements_batch,
             b_factors_batch,
             occupancies_batch,
-            op=rf_partial,
+            op=loss_function_1vme,
         )
 
         result_sequential = []
         for i in range(num_particles):
-            loss = rf_partial(
+            loss = loss_function_1vme(
                 coordinates=coords_batch[i],
                 elements=elements_batch[i],
                 b_factors=b_factors_batch[i],
@@ -523,16 +537,20 @@ class TestBuildRealSpaceDensityLoss:
             LossBuildContext(structure=structure_1vme_density, device=torch.device("cpu")),
         )
         inputs = loss.structure_to_loss_input(structure_1vme_density)
-        unique_combinations, inverse_indices = loss.precompute_unique_combinations(
-            inputs["elements"], inputs["b_factors"]
+        loss.prepare(
+            LossInputs(
+                elements=inputs["elements"],
+                b_factors=inputs["b_factors"],
+                occupancies=inputs["occupancies"],
+                input_coords=inputs["coordinates"],
+            ),
+            device=torch.device("cpu"),
         )
         score = partial(
             loss,
             elements=inputs["elements"],
             b_factors=inputs["b_factors"],
             occupancies=inputs["occupancies"],
-            unique_combinations=unique_combinations,
-            inverse_indices=inverse_indices,
         )
         particles = torch.stack([inputs["coordinates"], inputs["coordinates"] + 0.3])
 

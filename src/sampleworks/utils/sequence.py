@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import os
+from collections.abc import Callable, Collection, Sequence
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -12,11 +13,12 @@ import numpy as np
 from atomworks.constants import STANDARD_AA
 from atomworks.io.utils.ccd import ChainType
 from atomworks.io.utils.sequence import get_1_from_3_letter_code
-from biotite.sequence import ProteinSequence
+from biotite.sequence import Alphabet, GeneralSequence, ProteinSequence
 from biotite.sequence.align import align_optimal, SubstitutionMatrix
 from biotite.sequence.io.fasta import FastaFile
 from biotite.structure import get_residue_starts
 from biotite.structure.info import residue as ccd_residue
+from loguru import logger
 
 
 @functools.cache
@@ -127,95 +129,274 @@ def resolve_sequence_arg(
     return validate_seq_with_error(sequence)
 
 
-def _snap_runs_to_numbering(
-    observed_seq: str,
-    sequence: str,
-    residue_ids: np.ndarray,
-    seq_idx: np.ndarray,
-) -> np.ndarray:
-    """Place runs of consecutive residue numbers on consecutive sequence positions.
+_GAP_COST = 1
+_UNREACHABLE = np.iinfo(np.int64).max // 4
 
-    A sequence-only alignment can tie when a residue next to a gap also occurs on the far
-    side of the gap. In 5I09, for example, observed ``LYS 125 | SER 131 ARG 132 ...`` aligns
-    SER 131 directly after LYS 125 as readily as after the gap. Treat each run of consecutive
-    ``res_id`` values as a block: one offset (``res_id - sequence index``) places every residue
-    in that run. For example, if K is residue 125 and a consecutive
-    ``S R G`` run is numbered 131–133, the shared numbering offset places that run six sequence
-    indices after K (offset 6). This can distinguish it from an earlier ``S R G`` that sequence
-    alignment might choose when a gap makes both placements plausible. Try the best-supported
-    chain-wide offset first, then the run's aligned offsets from most to least frequent, and accept
-    only a placement where every residue matches its sequence letter.
+
+def _name_set(names: str | Collection[str]) -> set[str]:
+    """Return a residue's names as a set.
 
     Parameters
     ----------
-    observed_seq : str
-        One-letter sequence of the observed residues, in residue order.
-    sequence : str
-        Full override sequence.
-    residue_ids : np.ndarray
-        ``res_id`` of each observed residue, shape ``(n_observed,)``.
-    seq_idx : np.ndarray
-        Aligned position in ``sequence`` of each observed residue, ``-1`` if unaligned,
-        shape ``(n_observed,)``.
+    names : str | Collection[str]
+        One name, or the names observed at one position.
+
+    Returns
+    -------
+    set[str]
+        The names.
+    """
+    return {names} if isinstance(names, str) else set(names)
+
+
+def _match_matrix(
+    observed: Sequence[str | Collection[str]], sequence: Sequence[str | Collection[str]]
+) -> np.ndarray:
+    """Mark the sequence positions whose names match each observed residue.
+
+    Parameters
+    ----------
+    observed : Sequence[str | Collection[str]]
+        Observed residues.
+    sequence : Sequence[str | Collection[str]]
+        Sequence positions, in the same alphabet as ``observed``.
 
     Returns
     -------
     np.ndarray
-        Adjusted positions, shape ``(n_observed,)``.
-
-    Raises
-    ------
-    ValueError
-        If the adjusted positions are not strictly increasing, which means the residue
-        numbering contradicts the sequence (e.g. duplicated or reset ``res_id`` in one chain).
-
-    Notes
-    -----
-    This function is a heuristic, and remains brittle. It assumes res_id steps match sequence
-    positions within a run and that most residues share one chain-wide offset.
-    align_optimal uses a linear -10 gap with free terminal gaps, so short runs beside a gap
-    can slide, and only runs whose numbering uniquely identifies them get rescued.
-    Homopolymer stretches stay ambiguous: every offset matches the letters, so a terminally-slid
-    run can still be misplaced silently.
-    Upgrade path: read label_seq_id / _pdbx_poly_seq_scheme when the CIF has them, or take
-    a user-supplied missing-residue mask (#441). This relies on additional input or a properly
-    formatted CIF.
+        Boolean matrix, shape ``(n_observed, n_sequence)``.
     """
+    columns: dict[str, list[int]] = {}
+    for position, names in enumerate(sequence):
+        for name in _name_set(names):
+            columns.setdefault(name, []).append(position)
+    matches = np.zeros((len(observed), len(sequence)), dtype=bool)
+    for index, names in enumerate(observed):
+        for name in _name_set(names):
+            matches[index, columns.get(name, [])] = True
+    return matches
 
-    def offsets_by_frequency(indices: np.ndarray) -> list[int]:
-        aligned = indices[seq_idx[indices] >= 0]
-        offsets, counts = np.unique(residue_ids[aligned] - seq_idx[aligned], return_counts=True)
-        return offsets[np.argsort(-counts, kind="stable")].tolist()
 
-    def letters_matched(offset: int) -> int:
-        positions = residue_ids - offset
-        return sum(
-            0 <= p < len(sequence) and sequence[p] == letter
-            for p, letter in zip(positions, observed_seq)
+def _numbering_jumps(
+    residue_ids: np.ndarray | None, insertion_codes: np.ndarray | None, n_observed: int
+) -> np.ndarray:
+    """Count the residues the numbering skips before each observed residue.
+
+    Parameters
+    ----------
+    residue_ids : np.ndarray | None
+        ``res_id`` of each observed residue, shape ``(n_observed,)``.
+    insertion_codes : np.ndarray | None
+        ``ins_code`` of each observed residue, shape ``(n_observed,)``.
+    n_observed : int
+        Number of observed residues.
+
+    Returns
+    -------
+    np.ndarray
+        Skipped residue count, ``-1`` where the numbering gives no distance (first residue,
+        insertion codes, or numbers that do not increase), shape ``(n_observed,)``.
+    """
+    jumps = np.full(n_observed, -1, dtype=np.int64)
+    if residue_ids is not None and insertion_codes is not None:
+        steps = np.diff(residue_ids.astype(np.int64))
+        numbered = (insertion_codes[1:] == "") & (insertion_codes[:-1] == "") & (steps > 0)
+        jumps[1:] = np.where(numbered, steps - 1, -1)
+    return jumps
+
+
+def _placement_costs(
+    matches: np.ndarray, jumps: np.ndarray, mismatch: int, leading: np.ndarray
+) -> np.ndarray:
+    """Compute a cost matrix: for each ``i`` and ``p``, the cheapest cost of placing residues
+    ``[0, i]`` given that residue ``i`` is placed at position ``p``.
+
+    Parameters
+    ----------
+    matches : np.ndarray
+        Name matches, shape ``(n_observed, n_sequence)``.
+    jumps : np.ndarray
+        Skipped residue counts from :func:`_numbering_jumps`, shape ``(n_observed,)``.
+    mismatch : int
+        Cost of placing a residue on a position whose names differ.
+    leading : np.ndarray
+        Cost of the gap before the first residue, by its position, shape ``(n_sequence,)``.
+
+    Returns
+    -------
+    np.ndarray
+        ``costs[i, p]``: cheapest placement of residues ``0..i`` with ``i`` at ``p``,
+        shape ``(n_observed, n_sequence)``.
+    """
+    n_observed, n_sequence = matches.shape
+    costs = np.empty((n_observed, n_sequence), dtype=np.int64)
+    costs[0] = np.where(matches[0], 0, mismatch) + leading
+    for index in range(1, n_observed):
+        previous, jump = costs[index - 1], jumps[index]
+        candidates = np.full((3, n_sequence), _UNREACHABLE, dtype=np.int64)
+        candidates[0, 1:] = previous[:-1] + (_GAP_COST if jump > 0 else 0)  # adjacent
+        if 0 < jump < n_sequence - 1:
+            candidates[1, jump + 1 :] = previous[: n_sequence - jump - 1]  # gap = jump
+        candidates[2, 2:] = np.minimum.accumulate(previous)[:-2] + _GAP_COST  # any other gap
+        best = candidates.min(axis=0)
+        costs[index] = np.where(
+            best >= _UNREACHABLE, _UNREACHABLE, best + np.where(matches[index], 0, mismatch)
         )
+    return costs
 
-    # The chain-wide offset is the one under which numbering explains the most letters.
-    # alignment frequency only breaks ties (a slid alignment can tie on frequency alone).
-    chain_offset = sorted(
-        offsets_by_frequency(np.arange(len(residue_ids))), key=letters_matched, reverse=True
-    )[:1]
-    snapped = seq_idx.copy()
-    run_breaks = np.flatnonzero(np.diff(residue_ids) != 1) + 1
-    for run in np.split(np.arange(len(residue_ids)), run_breaks):
-        for offset in chain_offset + offsets_by_frequency(run):
-            candidate = residue_ids[run] - offset
-            in_range = candidate.min() >= 0 and candidate.max() < len(sequence)
-            if in_range and all(sequence[c] == observed_seq[i] for i, c in zip(run, candidate)):
-                snapped[run] = candidate
-                break
 
-    placed = snapped[snapped >= 0]
-    if not np.all(np.diff(placed) > 0):
-        raise ValueError(
-            "Sequence override failed: residue numbering is not consistent with the override "
-            "sequence (e.g. duplicated or reset res_ids in one chain). The CIF may be malformed."
-        )
-    return snapped
+def _trace_placement(
+    costs: np.ndarray,
+    totals: np.ndarray,
+    matches: np.ndarray,
+    jumps: np.ndarray,
+    mismatch: int,
+    pick: Callable[[np.ndarray], int],
+) -> np.ndarray:
+    """Trace one optimal placement back from the last observed residue.
+
+    Parameters
+    ----------
+    costs : np.ndarray
+        From :func:`_placement_costs`, shape ``(n_observed, n_sequence)``.
+    totals : np.ndarray
+        Cost of each full placement by its last position, shape ``(n_sequence,)``.
+    matches : np.ndarray
+        Name matches, shape ``(n_observed, n_sequence)``.
+    jumps : np.ndarray
+        Skipped residue counts, shape ``(n_observed,)``.
+    mismatch : int
+        Cost of placing a residue on a position whose names differ.
+    pick : Callable[[np.ndarray], int]
+        Chooses one position among tied candidates (e.g. ``np.min``).
+
+    Returns
+    -------
+    np.ndarray
+        Sequence position of each observed residue, shape ``(n_observed,)``.
+    """
+    n_observed = len(costs)
+    path = np.empty(n_observed, dtype=np.int64)
+    path[-1] = pick(np.flatnonzero(totals == totals.min()))
+    for index in range(n_observed - 1, 0, -1):
+        here, previous, jump = path[index], costs[index - 1], jumps[index]
+        target = costs[index, here] - (0 if matches[index, here] else mismatch)
+        tied = list(np.flatnonzero(previous[: max(here - 1, 0)] + _GAP_COST == target))
+        if here >= 1 and previous[here - 1] + (_GAP_COST if jump > 0 else 0) == target:
+            tied.append(here - 1)
+        if jump > 0 and here - jump - 1 >= 0 and previous[here - jump - 1] == target:
+            tied.append(here - jump - 1)
+        path[index - 1] = pick(np.array(tied))
+    return path
+
+
+def align_to_sequence(
+    observed: Sequence[str | Collection[str]],
+    sequence: Sequence[str | Collection[str]],
+    residue_ids: np.ndarray | None,
+    insertion_codes: np.ndarray | None,
+) -> tuple[np.ndarray, int | None]:
+    """Place observed residues on a full sequence by name and residue numbering.
+
+    Each observed residue keeps its order and takes one sequence position. The optimal
+    placement matches the most names, then has the fewest gaps that disagree with the
+    numbering. Without numbering, a gap inside a run of identical residues has several
+    optimal places, which is reported as ambiguous.
+
+    Parameters
+    ----------
+    observed : Sequence[str | Collection[str]]
+        Observed residues in order, as one-letter codes or residue names. A collection holds
+        the names observed at one residue, any of which matches.
+    sequence : Sequence[str | Collection[str]]
+        Full sequence, in the same alphabet as ``observed``.
+    residue_ids : np.ndarray | None
+        ``res_id`` of each observed residue, shape ``(n_observed,)``, or ``None`` when the
+        numbering says nothing about sequence distance.
+    insertion_codes : np.ndarray | None
+        ``ins_code`` of each observed residue, shape ``(n_observed,)``; required with
+        ``residue_ids``.
+
+    Returns
+    -------
+    tuple[np.ndarray, int | None]
+        Sequence position of each observed residue, ``-1`` where no name matches, shape
+        ``(n_observed,)``; and a sequence position where two optimal placements disagree,
+        or ``None`` when the optimum is unique.
+    """
+    n_observed, n_sequence = len(observed), len(sequence)
+    positions = np.full(n_observed, -1, dtype=np.int64)
+    if n_observed == 0 or n_observed > n_sequence:
+        return positions, None
+    matches = _match_matrix(observed, sequence)
+    jumps = _numbering_jumps(residue_ids, insertion_codes, n_observed)
+    mismatch = n_observed + 2  # dearer than every gap together, so names are matched first
+    terminal = 0 if residue_ids is not None else _GAP_COST  # numbered termini may be unresolved
+    leading = np.where(np.arange(n_sequence) > 0, terminal, 0)  # (n_sequence,)
+    costs = _placement_costs(matches, jumps, mismatch, leading)
+    totals = np.minimum(costs[-1] + leading[::-1], _UNREACHABLE)  # (n_sequence,)
+
+    lowest = _trace_placement(costs, totals, matches, jumps, mismatch, np.min)
+    highest = _trace_placement(costs, totals, matches, jumps, mismatch, np.max)
+    disagreeing = np.flatnonzero(lowest != highest)
+    ambiguous_at = (
+        int(min(lowest[disagreeing[0]], highest[disagreeing[0]])) if disagreeing.size else None
+    )
+    matched = matches[np.arange(n_observed), lowest]
+    positions[matched] = lowest[matched]
+    return positions, ambiguous_at
+
+
+def align_sequences(
+    first: Sequence[str | Collection[str]], second: Sequence[str | Collection[str]]
+) -> tuple[np.ndarray, bool]:
+    """Match up the residues of two sequences by residue name, allowing gaps in either.
+
+    For example, ``["SER", "GLY", "HIS"]`` and ``["GLY", "HIS", "TRP"]`` match GLY to GLY
+    and HIS to HIS, leaving SER and TRP unmatched. The result matches as many residues as
+    possible, and among equally good results uses the fewest gaps. Unmatched residues at the
+    start or end of a sequence do not count as gaps.
+
+    Parameters
+    ----------
+    first : Sequence[str | Collection[str]]
+        Residue names in chain order, e.g. ``["GLY", "ALA"]``. A position can list several
+        names, e.g. ``{"ALA", "SER"}`` for a residue modeled as two residue types, and then
+        matches a residue with any of those names.
+    second : Sequence[str | Collection[str]]
+        Residue names in chain order, given the same way as ``first``.
+
+    Returns
+    -------
+    positions : np.ndarray
+        For each residue of ``first``, the index of the ``second`` residue it matched, or
+        ``-1`` if it matched none. Shape ``(len(first),)``.
+    ambiguous : bool
+        Whether a different matching is just as good, e.g. when ``second`` repeats a residue
+        and either copy could be the match.
+    """
+    first_sets = [frozenset(_name_set(names)) for names in first]
+    second_sets = [frozenset(_name_set(names)) for names in second]
+    positions = np.full(len(first_sets), -1, dtype=np.int64)
+    if not first_sets or not second_sets:
+        return positions, False
+    symbols = list(set(first_sets) | set(second_sets))
+    alphabet = Alphabet(symbols)
+    # one match is worth more than all possible gaps combined
+    match = len(first_sets) + len(second_sets) + 1
+    scores = np.array([[match if a & b else 0 for b in symbols] for a in symbols])
+    alignments = align_optimal(
+        GeneralSequence(alphabet, first_sets),
+        GeneralSequence(alphabet, second_sets),
+        SubstitutionMatrix(alphabet, alphabet, scores),
+        gap_penalty=-1,
+        terminal_penalty=False,
+        max_number=2,
+    )
+    first_index, second_index = alignments[0].trace[(alignments[0].trace >= 0).all(axis=1)].T
+    same_name = [bool(first_sets[i] & second_sets[j]) for i, j in zip(first_index, second_index)]
+    positions[first_index[same_name]] = second_index[same_name]
+    return positions, len(alignments) > 1
 
 
 def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> dict[str, Any]:
@@ -241,7 +422,7 @@ def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> 
         If a non-empty sequence is supplied but the structure has no protein
         chains, has multiple protein chains, contains invalid amino-acid
         characters, or if the protein chain looks malformed (non-amino-acid residues,
-        residue numbering that contradicts the sequence, or residues that cannot be
+        residue numbering that restarts or repeats, or residues that cannot be
         aligned to the override).
     """
     if sequence is None or not sequence.strip():
@@ -299,24 +480,25 @@ def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> 
             f"in a protein chain)."
         )
 
-    # Align observed → override to map each observed residue to its position
-    # in the full (potentially longer) override sequence.
-    obs_prot = ProteinSequence(observed_seq)
-    full_prot = ProteinSequence(sequence)
-    matrix = SubstitutionMatrix.std_protein_matrix()
-    alignments = align_optimal(obs_prot, full_prot, matrix, terminal_penalty=False, max_number=1)
-    trace = alignments[0].trace
+    residue_ids = chain_array.res_id[starts[:-1]]
+    insertion_codes = chain_array.ins_code[starts[:-1]]
+    # Microheterogeneity would put one residue at two override positions.
+    residue_keys = set(zip(residue_ids.tolist(), insertion_codes.tolist()))
+    if np.any(np.diff(residue_ids) < 0) or len(residue_keys) < len(residue_ids):
+        raise ValueError(
+            f"Sequence override failed: residue numbering of protein chain {chain_id_str} "
+            f"restarts or repeats. The CIF may be malformed."
+        )
 
-    residue_seq_idx = np.full(len(starts) - 1, -1, dtype=np.int64)
-    for row in trace:
-        obs_i, full_i = int(row[0]), int(row[1])
-        if obs_i != -1 and full_i != -1:
-            if observed_seq[obs_i] != sequence[full_i]:
-                continue
-            residue_seq_idx[obs_i] = full_i
-    residue_seq_idx = _snap_runs_to_numbering(
-        observed_seq, sequence, chain_array.res_id[starts[:-1]], residue_seq_idx
+    residue_seq_idx, ambiguous_at = align_to_sequence(
+        observed_seq, sequence, residue_ids, insertion_codes
     )
+    if ambiguous_at is not None:
+        logger.warning(
+            f"Protein chain {chain_id_str} fits the override sequence in several equally good "
+            f"ways around override position {ambiguous_at} (a gap inside a run of repeated "
+            "residues that the residue numbering does not place). Using one of them."
+        )
 
     # Every observed residue must map to the override sequence.  Unmapped
     # residues (seq_idx == -1) would corrupt downstream tensor indexing in

@@ -10,6 +10,7 @@ import sampleworks.utils.guidance_script_utils as guidance_script_utils
 import torch
 from atomworks.io.transforms.atom_array import ensure_atom_array_stack
 from atomworks.io.utils.io_utils import load_any
+from biotite.database import RequestError
 from biotite.structure import AtomArrayStack
 from biotite.structure.io.pdbx.cif import CIFFile
 from sampleworks.core.scalers.step_scalers import (
@@ -111,9 +112,9 @@ def test_save_everything_uses_model_atom_array_for_mismatch(
         refined_structure=refined_structure,
         traj_denoised=[],
         traj_next_step=[],
-        scaler_type="pure_guidance",
         final_state=final_state,
         model_atom_array=model_atom_array,
+        deposit=guidance_script_utils._load_deposit(args.protein),
     )
 
     saved = ensure_atom_array_stack(load_any(tmp_path / "refined.cif"))
@@ -123,18 +124,69 @@ def test_save_everything_uses_model_atom_array_for_mismatch(
     assert "without polymer entity categories" in caplog.text
 
 
-def test_load_reference_cif_returns_none_for_non_deposited_name(
+def test_load_deposit_returns_none_for_non_deposited_name(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ):
     """A name that is not an RCSB id loads nothing, warns, and never touches the cache."""
     monkeypatch.setattr(guidance_script_utils, "_RCSB_CACHE", tmp_path / "rcsb-cache")
 
-    assert guidance_script_utils._load_reference_cif("example_run") is None
+    assert guidance_script_utils._load_deposit("example_run") is None
     assert "without polymer entity categories" in caplog.text
     assert not (tmp_path / "rcsb-cache").exists()
 
 
-def test_load_reference_cif_caches_atomically(
+def _unreachable_rcsb(path: Path) -> None:
+    """Fail as a fetch from an unreachable RCSB does."""
+    raise RequestError("RCSB is down")
+
+
+def _error_page(path: Path) -> None:
+    """Write an HTML error page where the deposited CIF should be."""
+    path.write_text("<html>Not Found</html>")
+
+
+@pytest.mark.parametrize(
+    ("download", "reason"),
+    [(_unreachable_rcsb, "RCSB is down"), (_error_page, "Expected one CIF block")],
+    ids=["fetch-fails", "corrupt-download"],
+)
+def test_load_deposit_returns_none_when_the_deposit_cannot_be_loaded(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    download,
+    reason,
+):
+    """A failed fetch or an unreadable download warns and loads nothing."""
+
+    def fetch_reference(pdb_id: str, *, format: str, target_path: str) -> str:
+        """Fail or write ``download``'s file, as a faulty RCSB fetch would."""
+        path = Path(target_path) / f"{pdb_id}.{format}"
+        download(path)
+        return str(path)
+
+    monkeypatch.setattr(guidance_script_utils, "fetch", fetch_reference)
+    monkeypatch.setattr(guidance_script_utils, "_RCSB_CACHE", tmp_path / "rcsb-cache")
+
+    assert guidance_script_utils._load_deposit("1vme_0.5occA") is None
+    assert reason in caplog.text
+
+
+def test_load_deposit_raises_unexpected_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """An error that is not a fetch or read failure is a bug, so it is not swallowed."""
+
+    def fetch_reference(pdb_id: str, *, format: str, target_path: str) -> str:
+        """Fail the way a programming error would."""
+        raise TypeError("unexpected")
+
+    monkeypatch.setattr(guidance_script_utils, "fetch", fetch_reference)
+    monkeypatch.setattr(guidance_script_utils, "_RCSB_CACHE", tmp_path / "rcsb-cache")
+
+    with pytest.raises(TypeError, match="unexpected"):
+        guidance_script_utils._load_deposit("1vme_0.5occA")
+
+
+def test_load_deposit_caches_atomically(
     tmp_path: Path, resources_dir: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Populate the shared cache in one move and reuse it without fetching again."""
@@ -160,14 +212,14 @@ def test_load_reference_cif_caches_atomically(
         """
         fetch_calls.append(Path(target_path))
         downloaded = Path(target_path) / f"{pdb_id}.{format}"
-        downloaded.write_bytes((resources_dir / "1vme" / "1vme_final.cif").read_bytes())
+        downloaded.write_bytes((resources_dir / "1vme" / "1vme_rcsb.cif").read_bytes())
         return str(downloaded)
 
     monkeypatch.setattr(guidance_script_utils, "fetch", fetch_reference)
     monkeypatch.setattr(guidance_script_utils, "_RCSB_CACHE", cache_dir)
 
-    first = guidance_script_utils._load_reference_cif("1vme_0.5occA")
-    second = guidance_script_utils._load_reference_cif("1VME_1.0occB")
+    first = guidance_script_utils._load_deposit("1vme_0.5occA")
+    second = guidance_script_utils._load_deposit("1VME_1.0occB")
 
     assert first is not None and second is not None
     assert len(fetch_calls) == 1
@@ -238,8 +290,8 @@ def test_save_everything_writes_validated_metadata_to_all_cifs(
         refined_structure={"asym_unit": atom_array},
         traj_denoised=[coords],
         traj_next_step=[coords],
-        scaler_type="pure_guidance",
         final_state=coords,
+        deposit=guidance_script_utils._load_deposit(args.protein),
     )
 
     assert len(fetch_calls) == 1
@@ -605,7 +657,7 @@ def test_build_step_scaler_takes_pure_guidance_step_size_and_type(
     args.step_scaler_type = step_scaler_type
     args.gradient_normalization = True
 
-    scaler = _build_step_scaler(args, GuidanceType.PURE_GUIDANCE)
+    scaler = _build_step_scaler(args)
 
     assert isinstance(scaler, expected_type)
     assert scaler.step_size == 0.25
@@ -617,9 +669,7 @@ def test_build_step_scaler_none_type_applies_no_guidance():
     args = _guidance_config("boltz2", "pure_guidance")
     args.step_scaler_type = "none"
 
-    # TODO https://github.com/prism-science/sampleworks/issues/590 guidance type
-    #  should already be included in args
-    assert type(_build_step_scaler(args, GuidanceType.PURE_GUIDANCE)) is NoScalingScaler
+    assert type(_build_step_scaler(args)) is NoScalingScaler
 
 
 def test_build_step_scaler_rejects_an_unknown_step_scaler_type():
@@ -628,7 +678,7 @@ def test_build_step_scaler_rejects_an_unknown_step_scaler_type():
     args.step_scaler_type = "realspace"
 
     with pytest.raises(ValueError, match="Invalid step_scaler_type"):
-        _build_step_scaler(args, GuidanceType.PURE_GUIDANCE)
+        _build_step_scaler(args)
 
 
 def test_build_step_scaler_steers_fk_steering_in_noise_space_by_its_guidance_weight():
@@ -636,7 +686,7 @@ def test_build_step_scaler_steers_fk_steering_in_noise_space_by_its_guidance_wei
     args = _guidance_config("boltz2", "fk_steering")
     args.guidance_weight = 0.05
 
-    scaler = _build_step_scaler(args, GuidanceType.FK_STEERING)
+    scaler = _build_step_scaler(args)
 
     assert type(scaler) is NoiseSpaceDPSScaler
     assert scaler.step_size == 0.05
@@ -646,7 +696,7 @@ def test_build_step_scaler_gives_latent_optimization_no_guidance():
     """Latent optimization ignores the step scaler, so it gets one that applies no guidance."""
     args = _guidance_config("protenix", "latent_opt")
 
-    assert type(_build_step_scaler(args, GuidanceType.LATENT_OPT)) is NoScalingScaler
+    assert type(_build_step_scaler(args)) is NoScalingScaler
 
 
 @pytest.mark.parametrize(
@@ -665,4 +715,4 @@ def test_build_step_scaler_raises_for_a_missing_argument(
     delattr(args, attribute)
 
     with pytest.raises(AttributeError, match=attribute):
-        _build_step_scaler(args, guidance_type)
+        _build_step_scaler(args)

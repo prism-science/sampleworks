@@ -3,7 +3,12 @@
 import numpy as np
 import pytest
 from sampleworks.utils.atom_array_utils import make_normalized_atom_id
-from sampleworks.utils.sequence import apply_sequence_override, validate_seq_with_error
+from sampleworks.utils.sequence import (
+    align_sequences,
+    align_to_sequence,
+    apply_sequence_override,
+    validate_seq_with_error,
+)
 
 
 @pytest.mark.parametrize("stacked", [False, True])
@@ -362,11 +367,11 @@ class TestReconcilerWithSequenceOverride:
     def test_normalized_ids_use_seq_idx_over_dense_rank(
         self, structure_5i09_density: dict, seq_5i09_deposited: str
     ):
-        """make_normalized_atom_id should use seq_idx when present, not dense rank.
+        """make_normalized_atom_id numbers residues by seq_idx when it is set.
 
-        This is the core fix for B1: without seq_idx, make_normalized_atom_id
-        assigns dense ranks that diverge between a gapped structure and a
-        full-length model array.
+        Counting observed residues 0, 1, 2, ... ignores unresolved residues, so the numbers
+        drift from a full-length predicted chain; seq_idx gives each residue its position in
+        the deposited sequence instead.
         """
         # Without override: 0-based sequential.
         ids_without = make_normalized_atom_id(structure_5i09_density["asym_unit"])
@@ -388,13 +393,12 @@ class TestReconcilerWithSequenceOverride:
         )
 
         # 5I09 author numbering is deposited position + 1, so each protein atom's
-        # normalized position must be its res_id - 1 (the only chain is index 0).
+        # normalized position must be its res_id - 1.
         protein = arr.seq_idx >= 0
-        expected_ids = [
-            f"0_{res_id - 1}_{atom_name}"
-            for res_id, atom_name in zip(arr.res_id[protein], arr.atom_name[protein])
-        ]
-        np.testing.assert_array_equal(ids_with[protein], expected_ids)
+        protein_ids = ids_with[protein]
+        np.testing.assert_array_equal(protein_ids["chain_id"], arr.chain_id[protein])
+        np.testing.assert_array_equal(protein_ids["seq_pos"], arr.res_id[protein] - 1)
+        np.testing.assert_array_equal(protein_ids["atom_name"], arr.atom_name[protein])
 
     def test_reconciler_pairs_same_residues_after_override(
         self, structure_5i09_density: dict, seq_5i09_deposited: str
@@ -447,8 +451,8 @@ class TestReconcilerWithSequenceOverride:
 
         reconciler = AtomReconciler.from_arrays(model_arr, struct_bb)
 
-        m_idx = reconciler.model_indices.numpy()  # (n_common,)
-        s_idx = reconciler.struct_indices.numpy()  # (n_common,)
+        m_idx = reconciler.predicted_indices.numpy()  # (n_common,)
+        s_idx = reconciler.input_indices.numpy()  # (n_common,)
 
         # Every observed backbone atom has a model counterpart.
         assert len(s_idx) == struct_bb.array_length()
@@ -555,12 +559,75 @@ def test_insertion_codes_next_to_gap():
     np.testing.assert_array_equal(updated.seq_idx, [0, 1, 2, 3, 4, 7, 8])
 
 
+def test_override_warns_when_numbering_does_not_place_a_gap(caplog):
+    """A His-tag renumbered contiguously with one HIS missing fits several ways; say so."""
+    structure = _single_chain_structure([1, 2, 3, 4, 5], "MHHHG")
+
+    apply_sequence_override(structure, "MHHHHG")
+
+    assert "several equally good ways" in caplog.text
+
+
+def _align(observed, sequence, numbers=None, codes=None):
+    """Run align_to_sequence on lists, returning positions as a list and the ambiguity."""
+    positions, ambiguous_at = align_to_sequence(
+        observed,
+        sequence,
+        None if numbers is None else np.array(numbers),
+        None if numbers is None else np.array(codes or [""] * len(numbers)),
+    )
+    return positions.tolist(), ambiguous_at
+
+
+def test_align_to_sequence_without_numbering():
+    """Exact matches, the fewest skipped runs, alternatives, ties where they start, no match."""
+    assert _align(["GLY", "HIS", "SER"], ["GLY", "HIS", "SER"]) == ([0, 1, 2], None)
+    # One run of four skipped positions beats a skipped run at each end.
+    assert _align(["ALA", "ALA"], ["ALA", "GLY", "SER", "ALA", "THR", "ALA"]) == ([0, 5], None)
+    # A microheterogeneity position matches any of its monomers.
+    assert _align(["ASP", "HIS"], ["GLY", {"ASN", "ASP"}, "HIS"]) == ([1, 2], None)
+    # Two of three alanines fit three ways, disagreeing from the first position.
+    assert _align(["ALA", "ALA"], ["ALA"] * 3)[1] == 0
+    # A tie is reported where it starts, not at the start of the sequence.
+    assert _align(["GLY", "HIS", "ALA", "ALA"], ["GLY", "HIS", "ALA", "ALA", "ALA"])[1] == 2
+    assert _align(["GLY"], ["ALA"]) == ([-1], None)
+
+
+def test_align_to_sequence_places_gaps_where_numbering_skips():
+    """Numbering places a gap inside a run of identical residues, where names alone cannot."""
+    # His-tag with residue 4 unresolved: by name alone the gap could be after any HIS.
+    sequence = list("MHHHHHHG")
+    observed, numbers = list("MHHHHHG"), [1, 2, 3, 5, 6, 7, 8]
+
+    assert _align(observed, sequence, numbers) == ([0, 1, 2, 4, 5, 6, 7], None)
+    assert _align(observed, sequence)[1] is not None
+
+
+def test_align_to_sequence_matches_any_observed_monomer():
+    """An observed microheterogeneity residue matches a position holding any of its monomers."""
+    assert _align([{"ALA", "SER"}, "HIS"], ["SER", "HIS"]) == ([0, 1], None)
+    assert _align([{"ALA", "SER"}, "HIS"], ["GLY", "HIS"]) == ([-1, 1], None)
+
+
+def test_align_to_sequence_keeps_mismatches_in_place():
+    """A residue whose name matches nowhere it fits stays unplaced instead of shifting others."""
+    assert _align(list("MKXEF"), list("MKLEF"), [1, 2, 3, 4, 5]) == ([0, 1, -1, 3, 4], None)
+
+
 def test_reset_numbering_raises_malformed():
     """A chain whose numbering restarts raises a malformed error."""
     structure = _single_chain_structure([1, 2, 3, 1, 2], "MKLMK")
 
     with pytest.raises(ValueError, match="malformed"):
         apply_sequence_override(structure, "MKLMK")
+
+
+def test_repeated_residue_number_raises_malformed():
+    """Two residues under one number (ASN/ASP at 3) cannot each take an override position."""
+    structure = _single_chain_structure([1, 2, 3, 3, 4], "MKNDE")
+
+    with pytest.raises(ValueError, match="malformed"):
+        apply_sequence_override(structure, "MKNDEF")
 
 
 def test_ligand_in_protein_chain_raises_malformed(structure_1vme_density_input: dict):
@@ -572,3 +639,19 @@ def test_ligand_in_protein_chain_raises_malformed(structure_1vme_density_input: 
         apply_sequence_override(structure_1vme_density_input, sequence.replace("X", ""))
 
     assert "FEO" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "first,second,expected",
+    [
+        (["SER", "GLY", "HIS"], ["GLY", "HIS", "TRP"], ([-1, 0, 1], False)),
+        (["GLY", "ALA", "HIS"], ["GLY", "SER", "HIS"], ([0, -1, 2], False)),
+        (["GLY", {"ALA", "SER"}], ["GLY", "SER"], ([0, 1], False)),
+        (["GLY", "HIS", "SER"], ["GLY", "HIS", "HIS", "SER"], ([0, 1, 3], True)),
+    ],
+    ids=["extra_residue_on_each_side", "substitution", "either_name", "gap_in_a_repeat"],
+)
+def test_align_sequences_skips_residues_on_either_side(first, second, expected):
+    positions, ambiguous = align_sequences(first, second)
+
+    assert (positions.tolist(), ambiguous) == expected

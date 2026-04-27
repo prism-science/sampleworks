@@ -21,7 +21,7 @@ def main(argv: list[str] | None = None) -> int:
         config.model_name,
         config=config,
     )
-    result = run_guidance(config, config.guidance_type, model_wrapper, device)
+    result = run_guidance(config, model_wrapper, device)
     return result.exit_code
 
 

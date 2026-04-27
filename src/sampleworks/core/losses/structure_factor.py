@@ -476,8 +476,6 @@ class StructureFactorLossFunction:
         elements: Int[torch.Tensor, "batch n_atoms"],
         b_factors: Float[torch.Tensor, "batch n_atoms"],
         occupancies: Float[torch.Tensor, "batch n_atoms"],
-        unique_combinations: torch.Tensor | None = None,
-        inverse_indices: torch.Tensor | None = None,
     ) -> Float[torch.Tensor, ""]:
         """Compute the amplitude loss for the (ensemble of) coordinates.
 
@@ -507,11 +505,6 @@ class StructureFactorLossFunction:
             Per-atom occupancies ``[batch, n_atoms]`` (uniform ``1/batch_size`` from
             the pipeline), written to ``sfc.atom_occ``; the ``1/batch_size`` weighting
             makes the complex ensemble sum the multi-conformer total.
-        unique_combinations
-            Pre-computed unique (element, b_factor) pairs for vmap compatibility.
-            Currently unused.
-        inverse_indices
-            Pre-computed inverse indices for vmap compatibility. Currently unused.
 
         Returns
         -------
