@@ -13,6 +13,7 @@ Code reuse is paramount. Whenever possible, locate high-quality implementations 
 - Keep functions short and single-purpose: a function that needs section comments is typically several functions.
 - Name by role, in full. Model output is `predicted_*` and the input structure is `input_*`; avoid locals like `model`, `names`, `differ`.
 - Define domain jargon on first use (e.g. "microheterogeneity (two residue names at one position)").
+- Write comments and docstrings for a reader who knows structural biology but not this codebase. Describe what the code does in the field's terms (residues, chains, sequence alignment), not in terms the code coins for itself (e.g. "spans", "columns", "registered").
 - Comment any sentinel values (`-1`, past-the-end indices) where they are produced.
 - A helper either always copies or always mutates; it never returns its input on some paths and a copy on others.
 - Don't encode structured data in strings; use tuples or structured arrays. Prefer to return a `NamedTuple` or dataclass rather than a tuple of more than three values.
@@ -237,6 +238,33 @@ def test_boltz_full_inference(boltz_wrapper, features): ...
 ## Adding New Components
 
 Satisfy the matching protocol (see Key Protocols) in `models/`, `core/losses/`, `core/scalers/`, or `core/samplers/`; differentiable physics goes in `core/forward_models/`. Start from the reference implementations above. New loss types also need registering; see "Adding a loss type".
+
+### Per-structure model configuration
+
+`featurize(structure)` takes only the structure dict in every protocol, so settings that vary per input (recycling steps, MSA paths, scratch directories) travel _with the structure_ rather than as extra `featurize` arguments. Each wrapper module follows the same three-part pattern:
+
+1. A `<Model>Config` dataclass whose fields all have defaults (`BoltzConfig`, `ProtenixConfig`, `RF3Config`, `ProtpardelleConfig`).
+2. An annotation function that stores it under a private key and returns a new dict, leaving its argument untouched: `annotate_structure_for_<model>(structure, **settings)` → `{**structure, "_<model>_config": config}`. (Boltz's is named `process_structure_for_boltz`; Boltz1 and Boltz2 share `"_boltz_config"`.)
+3. `featurize()` reads it back, falling back to the defaults and accepting a plain dict so the configuration can come from deserialized input:
+
+```python
+config = structure.get("_rf3_config", RF3Config())
+if isinstance(config, dict):
+    config = RF3Config(**config)
+```
+
+So an unannotated structure featurizes with the defaults, and a caller overrides them by annotating first:
+
+```python
+structure = annotate_structure_for_rf3(structure, recycling_steps=4, msa_path="msas.json")
+features = rf3_wrapper.featurize(structure)
+```
+
+`run_guidance()` is where CLI arguments become annotations. When a new setting is needed:
+
+- If it can differ between structures, add a defaulted field to the model's config dataclass and a matching keyword to its annotation function, then read it from `config` in `featurize()`. Don't add `featurize` parameters or read ad-hoc keys off the structure dict.
+- If it is fixed for the lifetime of the wrapper (checkpoint, device, `MSAManager`), it belongs in the wrapper's `__init__` instead.
+- A new model wrapper gets its own config dataclass, `annotate_structure_for_<model>` function and `"_<model>_config"` key, even if the config starts empty (see `ProtpardelleConfig`).
 
 ## Common Pitfalls
 

@@ -15,6 +15,7 @@ from bioemu2 import Ligand, Protein, System
 from bioemu2.structure.preparation import prepare_sampling_inputs
 from biotite.structure import AtomArrayStack
 from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
+from sampleworks.core.samplers.schedule import NoiseScheduleConfig
 from sampleworks.core.scalers.pure_guidance import PureGuidance
 from sampleworks.core.scalers.step_scalers import DataSpaceDPSScaler
 from sampleworks.models.bioemu2.sampler import bioemu2_edm_settings
@@ -126,7 +127,7 @@ class TestModelAtomArray:
         struct = struct[0] if isinstance(struct, AtomArrayStack) else struct
 
         reconciler = AtomReconciler.from_arrays(model, struct)
-        m_idx, s_idx = reconciler.model_indices.numpy(), reconciler.struct_indices.numpy()
+        m_idx, s_idx = reconciler.predicted_indices.numpy(), reconciler.input_indices.numpy()
         ligand = model.hetero[m_idx]
         assert ligand.any()
         np.testing.assert_array_equal(model.res_id[m_idx][ligand], struct.res_id[s_idx][ligand])
@@ -150,7 +151,7 @@ class TestModelAtomArray:
         )
         reference = processed.input_coords[0]  # (atoms, 3)
         unmatched = np.setdiff1d(
-            np.arange(len(reference)), processed.reconciler.model_indices.numpy()
+            np.arange(len(reference)), processed.reconciler.predicted_indices.numpy()
         )
         assert len(unmatched) > 0
         assert torch.isfinite(reference).all()
@@ -209,7 +210,7 @@ class TestFeaturize:
         model, struct = cond.model_atom_array, cond.true_atom_array
         reconciler = AtomReconciler.from_arrays(model, struct)
 
-        unmatched = np.setdiff1d(np.arange(len(struct)), reconciler.struct_indices.numpy())
+        unmatched = np.setdiff1d(np.arange(len(struct)), reconciler.input_indices.numpy())
         model_res_names = dict(zip(model.res_id.tolist(), model.res_name.tolist()))
         for index in unmatched:
             is_oxt = struct.atom_name[index] == "OXT"
@@ -249,7 +250,7 @@ class TestFeaturize:
         assert expected <= cond.num_atoms <= expected + 1  # +1 for a C-terminal OXT
 
         reconciler = AtomReconciler.from_arrays(cond.model_atom_array, cond.true_atom_array)
-        assert reconciler.n_common > 0.95 * reconciler.n_struct
+        assert reconciler.n_common > 0.95 * reconciler.n_input
 
 
 class TestStep:
@@ -400,10 +401,8 @@ class TestEdmSettings:
         schedule = tiny_bioemu2_wrapper.model.edm_schedule
         settings = bioemu2_edm_settings(tiny_bioemu2_wrapper, mode)
 
-        assert (settings["sigma_data"], settings["s_max"], settings["s_min"]) == (
-            schedule.sigma_data,
-            schedule.sigma_max,
-            schedule.sigma_min,
+        assert settings["schedule"] == NoiseScheduleConfig(
+            sigma_data=schedule.sigma_data, s_max=schedule.sigma_max, s_min=schedule.sigma_min
         )
         assert (settings["gamma_0"], settings["gamma_min"], settings["noise_scale"]) == (
             0.8,

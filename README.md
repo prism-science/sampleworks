@@ -275,7 +275,7 @@ pixi run -e boltz python run_grid_search.py \
 **`proteins.csv` format**
 
 Required columns are `name` and `structure`. The optional `sequence` column overrides the protein sequence, for example for cases where the structure is missing full sequence metadata and there are missing termini or gaps. Give either a one-letter
-amino-acid string or a path to a single-record FASTA file (relative paths resolve against the CSV's directory). Leave it empty to use the structure's own sequence.
+amino-acid string or a path to a FASTA file (relative paths resolve against the CSV's directory). For a structure with several protein chains, give one sequence per chain in the structure's chain order, either as `SEQ:SEQ` or as one FASTA record per chain; ligands keep their definitions from the structure. Leave it empty to use the structure's own sequence.
 
 Every other column is named after a loss option and holds that protein's value for it. The
 default `real_space_density` loss needs `density` (`.ccp4`, `.mrc`, `.map`) and `resolution`:

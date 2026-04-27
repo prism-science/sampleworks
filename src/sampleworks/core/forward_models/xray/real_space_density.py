@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from numpy.typing import NDArray
+from torch.utils.checkpoint import checkpoint
 
 from .real_space_density_deps.ops import CUDA_LOAD_ERROR
 from .real_space_density_deps.ops.dilate_points_cuda import dilate_atom_centric
@@ -893,6 +894,11 @@ class DifferentiableTransformer(torch.nn.Module):
         return grid_coordinates
 
 
+# Each torch-path chunk holds several dense [batch, nearby_voxels, atoms_in_chunk, 3] tensors;
+# 2**22 atom-voxel pairs keeps one chunk's intermediates on the order of 1 GiB.
+MAX_ATOM_VOXEL_PAIRS_PER_CHUNK = 2**22
+
+
 def dilate_points_torch(
     coordinates: torch.Tensor,
     active: torch.Tensor,
@@ -903,10 +909,18 @@ def dilate_points_torch(
     rmax: float,
     grid_to_cartesian: torch.Tensor,
     grid_shape: tuple[int, int, int],
+    max_atom_voxel_pairs: int = MAX_ATOM_VOXEL_PAIRS_PER_CHUNK,
 ) -> torch.Tensor:
     """Point dilation onto a grid across batches.
     Batch could be either many structures for many density maps,
     or an ensemble, where you would need to sum across the output batch to get a map.
+
+    Atoms are dilated in chunks of at most ``max_atom_voxel_pairs`` atom-voxel pairs. When
+    an input needs gradients, each chunk is checkpointed and recomputed in backward, so
+    memory stays bounded by one chunk rather than growing with the atom count. The
+    function supports ``torch.vmap`` over every input but ``active``; inputs under
+    ``torch.vmap`` do not report ``requires_grad``, so there chunks are not checkpointed
+    and the memory autograd holds for backward grows with the atom count.
 
     Parameters
     ----------
@@ -929,6 +943,9 @@ def dilate_points_torch(
         Transformation matrix from grid to Cartesian of shape (3, 3).
     grid_shape: tuple[int, int, int]
         Output grid shape (int, int, int).
+    max_atom_voxel_pairs: int
+        Upper bound on batch_size * n_nearby_voxels * atoms dilated per chunk; a chunk
+        always holds at least one atom.
 
     Returns
     -------
@@ -936,10 +953,7 @@ def dilate_points_torch(
         Density grid (batch_size, *grid_shape).
     """
     device = coordinates.device
-    dtype = coordinates.dtype
     batch_size, n_atoms = coordinates.shape[:2]
-
-    result = torch.zeros((batch_size,) + grid_shape, device=device, dtype=dtype)
 
     max_extents = [int(torch.ceil(lmax[i]).item()) for i in range(3)]
     nearby_grid = torch.stack(
@@ -953,12 +967,81 @@ def dilate_points_torch(
         ),
         dim=-1,
     ).reshape(-1, 3)  # [n_nearby, 3]
+    nearby_grid_abc = nearby_grid[:, [2, 1, 0]]  # [n_nearby, 3]
+
+    atoms_per_chunk = max(1, max_atom_voxel_pairs // (batch_size * nearby_grid.shape[0]))
+    needs_gradients = torch.is_grad_enabled() and any(
+        tensor.requires_grad
+        for tensor in (coordinates, occupancies, radial_densities, grid_to_cartesian)
+    )
+
+    result = torch.zeros((batch_size,) + grid_shape, device=device, dtype=coordinates.dtype)
+    for start in range(0, n_atoms, atoms_per_chunk):
+        chunk = slice(start, start + atoms_per_chunk)
+        chunk_inputs = (
+            coordinates[:, chunk],
+            active[:, chunk],
+            occupancies[:, chunk],
+            radial_densities[:, chunk],
+            nearby_grid_abc,
+            rstep,
+            rmax,
+            grid_to_cartesian,
+            grid_shape,
+        )
+        if needs_gradients:
+            # Recompute the chunk in backward so autograd keeps no per-voxel tensors.
+            chunk_density = checkpoint(_dilate_atom_chunk, *chunk_inputs, use_reentrant=False)
+        else:
+            chunk_density = _dilate_atom_chunk(*chunk_inputs)
+        result = result + chunk_density
+    return result
+
+
+def _dilate_atom_chunk(
+    coordinates: torch.Tensor,
+    active: torch.Tensor,
+    occupancies: torch.Tensor,
+    radial_densities: torch.Tensor,
+    nearby_grid_abc: torch.Tensor,
+    rstep: float,
+    rmax: float,
+    grid_to_cartesian: torch.Tensor,
+    grid_shape: tuple[int, int, int],
+) -> torch.Tensor:
+    """Interpolate the radial densities of a chunk of atoms onto their nearby voxels.
+
+    Parameters
+    ----------
+    coordinates: torch.Tensor
+        Grid coordinates of the chunk's atoms, of shape (batch_size, n_atoms, 3).
+    active: torch.Tensor
+        Boolean mask of active atoms of shape (batch_size, n_atoms).
+    occupancies: torch.Tensor
+        Occupancies of shape (batch_size, n_atoms).
+    radial_densities: torch.Tensor
+        Precomputed radial densities of shape (batch_size, n_atoms, n_radial).
+    nearby_grid_abc: torch.Tensor
+        Integer voxel offsets around an atom in (a, b, c) order, of shape (n_nearby, 3).
+    rstep: float
+        Step size for radial grid.
+    rmax: float
+        Maximum radius for density calculation.
+    grid_to_cartesian: torch.Tensor
+        Transformation matrix from grid to Cartesian of shape (3, 3).
+    grid_shape: tuple[int, int, int]
+        Output grid shape (int, int, int).
+
+    Returns
+    -------
+    torch.Tensor
+        Density grid of the chunk's atoms (batch_size, *grid_shape).
+    """
+    device = coordinates.device
+    batch_size, n_atoms = coordinates.shape[:2]
 
     # Compute the a, b, c distance from the grid voxels for each atom
     grid_difference = coordinates - torch.floor(coordinates)  # [batch_size, n_atoms, 3]
-
-    # Transform grid to a, b, c for subtraction
-    nearby_grid_abc = nearby_grid[:, [2, 1, 0]]  # [n_nearby, 3]
 
     # Compute the distance from the grid for each atom to each nearby grid point
     # in the offset
@@ -994,7 +1077,7 @@ def dilate_points_torch(
 
     # Calculate grid points to interpolate onto
     n_active_atoms = len(active_mask)
-    n_nearby = nearby_grid.shape[0]
+    n_nearby = nearby_grid_abc.shape[0]
     coord_floored = torch.floor(coordinates[batch_idx, atom_idx]).int()  # [n_active_atoms, 3]
 
     # modulo for periodic boundary
@@ -1042,10 +1125,9 @@ def dilate_points_torch(
         + grid_points_flat[:, 0]  # x
     ).long()  # [n_active_atoms * n_nearby]
 
-    # Out of place so torch.vmap can batch the source while result stays unbatched.
-    return (
-        result.view(-1).scatter_add(0, flat_grid_indices, densities).view_as(result)
-    )  # Add onto [batch_size * grid_z * grid_y * grid_x] shape
+    # Out of place so torch.vmap can batch the source while the zero grid stays unbatched.
+    density = torch.zeros((batch_size,) + grid_shape, device=device, dtype=coordinates.dtype)
+    return density.view(-1).scatter_add(0, flat_grid_indices, densities).view_as(density)
 
 
 def scattering_integrand(

@@ -13,6 +13,9 @@ This file consolidates tests for:
 Tests are organized from fast (mock-based) to slow (real wrappers).
 """
 
+import math
+from dataclasses import replace
+
 import pytest
 import torch
 from sampleworks.core.losses.protocol import LossInputs
@@ -635,7 +638,7 @@ class TestTrajectoryScalerMatrixMock:
         handed to ``prepare`` carry the model atom array as their topology.
         """
 
-        struct_atom_array = build_test_atom_array(
+        input_atom_array = build_test_atom_array(
             chain_ids=["A"] * 5,
             res_ids=[1, 2, 3, 4, 5],
             atom_names=["N", "CA", "C", "O", "CB"],
@@ -643,13 +646,13 @@ class TestTrajectoryScalerMatrixMock:
         case = MismatchCase(
             id="model_drops_one_atom",
             description="Model represents four of the structure's five atoms.",
-            model_atom_array=struct_atom_array[:4].copy(),
-            struct_atom_array=struct_atom_array,
+            predicted_atom_array=input_atom_array[:4].copy(),
+            input_atom_array=input_atom_array,
             expected_n_common=4,
             expected_has_mismatch=True,
         )
         wrapper = MismatchCaseWrapper(case, device=device)
-        structure = {"asym_unit": struct_atom_array, "metadata": {"id": "mismatch"}}
+        structure = {"asym_unit": input_atom_array, "metadata": {"id": "mismatch"}}
 
         loss_function = MockPreparableLossFunction()
         sampler = AF3EDMSampler(
@@ -676,7 +679,7 @@ class TestTrajectoryScalerMatrixMock:
         (prepared,) = loss_function.prepared_inputs
         assert prepared.atom_array is not None
         assert prepared.atom_array.array_length() == case.n_model
-        assert list(prepared.atom_array.atom_name) == list(case.model_atom_array.atom_name)
+        assert list(prepared.atom_array.atom_name) == list(case.predicted_atom_array.atom_name)
         assert loss_function.calls > 0
         assert loss_function.calls_before_prepare == 0
 
@@ -772,45 +775,107 @@ class TestPartialDiffusion:
 
 
 class TestGuidanceEffectivenessMock:
-    """Guidance should produce valid output with mock components."""
+    """Guidance should switch on when configured, with mock components."""
+
+    # Loss each scaler reports for a step taken before guidance starts: PureGuidance has none,
+    # FK steering reports 0.0 until its first guided step.
+    UNGUIDED_STEP_LOSS = {
+        TrajectoryScalers.PURE_GUIDANCE: None,
+        TrajectoryScalers.FK_STEERING: 0.0,
+    }
+
+    @staticmethod
+    def _sample_with_guidance_from(
+        trajectory_scaler_type: TrajectoryScalers,
+        guidance_t_start: float,
+        num_steps: int,
+        device: torch.device,
+        structure: dict,
+    ) -> GuidanceOutput:
+        """Run a seeded trajectory that switches guidance on at ``guidance_t_start``.
+
+        Parameters
+        ----------
+        trajectory_scaler_type
+            Trajectory scaler to run.
+        guidance_t_start
+            Fraction of ``num_steps`` after which guidance is applied.
+        num_steps
+            Number of denoising steps.
+        device
+            Device for the sampler and the mock model.
+        structure
+            Input structure dictionary.
+
+        Returns
+        -------
+        GuidanceOutput
+            Output of a two-particle, single-member run guided by a quadratic loss.
+        """
+        num_atoms = len(structure["asym_unit"])
+        # A non-zero denoised prediction gives the quadratic loss a non-zero value and gradient.
+        wrapper = MockFlowModelWrapper(
+            num_atoms=num_atoms, device=device, target=torch.full((1, num_atoms, 3), 2.0)
+        )
+        torch.manual_seed(0)
+        sampler = AF3EDMSampler(
+            EDMSamplerConfig(device=device, augmentation=False, align_to_input=False)
+        )
+        trajectory_scaler = create_trajectory_scaler_from_type(
+            trajectory_scaler_type,
+            ensemble_size=1,
+            num_steps=num_steps,
+            guidance_t_start=guidance_t_start,
+        )
+        return trajectory_scaler.sample(
+            structure=structure,
+            model=wrapper,
+            sampler=sampler,
+            step_scaler=DataSpaceDPSScaler(step_size=0.1),
+            loss_function=MockGradientLossFunction(),
+            num_particles=2,
+        )
 
     @pytest.mark.parametrize(
         "trajectory_scaler_type", get_all_trajectory_scalers(), ids=lambda s: s.value
     )
-    def test_trajectory_scaler_guidance_completes(
+    def test_guidance_starts_at_guidance_t_start(
         self,
         trajectory_scaler_type: TrajectoryScalers,
         device: torch.device,
-        mock_wrapper: MockFlowModelWrapper,
         mock_structure: dict,
-        mock_step_scaler: MockStepScaler,
-        mock_gradient_loss: MockGradientLossFunction,
     ):
-        """All trajectory scalers complete with valid output."""
-        sampler = AF3EDMSampler(
-            EDMSamplerConfig(device=device, augmentation=False, align_to_input=False)
+        """Steps before ``guidance_t_start`` match an unguided run; later steps are guided."""
+        num_steps = 4
+        first_guided_step = 2
+
+        half_guided = self._sample_with_guidance_from(
+            trajectory_scaler_type, 0.5, num_steps, device, mock_structure
+        )
+        # guidance_t_start = 1.0 puts the first guided step past the end of the trajectory.
+        unguided = self._sample_with_guidance_from(
+            trajectory_scaler_type, 1.0, num_steps, device, mock_structure
         )
 
-        trajectory_scaler = create_trajectory_scaler_from_type(
-            trajectory_scaler_type,
-            ensemble_size=1,
-            num_steps=5,
-        )
+        assert half_guided.losses is not None and unguided.losses is not None
+        unguided_step_loss = self.UNGUIDED_STEP_LOSS[trajectory_scaler_type]
+        assert half_guided.losses[:first_guided_step] == [unguided_step_loss] * first_guided_step
+        assert unguided.losses == [unguided_step_loss] * num_steps
+        guided_losses = half_guided.losses[first_guided_step:]
+        assert len(guided_losses) == num_steps - first_guided_step
+        assert all(loss is not None and loss > 0.0 for loss in guided_losses)
 
-        result = trajectory_scaler.sample(
-            structure=mock_structure,
-            model=mock_wrapper,
-            sampler=sampler,
-            step_scaler=mock_step_scaler,
-            loss_function=mock_gradient_loss,
-            num_particles=2,
+        assert half_guided.trajectory is not None and unguided.trajectory is not None
+        # (steps, ensemble, atoms, 3), or (steps, particles, ensemble, atoms, 3) for FK.
+        half_guided_states = torch.stack([torch.as_tensor(s) for s in half_guided.trajectory])
+        unguided_states = torch.stack([torch.as_tensor(s) for s in unguided.trajectory])
+        step_matches_unguided = (
+            torch.isclose(half_guided_states, unguided_states).flatten(1).all(dim=1)
         )
-
-        assert isinstance(result, GuidanceOutput)
-        assert result.final_state.shape == (1, mock_wrapper.num_atoms, 3)
-        assert torch.isfinite(torch.as_tensor(result.final_state)).all()
-        assert result.trajectory is not None
-        assert len(result.trajectory) == 5
+        assert torch.equal(
+            half_guided_states[:first_guided_step], unguided_states[:first_guided_step]
+        )
+        assert not step_matches_unguided[first_guided_step:].any()
 
 
 class TestNumericalStabilityMock:
@@ -945,6 +1010,82 @@ class TestEDMScheduleBehavior:
         for i in range(10):
             context = edm_sampler.get_context_for_step(i, schedule)
             assert context.dt is not None and context.dt < 0, f"dt should be negative at step {i}"
+
+
+class TestGuidanceWeighting:
+    """Guidance is the ramped DPS likelihood score, capped at the model's own step."""
+
+    num_steps = 200
+    step_size = 0.1
+
+    @staticmethod
+    def _sampler(device: torch.device, **config) -> AF3EDMSampler:
+        return AF3EDMSampler(
+            EDMSamplerConfig(device=device, augmentation=False, align_to_input=False, **config)
+        )
+
+    def _guidance_shift(
+        self, sampler: AF3EDMSampler, step_index: int, excess: float, device: torch.device
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Take one noise-free step from the same state with and without guidance.
+
+        ``excess`` sets the uncapped likelihood term ``t_hat * w * g`` to that multiple of the
+        model score's norm. Returns the guidance shift (guided - unguided next state), the
+        unguided model step, and the unit guidance direction, each ``[batch, atoms, 3]``.
+        """
+        schedule = sampler.compute_schedule(self.num_steps)
+        context = replace(
+            sampler.get_context_for_step(step_index, schedule),
+            noise_scale=torch.tensor(0.0),
+        )
+        t_hat = float(context.t_effective)
+        unit = torch.randn(2, 30, 3, device=device, dtype=torch.float64)
+        unit = unit - unit.mean(dim=-2, keepdim=True)
+        state = t_hat * unit  # the mock predicts x0_hat = 0, so delta == unit
+        g_hat = torch.randn_like(unit)
+        g_hat = g_hat / torch.linalg.norm(g_hat, dim=(-1, -2), keepdim=True)
+        guidance = (
+            g_hat
+            * excess
+            * torch.linalg.norm(unit, dim=(-1, -2), keepdim=True)
+            / (self.step_size * t_hat)
+        )
+
+        wrapper = MockFlowModelWrapper(num_atoms=30, device=device)
+        features = wrapper.featurize({})
+        scaler = MockStepScaler(guidance_tensor=guidance, step_size=self.step_size)
+        unguided = sampler.step(state, wrapper, context, features=features).state
+        guided = sampler.step(state, wrapper, context, scaler=scaler, features=features).state
+        return guided - unguided, unguided - state, g_hat
+
+    @pytest.mark.parametrize("step_index", [0, 100, 199])
+    @pytest.mark.parametrize("excess", [0.5, 10.0], ids=["below_cap", "capped"])
+    def test_shift_is_ramped_and_capped_at_model_step(
+        self, device: torch.device, step_index: int, excess: float
+    ):
+        """Shift is -cos^2(pi/2 * (N-i)/N) * min(excess, 1) * ||model step|| along g."""
+        shift, model_step, g_hat = self._guidance_shift(
+            self._sampler(device), step_index, excess, device
+        )
+        ramp = math.cos(0.5 * math.pi * (self.num_steps - step_index) / self.num_steps) ** 2
+        model_step_norm = torch.linalg.norm(model_step, dim=(-1, -2), keepdim=True)
+        expected = -ramp * min(excess, 1.0) * model_step_norm * g_hat
+        torch.testing.assert_close(
+            shift, expected, rtol=1e-5, atol=1e-9 * model_step_norm.max().item()
+        )
+
+    def test_custom_ramp_replaces_cosine(self, device: torch.device):
+        """A constant ramp applies full guidance at the first step, where cosine gives none."""
+        sampler = self._sampler(device, guidance_ramp=torch.ones_like)
+        shift, model_step, g_hat = self._guidance_shift(sampler, 0, 0.5, device)
+        model_step_norm = torch.linalg.norm(model_step, dim=(-1, -2), keepdim=True)
+        torch.testing.assert_close(shift, -0.5 * model_step_norm * g_hat)
+
+    def test_out_of_range_ramp_raises(self, device: torch.device):
+        """A ramp weight above 1 is rejected instead of letting guidance outrun the model."""
+        sampler = self._sampler(device, guidance_ramp=lambda tau: 2 * torch.ones_like(tau))
+        with pytest.raises(ValueError, match="guidance_ramp"):
+            self._guidance_shift(sampler, 100, 0.5, device)
 
 
 class TestOutputShapeConsistency:

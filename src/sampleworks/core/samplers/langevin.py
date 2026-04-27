@@ -35,9 +35,9 @@ with (``x_sigma = x_0 + sigma * eps``):
   Chroma's whitened backbone coordinates have unit scale; all-atom coordinates
   do not.
 - Time is discretized on the Karras sigma schedule by default (as in
-  ``AF3EDMSampler``). ``p=None`` instead gives the geometric VE discretization
-  of Song et al. (uniform in ``log sigma``), the analogue of Chroma's uniform
-  grid in ``t``.
+  ``AF3EDMSampler``). ``NoiseScheduleConfig(p=None)`` instead gives the
+  geometric VE discretization of Song et al. (uniform in ``log sigma``), the
+  analogue of Chroma's uniform grid in ``t``.
 
 Not reproduced:
 
@@ -51,18 +51,17 @@ Not reproduced:
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping
-from dataclasses import dataclass, fields
-from typing import Any, Literal, TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import Literal, TYPE_CHECKING
 
 import einx
 import torch
 from jaxtyping import Float
 from loguru import logger
 
-from sampleworks.core.samplers.edm import EDMSamplerConfig
 from sampleworks.core.samplers.protocol import SamplerSchedule, SamplerStepOutput, StepParams
+from sampleworks.core.samplers.schedule import NoiseScheduleConfig
 from sampleworks.models.protocol import FlowModelWrapper, GenerativeModelInput
 from sampleworks.utils.frame_transforms import (
     align_to_reference_frame,
@@ -74,8 +73,6 @@ from sampleworks.utils.frame_transforms import (
 from sampleworks.utils.framework_utils import match_batch
 
 
-_SCHEDULE_FIELDS = ("sigma_data", "s_max", "s_min", "p")
-
 if TYPE_CHECKING:
     from sampleworks.core.scalers.protocol import StepScalerProtocol
 
@@ -86,7 +83,7 @@ class LangevinSchedule(SamplerSchedule):
 
     A discretization of the same VE noise process the AF3-family wrappers were
     trained on: the Karras/EDM sigma(t) formula of ``EDMSchedule`` by default,
-    or geometric spacing in sigma (see ``LangevinSamplerConfig.p``).  Unlike
+    or geometric spacing in sigma (see ``NoiseScheduleConfig.p``).  Unlike
     ``EDMSchedule``, there is no
     ``gamma``/churn re-noising step: stochasticity comes entirely from the
     Langevin diffusion term added in ``AnnealedLangevinSampler.step()``, so
@@ -112,12 +109,8 @@ class LangevinSchedule(SamplerSchedule):
 class LangevinSamplerConfig:
     r"""Config for the Annealed Langevin SDE sampler.
 
-    The ``sigma_data``/``s_max``/``s_min``/``p`` schedule parameters have the
-    same meaning as in ``EDMSamplerConfig``. ``sigma_data`` should match what
-    the model was trained on; ``s_max``/``s_min``/``p`` only choose how the
-    same VE noise process is discretized. The defaults are the EDM values;
-    :meth:`with_edm_schedule` and :meth:`with_geometric_schedule` build a
-    config on either discretization explicitly.
+    The default ``schedule`` is the Karras schedule of ``AF3EDMSampler``;
+    ``NoiseScheduleConfig(p=None)`` gives geometric spacing instead.
 
     The Langevin defaults (``inverse_temperature=6``, ``langevin_factor=3``,
     untempered guidance) are the best settings found in a density-guidance
@@ -125,19 +118,8 @@ class LangevinSamplerConfig:
 
     Parameters
     ----------
-    sigma_data
-        Assumed standard deviation of the training data distribution. See
-        ``EDMSamplerConfig.sigma_data``.
-    s_max
-        Upper bound of the noise schedule (starting noise level).
-    s_min
-        Lower bound of the noise schedule (ending noise level).
-    p
-        Exponent (``rho`` in Karras et al.) controlling schedule spacing. The
-        default 7.0 matches ``AF3EDMSampler``. ``None`` (or ``math.inf``)
-        gives geometric spacing, ``sigma = sigma_data * exp(lerp(log s_max,
-        log s_min, t))``: uniform in ``log sigma``, the VE discretization of
-        Song et al. and the ``rho -> inf`` limit of the Karras formula.
+    schedule
+        Noise levels and spacing of the schedule; see :class:`NoiseScheduleConfig`.
     inverse_temperature
         Scales the score's contribution to the drift term (Chroma's
         parameter of the same name). Above 1.0 biases sampling toward
@@ -190,10 +172,7 @@ class LangevinSamplerConfig:
         Torch device for schedule tensor allocation.
     """
 
-    sigma_data: float = 16.0
-    s_max: float = 160.0
-    s_min: float = 4e-4
-    p: float | None = 7.0
+    schedule: NoiseScheduleConfig = field(default_factory=NoiseScheduleConfig)
     inverse_temperature: float = 6.0
     langevin_factor: float = 3.0
     sde_mode: Literal["reverse_sde", "langevin", "ode"] = "reverse_sde"
@@ -206,14 +185,6 @@ class LangevinSamplerConfig:
     device: str | torch.device = "cpu"
 
     def __post_init__(self) -> None:
-        if self.p is not None and self.p <= 0:
-            raise ValueError(f"p ({self.p}) must be positive, or None for geometric spacing")
-        if self.s_max <= 0 or self.s_min <= 0:
-            raise ValueError(f"s_max ({self.s_max}) and s_min ({self.s_min}) must be positive")
-        if self.s_min >= self.s_max:
-            raise ValueError(f"s_min ({self.s_min}) must be less than s_max ({self.s_max})")
-        if self.sigma_data <= 0:
-            raise ValueError(f"sigma_data ({self.sigma_data}) must be positive")
         if self.inverse_temperature <= 0:
             raise ValueError(f"inverse_temperature ({self.inverse_temperature}) must be positive")
         if self.langevin_factor < 0:
@@ -235,50 +206,6 @@ class LangevinSamplerConfig:
                 "integrate_func='heun' requires align_to_input=True so both drift "
                 "evaluations share the input frame"
             )
-
-    @classmethod
-    def with_edm_schedule(cls, **overrides: Any) -> LangevinSamplerConfig:
-        """Build a config on the Karras schedule of ``AF3EDMSampler``.
-
-        The schedule fields (``sigma_data``, ``s_max``, ``s_min``, ``p``) are
-        read from the ``EDMSamplerConfig`` defaults, so the two samplers share
-        one source of truth.
-
-        Parameters
-        ----------
-        **overrides
-            Any ``LangevinSamplerConfig`` field, including the schedule fields.
-
-        Returns
-        -------
-        LangevinSamplerConfig
-            Config on the EDM discretization unless ``overrides`` change it.
-        """
-        edm_schedule = {
-            field.name: field.default
-            for field in fields(EDMSamplerConfig)
-            if field.name in _SCHEDULE_FIELDS
-        }
-        return cls(**{**edm_schedule, **overrides})
-
-    @classmethod
-    def with_geometric_schedule(cls, **overrides: Any) -> LangevinSamplerConfig:
-        """Build a config on the geometric (Song et al. VE) discretization.
-
-        Keeps the EDM ``sigma_data``/``s_max``/``s_min`` endpoints and sets
-        ``p=None``, so sigma is uniform in ``log sigma`` between them.
-
-        Parameters
-        ----------
-        **overrides
-            Any ``LangevinSamplerConfig`` field, e.g. other endpoints.
-
-        Returns
-        -------
-        LangevinSamplerConfig
-            Config on the geometric discretization unless ``overrides`` set ``p``.
-        """
-        return cls.with_edm_schedule(**{"p": None, **overrides})
 
 
 class AnnealedLangevinSampler:
@@ -344,25 +271,11 @@ class AnnealedLangevinSampler:
             )
 
     def compute_schedule(self, num_steps: int) -> LangevinSchedule:
-        r"""Compute the sigma-based annealing schedule.
+        """Compute the sigma-based annealing schedule.
 
-        With a finite ``p``, uses the same formula as
-        ``AF3EDMSampler.compute_schedule()``:
-
-        .. math::
-
-            \sigma = \sigma_{\text{data}} \cdot
-            \left(s_{\max}^{1/p} + t \cdot (s_{\min}^{1/p} - s_{\max}^{1/p})\right)^p
-
-        With ``p`` None or infinite, uses its ``p -> inf`` limit, geometric
-        spacing (the VE discretization of Song et al.):
-
-        .. math::
-
-            \sigma = \sigma_{\text{data}} \cdot
-            \exp\left((1 - t) \log s_{\max} + t \log s_{\min}\right)
-
-        Either way there is no churn/re-noising step (``t_hat == sigma_tm``), since
+        Noise levels come from ``config.schedule`` (see
+        :meth:`NoiseScheduleConfig.sigma`), with ``t`` going from 0 to 1 over
+        ``num_steps``. There is no churn/re-noising step (``t_hat == sigma_tm``), since
         stochasticity here comes from the Langevin diffusion term in
         ``step()`` rather than from re-noising between steps.
 
@@ -378,24 +291,7 @@ class AnnealedLangevinSampler:
             ``dt`` arrays.
         """
         t_values = torch.linspace(0, 1, num_steps + 1, device=self.config.device)
-        p = self.config.p
-
-        if p is None or math.isinf(p):
-            log_sigmas = torch.lerp(
-                torch.full_like(t_values, math.log(self.config.s_max)),
-                torch.full_like(t_values, math.log(self.config.s_min)),
-                t_values,
-            )
-            sigmas = self.config.sigma_data * torch.exp(log_sigmas)
-        else:
-            sigmas = (
-                self.config.sigma_data
-                * (
-                    self.config.s_max ** (1 / p)
-                    + t_values * (self.config.s_min ** (1 / p) - self.config.s_max ** (1 / p))
-                )
-                ** p
-            )
+        sigmas = self.config.schedule.sigma(t_values)
 
         sigma_tm = sigmas[:-1]
         sigma_t = sigmas[1:]
@@ -471,7 +367,7 @@ class AnnealedLangevinSampler:
             ``(c, n)``: the update is ``dt * c * direction`` plus
             ``sqrt(n) * sqrt(2 sigma |dt|) * z`` of noise.
         """
-        sigma_data_sq = self.config.sigma_data**2
+        sigma_data_sq = self.config.schedule.sigma_data**2
         kappa = (
             inverse_temperature
             * (sigma**2 + sigma_data_sq)

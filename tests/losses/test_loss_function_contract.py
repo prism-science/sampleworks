@@ -25,6 +25,12 @@ Each loss runs against its own self-consistent data bundle (see `loss_case`): th
 real_space case uses the recentered carved 1vme cif + `.ccp4` map; diffuse_bragg scores
 Bragg alone here, since its diffuse term is an ensemble property that is identically
 zero for the single conformer the contract scores.
+
+`TestLossEnsemble` covers what only distinct conformations can show (a diffuse term
+needs them to be nonzero). It runs over `_ENSEMBLE_BUNDLES`, a separate registry because
+an ensemble needs a target generated from that ensemble: each bundle is a loss prepared
+on such a target plus the conformations it was generated from (see `ensemble_case`).
+diffuse_bragg registers its two-configuration 1vme ensemble once per Bragg weight.
 """
 
 from dataclasses import dataclass
@@ -110,6 +116,81 @@ def loss_case(request, device: torch.device) -> LossCase:
 
     loss_function = request.getfixturevalue(loss_fixture)
     return LossCase(request.param, loss_function, coords, elements, b_factors, occupancies)
+
+
+@dataclass(frozen=True)
+class EnsembleLossCase:
+    """A loss whose target was generated from a multi-conformation ensemble, and that ensemble."""
+
+    name: str
+    loss_function: LossFunctionProtocol
+    coords: torch.Tensor  # [n_conformations, N, 3], the ensemble the target came from
+    elements: torch.Tensor  # [N]
+    b_factors: torch.Tensor  # [N]
+    occupancies: torch.Tensor  # [N], per-atom occupancy of one conformation
+
+    def score(self, coords: torch.Tensor) -> torch.Tensor:
+        """Score ``[n_conformations, N, 3]`` coordinates at the ``1/n`` occupancy the loop uses."""
+        n_conformations = coords.shape[0]
+        return self.loss_function(
+            coordinates=coords,
+            elements=self.elements.unsqueeze(0).expand(n_conformations, -1),
+            b_factors=self.b_factors.unsqueeze(0).expand(n_conformations, -1),
+            occupancies=(self.occupancies / n_conformations)
+            .unsqueeze(0)
+            .expand(n_conformations, -1),
+        )
+
+    def direction(self, seed: int) -> torch.Tensor:
+        """A seeded standard-normal displacement shaped like ``coords``."""
+        generator = torch.Generator().manual_seed(seed)
+        return torch.randn(self.coords.shape, generator=generator).to(self.coords.device)
+
+
+# Per-loss multi-conformation bundles: (coordinates fixture returning ([n_conformations,
+# N, 3] coords, topology), loss fixture prepared on a target generated from those coords).
+_ENSEMBLE_BUNDLES = {
+    "diffuse_bragg-bragg": (
+        "ensemble_coordinates_1vme_diffuse_bragg",
+        "loss_function_1vme_diffuse_bragg_ensemble_bragg",
+    ),
+    "diffuse_bragg-diffuse": (
+        "ensemble_coordinates_1vme_diffuse_bragg",
+        "loss_function_1vme_diffuse_bragg_ensemble_diffuse",
+    ),
+    "diffuse_bragg-mixed": (
+        "ensemble_coordinates_1vme_diffuse_bragg",
+        "loss_function_1vme_diffuse_bragg_ensemble_mixed",
+    ),
+}
+_GPU_ENSEMBLE_BUNDLES: set[str] = set()
+
+# Absolute loss bar for the TRUE ensemble, per bundle. diffuse_bragg measured on 1vme
+# (2 configurations, 86499 reflections): 2e-14 pure Bragg, 6e-10 pure diffuse. Diffuse is
+# looser because its anisotropic component survives subtracting a large radial background,
+# which amplifies the relative error of the intensities it came from.
+_ENSEMBLE_THRESHOLDS = {
+    "diffuse_bragg-bragg": 1e-6,
+    "diffuse_bragg-diffuse": 1e-6,
+    "diffuse_bragg-mixed": 1e-6,
+}
+
+
+@pytest.fixture(
+    params=[
+        pytest.param(name, marks=[pytest.mark.gpu] if name in _GPU_ENSEMBLE_BUNDLES else [])
+        for name in _ENSEMBLE_BUNDLES
+    ]
+)
+def ensemble_case(request) -> EnsembleLossCase:
+    """Resolve one bundle's (loss, ensemble coords, per-atom inputs), on the coords' device."""
+    coords_fixture, loss_fixture = _ENSEMBLE_BUNDLES[request.param]
+    coords, atom_array = request.getfixturevalue(coords_fixture)
+    elements, b_factors, occupancies = build_loss_input_tensors_without_coords(
+        atom_array, coords.device
+    )
+    loss_function = request.getfixturevalue(loss_fixture)
+    return EnsembleLossCase(request.param, loss_function, coords, elements, b_factors, occupancies)
 
 
 class TestLossFunctionInterface:
@@ -328,3 +409,67 @@ class TestLossEdgeCases:
         coords_far = loss_case.coords + torch.randn_like(loss_case.coords) * 1e9
         loss = loss_case.loss_function(**loss_case.batch(1, coords=coords_far))
         assert torch.isfinite(loss)
+
+
+class TestLossEnsemble:
+    """Behaviour that only an ensemble of distinct conformations can show."""
+
+    def test_recovers_the_ensemble_it_was_generated_from(self, ensemble_case):
+        """The ensemble the target came from scores below the per-bundle bar."""
+        loss = ensemble_case.score(ensemble_case.coords)
+        assert torch.isfinite(loss)
+        assert loss.item() < _ENSEMBLE_THRESHOLDS[ensemble_case.name]
+
+    def test_loss_increases_with_ensemble_displacement(self, ensemble_case):
+        """Monotonic in how far the ensemble has been moved from the truth.
+
+        The displacement is one random direction scaled up, so the sequence probes one
+        path away from the minimum. A loss dominated by its own numerical noise fails
+        here while still passing the recovery test.
+        """
+        direction = ensemble_case.direction(seed=0)
+        losses = [
+            ensemble_case.score(ensemble_case.coords + amplitude * direction).item()
+            for amplitude in (0.0, 0.02, 0.05, 0.1, 0.2)
+        ]
+
+        assert all(torch.isfinite(torch.tensor(losses)))
+        assert losses == sorted(losses), f"loss is not monotonic in displacement: {losses}"
+        assert losses[-1] > 1e3 * max(losses[0], 1e-12), (
+            f"a 0.2 A displacement barely moved the loss: {losses}"
+        )
+
+    def test_every_conformation_receives_a_gradient(self, ensemble_case):
+        """backward() puts finite, non-zero gradients on every conformation.
+
+        Checked per conformation because a collapsed ensemble axis (only the first
+        member receiving a gradient) still produces a plausible scalar loss.
+        """
+        displaced = ensemble_case.coords + 0.1 * ensemble_case.direction(seed=1)
+        coords_opt = displaced.clone().requires_grad_(True)
+        ensemble_case.score(coords_opt).backward()
+
+        assert coords_opt.grad is not None
+        assert torch.isfinite(coords_opt.grad).all()
+        for i in range(coords_opt.shape[0]):
+            assert coords_opt.grad[i].abs().max() > 0, f"conformation {i} received no gradient"
+
+    def test_gradient_points_downhill(self, ensemble_case):
+        """A small step along -grad lowers the loss.
+
+        Terms that exist only for an ensemble (a diffuse term) get no sign check from
+        the single-conformer gradient-descent test; a wrong sign would drive guidance
+        away from the data while every magnitude check passed.
+        """
+        displaced = ensemble_case.coords + 0.1 * ensemble_case.direction(seed=2)
+        coords_opt = displaced.clone().requires_grad_(True)
+        loss = ensemble_case.score(coords_opt)
+        loss.backward()
+        assert coords_opt.grad is not None
+
+        step = 1e-3 / coords_opt.grad.abs().max().item()
+        lowered = ensemble_case.score(displaced - step * coords_opt.grad)
+
+        assert lowered.item() < loss.item(), (
+            f"stepping along -grad raised the loss: {loss.item():.6e} -> {lowered.item():.6e}"
+        )

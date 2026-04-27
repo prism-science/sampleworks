@@ -69,6 +69,33 @@ class TestSequenceColumn:
             ProteinInput.from_csv(csv_path)
 
 
+class TestDepositCifColumn:
+    def test_is_optional(self, inputs_dir):
+        csv_path = write_csv(inputs_dir, HEADER, "1ABC,s.cif,d.ccp4,1.8")
+
+        (protein,) = ProteinInput.from_csv(csv_path)
+
+        assert protein.deposit_cif is None
+
+    def test_resolves_against_the_csv_directory(self, inputs_dir):
+        (inputs_dir / "deposit.cif").write_text("")
+        csv_path = write_csv(
+            inputs_dir, f"{HEADER},deposit_cif", "1ABC,s.cif,d.ccp4,1.8,deposit.cif"
+        )
+
+        (protein,) = ProteinInput.from_csv(csv_path)
+
+        assert protein.deposit_cif == inputs_dir / "deposit.cif"
+
+    def test_rejects_a_missing_file(self, inputs_dir):
+        csv_path = write_csv(
+            inputs_dir, f"{HEADER},deposit_cif", "1ABC,s.cif,d.ccp4,1.8,absent.cif"
+        )
+
+        with pytest.raises(FileNotFoundError, match="Deposit CIF does not exist"):
+            ProteinInput.from_csv(csv_path)
+
+
 class TestLossOptionColumns:
     def test_density_columns_become_typed_loss_options(self, inputs_dir):
         csv_path = write_csv(inputs_dir, HEADER, "1ABC,s.cif,d.ccp4,1.8")

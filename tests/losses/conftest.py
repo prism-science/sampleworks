@@ -400,6 +400,42 @@ def diffuse_bragg_losses(
 
 
 @pytest.fixture(scope="session")
+def ensemble_coordinates_1vme_diffuse_bragg(
+    diffuse_bragg_ensemble: tuple[AtomArray, np.ndarray],
+) -> tuple[Float[Tensor, "n_conformations n_atoms 3"], AtomArray]:
+    """The two-configuration coordinates and shared topology, for ``_ENSEMBLE_BUNDLES``.
+
+    On CPU, where ``diffuse_bragg_losses`` are prepared.
+    """
+    atom_array, coords = diffuse_bragg_ensemble
+    return torch.as_tensor(coords, dtype=torch.float32), atom_array
+
+
+@pytest.fixture(scope="session")
+def loss_function_1vme_diffuse_bragg_ensemble_bragg(
+    diffuse_bragg_losses: dict[float, "DiffuseBraggLossFunction"],
+) -> "DiffuseBraggLossFunction":
+    """Pure-Bragg loss on the ensemble target (``bragg_weight=1.0``)."""
+    return diffuse_bragg_losses[1.0]
+
+
+@pytest.fixture(scope="session")
+def loss_function_1vme_diffuse_bragg_ensemble_diffuse(
+    diffuse_bragg_losses: dict[float, "DiffuseBraggLossFunction"],
+) -> "DiffuseBraggLossFunction":
+    """Pure-diffuse loss on the ensemble target (``bragg_weight=0.0``)."""
+    return diffuse_bragg_losses[0.0]
+
+
+@pytest.fixture(scope="session")
+def loss_function_1vme_diffuse_bragg_ensemble_mixed(
+    diffuse_bragg_losses: dict[float, "DiffuseBraggLossFunction"],
+) -> "DiffuseBraggLossFunction":
+    """Equal Bragg/diffuse mixture on the ensemble targets (``bragg_weight=0.5``)."""
+    return diffuse_bragg_losses[0.5]
+
+
+@pytest.fixture(scope="session")
 def test_coordinates_1vme_diffuse_bragg(
     diffuse_bragg_single_model: AtomArray, device: torch.device
 ) -> tuple[Float[Tensor, "n_atoms 3"], AtomArray]:
@@ -417,8 +453,8 @@ def loss_function_1vme_diffuse_bragg(
     """Pure-Bragg loss on the single-model target, prepared on ``device``.
 
     Bragg alone because the contract scores one conformer, for which the diffuse
-    term is identically zero; the ensemble-valued behaviour is tested in
-    ``test_diffuse_bragg_loss.py``. Prepared through ``prepare_loss_if_needed``,
+    term is identically zero; the ensemble-valued behaviour is tested by the
+    contract's ``TestLossEnsemble``. Prepared through ``prepare_loss_if_needed``,
     the hook the scalers use, so the hook's signature is exercised too.
     """
     from sampleworks.core.losses.diffuse_bragg import DiffuseBraggLossFunction

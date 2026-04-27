@@ -10,6 +10,7 @@ from biotite.structure import AtomArray
 from jaxtyping import Float
 from sampleworks.models.protocol import GenerativeModelInput
 from sampleworks.utils.framework_utils import Array
+from sampleworks.utils.torch_utils import gaussian_prior
 from torch import Tensor
 
 
@@ -43,9 +44,9 @@ class MismatchCase:
         Stable identifier used in pytest parametrization IDs.
     description
         Human-readable scenario description.
-    model_atom_array
+    predicted_atom_array
         Atom array in model space.
-    struct_atom_array
+    input_atom_array
         Atom array in structure/input space.
     expected_n_common
         Expected common-atom count after reconciliation.
@@ -55,28 +56,28 @@ class MismatchCase:
 
     id: str
     description: str
-    model_atom_array: AtomArray
-    struct_atom_array: AtomArray
+    predicted_atom_array: AtomArray
+    input_atom_array: AtomArray
     expected_n_common: int
     expected_has_mismatch: bool
 
     @property
     def n_model(self) -> int:
         """int: Number of model-space atoms."""
-        return len(self.model_atom_array)
+        return len(self.predicted_atom_array)
 
     @property
     def n_struct(self) -> int:
         """int: Number of structure-space atoms."""
-        return len(self.struct_atom_array)
+        return len(self.input_atom_array)
 
     def clone(self) -> MismatchCase:
         """Return a copy with independent atom arrays."""
         return MismatchCase(
             id=self.id,
             description=self.description,
-            model_atom_array=self.model_atom_array.copy(),
-            struct_atom_array=self.struct_atom_array.copy(),
+            predicted_atom_array=self.predicted_atom_array.copy(),
+            input_atom_array=self.input_atom_array.copy(),
             expected_n_common=self.expected_n_common,
             expected_has_mismatch=self.expected_has_mismatch,
         )
@@ -175,14 +176,14 @@ class MismatchCaseWrapper:
     ):
         self.case = case
         self.device = device or torch.device("cpu")
-        self.n_model = len(case.model_atom_array)
+        self.n_model = len(case.predicted_atom_array)
 
     def featurize(self, structure: dict, **kwargs: Any) -> GenerativeModelInput[MockConditioning]:
         """Return conditioning with case model atom array for reconciliation."""
         conditioning = MockConditioning(
             sequence_length=10,
             num_atoms=self.n_model,
-            model_atom_array=self.case.model_atom_array,
+            model_atom_array=self.case.predicted_atom_array,
         )
         return GenerativeModelInput(conditioning=conditioning)
 
@@ -209,3 +210,53 @@ class MismatchCaseWrapper:
         if shape is not None:
             return torch.randn(batch_size, *shape, device=self.device)
         return torch.randn(batch_size, self.n_model, 3, device=self.device)
+
+
+class GaussianDenoiserWrapper:
+    r"""Exact FlowModelWrapper for the Gaussian data distribution N(0, sigma_data^2 I).
+
+    For this target and the VE noising ``x_t = x_0 + sigma * eps``, the posterior mean is
+    known in closed form, :math:`\hat{x}_0 = \sigma_\text{data}^2 /
+    (\sigma_\text{data}^2 + \sigma^2) \cdot x_t`, so the statistics a sampler should produce
+    can be predicted analytically.
+
+    Parameters
+    ----------
+    sigma_data
+        Standard deviation of every coordinate of the target distribution.
+    num_atoms
+        Number of atoms per sample.
+    device
+        PyTorch device for tensors.
+    """
+
+    def __init__(self, sigma_data: float, num_atoms: int, device: torch.device | None = None):
+        self.sigma_data = sigma_data
+        self.num_atoms = num_atoms
+        self.device = device or torch.device("cpu")
+
+    def featurize(self, structure: dict, **kwargs: Any) -> GenerativeModelInput[MockConditioning]:
+        """Return features carrying only the atom count; the target ignores the structure."""
+        conditioning = MockConditioning(sequence_length=0, num_atoms=self.num_atoms)
+        return GenerativeModelInput(conditioning=conditioning)
+
+    def step(
+        self,
+        x_t: Float[Tensor, "*batch atoms 3"],
+        t: Float[Array, "*batch"],
+        *,
+        features: GenerativeModelInput[MockConditioning] | None = None,
+    ) -> Float[Tensor, "*batch atoms 3"]:
+        """Return the optimal denoised prediction for noise level ``t``."""
+        noise_variance = torch.as_tensor(t, device=x_t.device) ** 2
+        return self.sigma_data**2 / (self.sigma_data**2 + noise_variance) * x_t
+
+    def initialize_from_prior(
+        self,
+        batch_size: int,
+        features: GenerativeModelInput[MockConditioning] | None = None,
+        *,
+        shape: tuple[int, ...] | None = None,
+    ) -> Float[Tensor, "batch atoms 3"]:
+        """Draw standard Gaussian coordinates, as the real wrappers do."""
+        return gaussian_prior(batch_size, self.num_atoms, self.device, shape=shape)

@@ -246,6 +246,7 @@ def build_args_for_process_pool(
         num_diffusion_steps=args.num_diffusion_steps,
         loss_config=job.loss_config,
         sequence=job.sequence,
+        deposit_cif=job.deposit_cif,
     )
     # given model_type and guidance_type, the GuidanceConfig class will set itself up
     # with defaults for remaining required args, but we want to set them further here.
@@ -690,6 +691,7 @@ def generate_jobs(args: argparse.Namespace) -> list[JobConfig]:
                                     output_dir=output_dir,
                                     log_path=log_path,
                                     sequence=protein.sequence,
+                                    deposit_cif=protein.deposit_cif,
                                 )
                             )
             else:
@@ -717,6 +719,7 @@ def generate_jobs(args: argparse.Namespace) -> list[JobConfig]:
                                 output_dir=output_dir,
                                 log_path=log_path,
                                 sequence=protein.sequence,
+                                deposit_cif=protein.deposit_cif,
                             )
                         )
 
@@ -824,8 +827,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--proteins",
         required=True,
-        help="CSV file with name and structure columns, an optional sequence column, and a "
-        "column per loss option the proteins differ in (e.g. density,resolution or mtzfile)",
+        help="CSV file with name and structure columns, optional sequence and deposit_cif "
+        "columns, and a column per loss option the proteins differ in (e.g. density,resolution "
+        "or mtzfile)",
     )
 
     # Model arguments

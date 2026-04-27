@@ -1,9 +1,17 @@
 """Tests for applying sequence conditioning to parsed structures."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
-from sampleworks.utils.atom_array_utils import make_normalized_atom_id
-from sampleworks.utils.sequence import apply_sequence_override, validate_seq_with_error
+from sampleworks.utils.atom_array_utils import make_normalized_atom_id, parse_structure
+from sampleworks.utils.sequence import (
+    align_sequences,
+    align_to_sequence,
+    apply_sequence_override,
+    infer_sequence_override,
+    validate_seq_with_error,
+)
 
 
 @pytest.mark.parametrize("stacked", [False, True])
@@ -104,12 +112,6 @@ def test_override_requires_matching_canonical_residue(res_name, sequence):
 def test_empty_sequence_preserves_structure_identity(structure_6b8x: dict):
     """Empty sequence values should retain the existing structure unchanged."""
     assert apply_sequence_override(structure_6b8x, "   ") is structure_6b8x
-
-
-def test_multichain_sequence_override_raises(structure_1vme: dict):
-    """Multi-chain structures should reject a single-string override."""
-    with pytest.raises(ValueError, match="single-protein-chain"):
-        apply_sequence_override(structure_1vme, "ACDE")
 
 
 def test_longer_override_accepted_with_seq_idx(structure_6b8x: dict):
@@ -362,11 +364,11 @@ class TestReconcilerWithSequenceOverride:
     def test_normalized_ids_use_seq_idx_over_dense_rank(
         self, structure_5i09_density: dict, seq_5i09_deposited: str
     ):
-        """make_normalized_atom_id should use seq_idx when present, not dense rank.
+        """make_normalized_atom_id numbers residues by seq_idx when it is set.
 
-        This is the core fix for B1: without seq_idx, make_normalized_atom_id
-        assigns dense ranks that diverge between a gapped structure and a
-        full-length model array.
+        Counting observed residues 0, 1, 2, ... ignores unresolved residues, so the numbers
+        drift from a full-length predicted chain; seq_idx gives each residue its position in
+        the deposited sequence instead.
         """
         # Without override: 0-based sequential.
         ids_without = make_normalized_atom_id(structure_5i09_density["asym_unit"])
@@ -388,13 +390,12 @@ class TestReconcilerWithSequenceOverride:
         )
 
         # 5I09 author numbering is deposited position + 1, so each protein atom's
-        # normalized position must be its res_id - 1 (the only chain is index 0).
+        # normalized position must be its res_id - 1.
         protein = arr.seq_idx >= 0
-        expected_ids = [
-            f"0_{res_id - 1}_{atom_name}"
-            for res_id, atom_name in zip(arr.res_id[protein], arr.atom_name[protein])
-        ]
-        np.testing.assert_array_equal(ids_with[protein], expected_ids)
+        protein_ids = ids_with[protein]
+        np.testing.assert_array_equal(protein_ids["chain_id"], arr.chain_id[protein])
+        np.testing.assert_array_equal(protein_ids["seq_pos"], arr.res_id[protein] - 1)
+        np.testing.assert_array_equal(protein_ids["atom_name"], arr.atom_name[protein])
 
     def test_reconciler_pairs_same_residues_after_override(
         self, structure_5i09_density: dict, seq_5i09_deposited: str
@@ -407,55 +408,96 @@ class TestReconcilerWithSequenceOverride:
         numbering is deposited position + 1, so model residue k must pair with
         structure residue k.
         """
-        import biotite.structure as struc
-        from biotite.sequence import ProteinSequence
-        from sampleworks.utils.atom_reconciler import AtomReconciler
-        from sampleworks.utils.structure_utils import get_asym_unit_from_structure
-
-        chain_info = structure_5i09_density["chain_info"]
-        protein_chain = next(
-            cid for cid, info in chain_info.items() if info["chain_type"].is_protein()
-        )
-
-        # Apply override with the real 386-residue deposited sequence.
         struct_overridden = apply_sequence_override(structure_5i09_density, seq_5i09_deposited)
-        struct_arr = get_asym_unit_from_structure(struct_overridden, atom_array_index=0)
 
-        # Build a "model" array: dense residue numbering 1..386,
-        # with just backbone atoms (N, CA, C, O) per residue.
-        backbone = ["N", "CA", "C", "O"]
-        n_res = len(seq_5i09_deposited)
-        n_atoms = n_res * len(backbone)
-        model_arr = struc.AtomArray(n_atoms)
-        atom_names, res_ids, res_names, chain_ids = [], [], [], []
-        for i, aa in enumerate(seq_5i09_deposited):
-            for atom in backbone:
-                atom_names.append(atom)
-                res_ids.append(i + 1)
-                res_names.append(ProteinSequence.convert_letter_1to3(aa))
-                chain_ids.append(protein_chain)
-        model_arr.atom_name = np.array(atom_names)
-        model_arr.res_id = np.array(res_ids, dtype=np.int64)
-        model_arr.res_name = np.array(res_names)
-        model_arr.chain_id = np.array(chain_ids)
-        model_arr.coord = np.zeros((n_atoms, 3), dtype=np.float32)
+        _assert_backbone_pairs_same_residues(struct_overridden, seq_5i09_deposited)
 
-        # Filter struct to backbone only for comparison.
-        backbone_mask = np.isin(struct_arr.atom_name, backbone)
-        chain_mask = np.asarray(struct_arr.chain_id) == protein_chain
-        struct_bb = struct_arr[backbone_mask & chain_mask]
 
-        reconciler = AtomReconciler.from_arrays(model_arr, struct_bb)
+_BACKBONE_ATOM_NAMES = ("N", "CA", "C", "O")
 
-        m_idx = reconciler.model_indices.numpy()  # (n_common,)
-        s_idx = reconciler.struct_indices.numpy()  # (n_common,)
 
-        # Every observed backbone atom has a model counterpart.
-        assert len(s_idx) == struct_bb.array_length()
-        # Each pair is the same residue and atom.
-        np.testing.assert_array_equal(model_arr.res_id[m_idx], struct_bb.res_id[s_idx])
-        np.testing.assert_array_equal(model_arr.res_name[m_idx], struct_bb.res_name[s_idx])
-        np.testing.assert_array_equal(model_arr.atom_name[m_idx], struct_bb.atom_name[s_idx])
+def _backbone_model_array(sequence: str, chain_id: str):
+    """Backbone atoms of ``sequence`` numbered 1..N on one chain, as a model wrapper emits them."""
+    from biotite.sequence import ProteinSequence
+    from biotite.structure import AtomArray
+
+    n_atoms_per_residue = len(_BACKBONE_ATOM_NAMES)
+    model_arr = AtomArray(len(sequence) * n_atoms_per_residue)
+    model_arr.atom_name = np.tile(_BACKBONE_ATOM_NAMES, len(sequence))
+    model_arr.res_id = np.repeat(np.arange(1, len(sequence) + 1), n_atoms_per_residue)
+    model_arr.res_name = np.repeat(
+        [ProteinSequence.convert_letter_1to3(aa) for aa in sequence], n_atoms_per_residue
+    )
+    model_arr.chain_id[:] = chain_id
+    return model_arr
+
+
+def _assert_backbone_pairs_same_residues(structure: dict, model_sequence: str) -> None:
+    """Assert the reconciler pairs every input backbone atom with the same model residue.
+
+    The model array is ``model_sequence`` numbered from 1, so it is the same residue
+    as an input residue with the same ``res_id`` when the input is numbered by
+    sequence position (``label_seq_id`` or 5I09's author numbering).
+    """
+    from sampleworks.utils.atom_reconciler import AtomReconciler
+    from sampleworks.utils.structure_utils import get_asym_unit_from_structure
+
+    protein_chain = next(
+        cid for cid, info in structure["chain_info"].items() if info["chain_type"].is_protein()
+    )
+    struct_arr = get_asym_unit_from_structure(structure, atom_array_index=0)
+    struct_bb = struct_arr[
+        np.isin(struct_arr.atom_name, _BACKBONE_ATOM_NAMES)
+        & (np.asarray(struct_arr.chain_id) == protein_chain)
+    ]
+    model_arr = _backbone_model_array(model_sequence, protein_chain)
+
+    reconciler = AtomReconciler.from_arrays(model_arr, struct_bb)
+    m_idx = reconciler.predicted_indices.numpy()  # (n_common,)
+    s_idx = reconciler.input_indices.numpy()  # (n_common,)
+
+    assert len(s_idx) == struct_bb.array_length()
+    np.testing.assert_array_equal(model_arr.res_id[m_idx], struct_bb.res_id[s_idx])
+    np.testing.assert_array_equal(model_arr.res_name[m_idx], struct_bb.res_name[s_idx])
+    np.testing.assert_array_equal(model_arr.atom_name[m_idx], struct_bb.atom_name[s_idx])
+
+
+# ---------------------------------------------------------------------------
+# Inferring the override from the sequence the structure file states (entity_poly)
+# ---------------------------------------------------------------------------
+
+
+def test_inferred_override_pairs_model_with_unresolved_residues(resources_dir: Path):
+    """Without --sequence, a CIF's entity_poly sequence still pairs atoms across its gaps.
+
+    Loaded as guidance loads it, without atomworks adding the unresolved residues back.
+    """
+    structure = parse_structure(resources_dir / "5I09" / "5I09_prediction.cif")
+    stated_sequence = structure["chain_info"]["A"]["processed_entity_canonical_sequence"]
+
+    overridden = apply_sequence_override(structure, infer_sequence_override(structure))
+
+    _assert_backbone_pairs_same_residues(overridden, stated_sequence)
+
+
+def test_no_inferred_override_without_entity_poly(structure_5i09_density: dict):
+    """A sequence read off the coordinates cannot reveal unresolved residues."""
+    assert infer_sequence_override(structure_5i09_density) is None
+
+
+def test_no_inferred_override_without_unresolved_residues():
+    """A stated sequence fully covered by resolved residues needs no override."""
+    structure = _single_chain_structure([1, 2, 3], "MKL")
+    structure["chain_info"]["A"]["unprocessed_entity_canonical_sequence"] = "MKL"
+
+    assert infer_sequence_override(structure) is None
+
+
+def test_no_inferred_override_for_multiple_protein_chains(resources_dir: Path):
+    """Inference covers single-protein-chain structures only, so multi-chain inputs get none."""
+    structure = parse_structure(resources_dir / "1vme" / "1vme_final.cif")
+
+    assert infer_sequence_override(structure) is None
 
 
 # ---------------------------------------------------------------------------
@@ -555,12 +597,75 @@ def test_insertion_codes_next_to_gap():
     np.testing.assert_array_equal(updated.seq_idx, [0, 1, 2, 3, 4, 7, 8])
 
 
+def test_override_warns_when_numbering_does_not_place_a_gap(caplog):
+    """A His-tag renumbered contiguously with one HIS missing fits several ways; say so."""
+    structure = _single_chain_structure([1, 2, 3, 4, 5], "MHHHG")
+
+    apply_sequence_override(structure, "MHHHHG")
+
+    assert "several equally good ways" in caplog.text
+
+
+def _align(observed, sequence, numbers=None, codes=None):
+    """Run align_to_sequence on lists, returning positions as a list and the ambiguity."""
+    positions, ambiguous_at = align_to_sequence(
+        observed,
+        sequence,
+        None if numbers is None else np.array(numbers),
+        None if numbers is None else np.array(codes or [""] * len(numbers)),
+    )
+    return positions.tolist(), ambiguous_at
+
+
+def test_align_to_sequence_without_numbering():
+    """Exact matches, the fewest skipped runs, alternatives, ties where they start, no match."""
+    assert _align(["GLY", "HIS", "SER"], ["GLY", "HIS", "SER"]) == ([0, 1, 2], None)
+    # One run of four skipped positions beats a skipped run at each end.
+    assert _align(["ALA", "ALA"], ["ALA", "GLY", "SER", "ALA", "THR", "ALA"]) == ([0, 5], None)
+    # A microheterogeneity position matches any of its monomers.
+    assert _align(["ASP", "HIS"], ["GLY", {"ASN", "ASP"}, "HIS"]) == ([1, 2], None)
+    # Two of three alanines fit three ways, disagreeing from the first position.
+    assert _align(["ALA", "ALA"], ["ALA"] * 3)[1] == 0
+    # A tie is reported where it starts, not at the start of the sequence.
+    assert _align(["GLY", "HIS", "ALA", "ALA"], ["GLY", "HIS", "ALA", "ALA", "ALA"])[1] == 2
+    assert _align(["GLY"], ["ALA"]) == ([-1], None)
+
+
+def test_align_to_sequence_places_gaps_where_numbering_skips():
+    """Numbering places a gap inside a run of identical residues, where names alone cannot."""
+    # His-tag with residue 4 unresolved: by name alone the gap could be after any HIS.
+    sequence = list("MHHHHHHG")
+    observed, numbers = list("MHHHHHG"), [1, 2, 3, 5, 6, 7, 8]
+
+    assert _align(observed, sequence, numbers) == ([0, 1, 2, 4, 5, 6, 7], None)
+    assert _align(observed, sequence)[1] is not None
+
+
+def test_align_to_sequence_matches_any_observed_monomer():
+    """An observed microheterogeneity residue matches a position holding any of its monomers."""
+    assert _align([{"ALA", "SER"}, "HIS"], ["SER", "HIS"]) == ([0, 1], None)
+    assert _align([{"ALA", "SER"}, "HIS"], ["GLY", "HIS"]) == ([-1, 1], None)
+
+
+def test_align_to_sequence_keeps_mismatches_in_place():
+    """A residue whose name matches nowhere it fits stays unplaced instead of shifting others."""
+    assert _align(list("MKXEF"), list("MKLEF"), [1, 2, 3, 4, 5]) == ([0, 1, -1, 3, 4], None)
+
+
 def test_reset_numbering_raises_malformed():
     """A chain whose numbering restarts raises a malformed error."""
     structure = _single_chain_structure([1, 2, 3, 1, 2], "MKLMK")
 
     with pytest.raises(ValueError, match="malformed"):
         apply_sequence_override(structure, "MKLMK")
+
+
+def test_repeated_residue_number_raises_malformed():
+    """Two residues under one number (ASN/ASP at 3) cannot each take an override position."""
+    structure = _single_chain_structure([1, 2, 3, 3, 4], "MKNDE")
+
+    with pytest.raises(ValueError, match="malformed"):
+        apply_sequence_override(structure, "MKNDEF")
 
 
 def test_ligand_in_protein_chain_raises_malformed(structure_1vme_density_input: dict):
@@ -572,3 +677,111 @@ def test_ligand_in_protein_chain_raises_malformed(structure_1vme_density_input: 
         apply_sequence_override(structure_1vme_density_input, sequence.replace("X", ""))
 
     assert "FEO" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "first,second,expected",
+    [
+        (["SER", "GLY", "HIS"], ["GLY", "HIS", "TRP"], ([-1, 0, 1], False)),
+        (["GLY", "ALA", "HIS"], ["GLY", "SER", "HIS"], ([0, -1, 2], False)),
+        (["GLY", {"ALA", "SER"}], ["GLY", "SER"], ([0, 1], False)),
+        (["GLY", "HIS", "SER"], ["GLY", "HIS", "HIS", "SER"], ([0, 1, 3], True)),
+    ],
+    ids=["extra_residue_on_each_side", "substitution", "either_name", "gap_in_a_repeat"],
+)
+def test_align_sequences_skips_residues_on_either_side(first, second, expected):
+    positions, ambiguous = align_sequences(first, second)
+
+    assert (positions.tolist(), ambiguous) == expected
+
+
+# ---------------------------------------------------------------------------
+# Multi-chain overrides: one ":"-separated sequence per protein chain
+# ---------------------------------------------------------------------------
+
+
+def _two_chain_structure(chain_a: str, chain_b: str) -> dict:
+    """One CA atom per residue on protein chains A and B, numbered from 1."""
+    from atomworks.enums import ChainType
+    from biotite.sequence import ProteinSequence
+    from biotite.structure import AtomArray
+
+    one_letter = chain_a + chain_b
+    atoms = AtomArray(len(one_letter))
+    atoms.chain_id = np.array(["A"] * len(chain_a) + ["B"] * len(chain_b))
+    atoms.res_id = np.array([*range(1, len(chain_a) + 1), *range(1, len(chain_b) + 1)])
+    atoms.res_name = np.array([ProteinSequence.convert_letter_1to3(c) for c in one_letter])
+    atoms.atom_name[:] = "CA"
+    return {
+        "asym_unit": atoms,
+        "chain_info": {
+            chain_id: {
+                "chain_type": ChainType.POLYPEPTIDE_L,
+                "processed_entity_canonical_sequence": sequence,
+            }
+            for chain_id, sequence in (("A", chain_a), ("B", chain_b))
+        },
+    }
+
+
+def test_multichain_override_assigns_sequences_in_chain_order():
+    """The n-th ``:``-separated sequence overrides the n-th protein chain."""
+    structure = _two_chain_structure("MKL", "WYF")
+
+    updated = apply_sequence_override(structure, "MKLG:WYFHH")
+
+    chain_info = updated["chain_info"]
+    assert chain_info["A"]["processed_entity_canonical_sequence"] == "MKLG"
+    assert chain_info["B"]["processed_entity_canonical_sequence"] == "WYFHH"
+    np.testing.assert_array_equal(updated["asym_unit"].seq_idx, [0, 1, 2, 0, 1, 2])
+
+
+def test_multichain_override_in_wrong_chain_order_raises():
+    """Sequences that do not match their chain's residues fail to align."""
+    with pytest.raises(ValueError, match="could not be aligned"):
+        apply_sequence_override(_two_chain_structure("MKL", "WYF"), "WYFG:MKLG")
+
+
+@pytest.mark.parametrize("sequence", ["ACDE", "ACDE:ACDE:ACDE"])
+def test_multichain_override_with_wrong_chain_count_raises(structure_1vme: dict, sequence: str):
+    """The number of sequences must equal the number of protein chains."""
+    with pytest.raises(ValueError, match="2 protein chains"):
+        apply_sequence_override(structure_1vme, sequence)
+
+
+def test_multichain_override_with_ligands(structure_1vme: dict):
+    """Both 1VME protein chains align to their overrides; ligand chains are left alone."""
+    from atomworks.enums import ChainType
+    from atomworks.io.utils.sequence import get_1_from_3_letter_code
+
+    chain_info = structure_1vme["chain_info"]
+    protein_chain_ids = [cid for cid, info in chain_info.items() if info["chain_type"].is_protein()]
+    overrides = {
+        "A": chain_info["A"]["processed_entity_canonical_sequence"] + "GGG",
+        "B": chain_info["B"]["processed_entity_canonical_sequence"] + "AAAA",
+    }
+    assert protein_chain_ids == ["A", "B"]
+
+    updated = apply_sequence_override(structure_1vme, f"{overrides['A']}:{overrides['B']}")
+
+    arr = updated["asym_unit"]
+    is_protein = np.isin(arr.chain_id, protein_chain_ids)
+    assert np.all(arr.seq_idx[~is_protein] == -1)
+    for chain_id, override in overrides.items():
+        assert updated["chain_info"][chain_id]["processed_entity_canonical_sequence"] == override
+        chain = arr[..., arr.chain_id == chain_id]
+        observed = [
+            get_1_from_3_letter_code(n, ChainType.POLYPEPTIDE_L, use_closest_canonical=True)
+            for n in chain.res_name
+        ]
+        assert [override[i] for i in chain.seq_idx] == observed
+    for chain_id, info in chain_info.items():
+        if not info["chain_type"].is_protein():
+            assert updated["chain_info"][chain_id] == info
+
+
+@pytest.mark.parametrize("sequence", ["ACD::EFG", "ACD:", ":ACD"])
+def test_override_with_empty_chain_sequence_raises(sequence: str):
+    """An empty chain between separators is rejected rather than silently skipped."""
+    with pytest.raises(ValueError, match="empty"):
+        apply_sequence_override(_two_chain_structure("ACD", "EFG"), sequence)

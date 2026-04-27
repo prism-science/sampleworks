@@ -302,6 +302,7 @@ class GuidanceConfig:
     # in from the density fields below, which is how grid search builds configs.
     loss_config: dict[str, Any] = field(default_factory=dict)
     sequence: str | None = None
+    deposit_cif: Path | str | None = None
 
     # DO NOT remove the **kwargs, it is for compatibility with argparse.
     def add_argument(self, name: str, default: Any = None, **kwargs):
@@ -427,6 +428,7 @@ class GuidanceConfig:
             alignment_reverse_diffusion=args.alignment_reverse_diffusion,
             loss_config=loss_config.to_mapping(),
             sequence=resolve_sequence_arg(args.sequence),
+            deposit_cif=args.deposit_cif,
         )
 
         # __post_init__ already set defaults for model/guidance-specific
@@ -623,6 +625,9 @@ class GuidanceConfig:
             None if self.density is None else _remap_container_path(str(self.density))
         )
         output["structure"] = _remap_container_path(str(self.structure))
+        output["deposit_cif"] = (
+            None if self.deposit_cif is None else _remap_container_path(str(self.deposit_cif))
+        )
         output["output_dir"] = _remap_container_path(str(self.output_dir))
         output["log_path"] = _remap_container_path(str(self.log_path))
         output["loss_type"] = self.loss_type
@@ -808,10 +813,21 @@ def add_generic_args(parser: argparse.ArgumentParser | GuidanceConfig):
         "--sequence",
         type=str,
         default=None,
-        help="Reference sequence, e.g. the deposited PDB sequence (amino-acid string or path "
-        "to a single-record .fasta/.fa/.faa/.fas file). The structure predictor receives this "
-        "sequence, so unmodeled regions are generated. Only single-protein-chain structures are "
-        "supported currently.",
+        help="Reference sequence, e.g. the deposited PDB sequence: an amino-acid string, or a "
+        "path to a .fasta/.fa/.faa/.fas file. For several protein chains give one sequence per "
+        "chain, in the structure's chain order: SEQ:SEQ, or one FASTA record per chain. Ligands "
+        "keep their definitions from the structure. The structure predictor receives this "
+        "sequence, so unmodeled regions are generated. Defaults to the sequence stated in the "
+        "structure file's entity_poly category when it has unresolved residues.",
+    )
+    parser.add_argument(
+        "--deposit-cif",
+        type=str,
+        default=None,
+        help="mmCIF whose chain, residue and entity ids we want to use to write our output. "
+        "It needs the entity, entity_poly, "
+        "entity_poly_seq, struct_asym and pdbx_poly_seq_scheme categories. Defaults to the "
+        "RCSB entry named by --protein.",
     )
     parser.add_argument("--output-dir", type=str, default="output", help="Output directory")
     parser.add_argument(
@@ -1116,6 +1132,7 @@ class JobConfig:
     output_dir: str
     log_path: str
     sequence: str | None = None
+    deposit_cif: Path | None = None
 
 
 @dataclass
