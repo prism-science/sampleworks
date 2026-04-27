@@ -14,6 +14,7 @@ from sampleworks.utils.atom_array_utils import (
     make_normalized_atom_id,
     remove_atoms_with_any_nan_coords,
     remove_hydrogens,
+    residue_index,
     select_altloc,
 )
 
@@ -570,6 +571,14 @@ class TestFilterFunctionsIntegration:
         assert f_b.array_length() == 2447
 
 
+def test_residue_index_follows_first_appearance_not_numbering():
+    """Descending insertion codes and a lower number later keep the order atoms appear in."""
+    res_id = np.array([1, 1, 1, 1, 0, 0])
+    ins_code = np.array(["B", "B", "A", "", "", ""])
+
+    np.testing.assert_array_equal(residue_index(res_id, ins_code), [0, 0, 1, 2, 3, 3])
+
+
 class TestNormalizedAtomId:
     """Tests for make_normalized_atom_id."""
 
@@ -608,11 +617,28 @@ class TestNormalizedAtomId:
 
         chain_a = arr[arr.chain_id == "A"]
         chain_b = arr[arr.chain_id == "B"]
+        chain_b.chain_id[:] = "A"  # ids carry the chain name
 
-        ids_a = sorted(make_normalized_atom_id(chain_a))
-        ids_b = sorted(make_normalized_atom_id(chain_b))
+        ids_a = np.sort(make_normalized_atom_id(chain_a))
+        ids_b = np.sort(make_normalized_atom_id(chain_b))
 
         np.testing.assert_array_equal(ids_a, ids_b)
+
+    def test_insertion_codes_are_positions_and_repeats_are_counted(self):
+        """Residues 1, 1A, 2 take three positions; a repeated atom (altloc) is occurrence 1."""
+        arr = AtomArray(4)
+        arr.chain_id[:] = "A"
+        arr.res_id[:] = [1, 1, 2, 2]
+        arr.ins_code[:] = ["", "A", "", ""]
+        arr.res_name[:] = "ALA"
+        arr.atom_name[:] = "CA"
+
+        assert make_normalized_atom_id(arr).tolist() == [
+            ("A", 0, "CA", 0),
+            ("A", 1, "CA", 0),
+            ("A", 2, "CA", 0),
+            ("A", 2, "CA", 1),
+        ]
 
     def test_6b8x_unique_ids_per_atom(self, structure_6b8x):
         """Every atom in 6b8x gets a unique normalized ID (single-chain, no duplication)."""
@@ -622,7 +648,7 @@ class TestNormalizedAtomId:
 
         ids = make_normalized_atom_id(arr)
 
-        assert len(ids) == len(set(ids))
+        assert len(np.unique(ids)) == len(ids)
 
 
 class TestFilterToCommonAtomsNormalized:
@@ -675,6 +701,7 @@ class TestFilterToCommonAtomsNormalized:
 
         chain_a = arr[arr.chain_id == "A"]
         chain_b = arr[arr.chain_id == "B"]
+        chain_b.chain_id[:] = "A"  # chains pair by name
 
         (fa, fb) = filter_to_common_atoms(chain_a, chain_b, normalize_ids=True)
         fa_arr = cast(AtomArray, fa[0])

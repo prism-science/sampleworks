@@ -26,8 +26,6 @@ class QuadraticLoss:
         elements: torch.Tensor | None = None,
         b_factors: torch.Tensor | None = None,
         occupancies: torch.Tensor | None = None,
-        unique_combinations: torch.Tensor | None = None,
-        inverse_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return 0.5 * self.scale * (coordinates**2).sum()
 

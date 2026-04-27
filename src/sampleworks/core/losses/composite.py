@@ -77,8 +77,6 @@ class CompositeLoss:
         elements: Int[torch.Tensor, "batch n_atoms"],
         b_factors: Float[torch.Tensor, "batch n_atoms"],
         occupancies: Float[torch.Tensor, "batch n_atoms"],
-        unique_combinations: torch.Tensor | None = None,
-        inverse_indices: torch.Tensor | None = None,
     ) -> Float[torch.Tensor, ""]:
         """Compute the weighted sum of the component losses.
 
@@ -92,14 +90,6 @@ class CompositeLoss:
             Per-atom B-factors, shape [batch, n_atoms].
         occupancies
             Per-atom occupancies, shape [batch, n_atoms].
-        unique_combinations
-            Pre-computed unique (element, b_factor) pairs, forwarded verbatim.
-            Losses that do not use them ignore them; they exist so a caller can
-            hoist that deduplication out of a vmap, where dynamic shapes are not
-            allowed.
-        inverse_indices
-            Indices reconstructing the per-atom values from
-            ``unique_combinations``, forwarded verbatim.
 
         Returns
         -------
@@ -108,14 +98,7 @@ class CompositeLoss:
         """
         total = torch.zeros((), dtype=coordinates.dtype, device=coordinates.device)
         for loss, weight in zip(self.losses, self.weights, strict=True):
-            total = total + weight * loss(
-                coordinates,
-                elements,
-                b_factors,
-                occupancies,
-                unique_combinations,
-                inverse_indices,
-            )
+            total = total + weight * loss(coordinates, elements, b_factors, occupancies)
         return total
 
     def prepare(self, loss_inputs: LossInputs, *, device: torch.device | str = "cpu") -> None:

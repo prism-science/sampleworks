@@ -58,6 +58,7 @@ import argparse
 import json
 import operator
 import re
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,6 +75,7 @@ from sampleworks.utils.atom_array_utils import (
     ATOMWORKS_COMPARISON_OPS,
     BACKBONE_ATOM_TYPES,
     BLANK_ALTLOC_IDS,
+    find_all_altloc_ids,
     get_mask_from_old_selection_string,
     load_conformer_pairs,
     parse_selection_string,
@@ -291,7 +293,7 @@ def _classify_selection(
     through the CSV intact via ``json.loads``).
 
     ``covered_altloc_residues`` is the set of ``(chain_id, res_id)`` pairs in the
-    span that carry any altloc, used for the caller's residue-coverage invariant
+    span that differ between conformers, used for the caller's residue-coverage invariant
     check.
     """
     try:
@@ -397,6 +399,48 @@ def _classify_selection(
     return row, covered_altloc_residues
 
 
+def _multi_conformer_atom_mask(atom_array: AtomArray, conformer_ids: list[str]) -> np.ndarray:
+    """Mask the atoms of residues that differ between the structure's conformers.
+
+    When the conformers are the altloc IDs, a residue differs only if it carries more than
+    one of them: a residue with a single altloc ID and no alternate has nothing to compare
+    and ``find_consecutive_residues`` builds no span for it. When the conformers are the
+    models of an ensemble, every atom with a non-blank altloc ID differs between models.
+
+    Parameters
+    ----------
+    atom_array
+        Structure with an ``altloc_id`` annotation.
+    conformer_ids
+        Conformer labels from ``load_conformer_pairs``.
+
+    Returns
+    -------
+    np.ndarray
+        Boolean mask of shape ``(n_atoms,)``.
+    """
+    has_altloc_mask = ~np.isin(atom_array.altloc_id, list(BLANK_ALTLOC_IDS))
+    if set(conformer_ids) != find_all_altloc_ids(atom_array):
+        return has_altloc_mask
+
+    chain_ids, res_ids = atom_array.chain_id.tolist(), atom_array.res_id.tolist()
+    residue_altloc_pairs = {
+        (chain_id, res_id, altloc_id)
+        for chain_id, res_id, altloc_id, has_altloc in zip(
+            chain_ids, res_ids, atom_array.altloc_id.tolist(), has_altloc_mask
+        )
+        if has_altloc
+    }
+    n_altloc_ids_by_residue = Counter(
+        (chain_id, res_id) for chain_id, res_id, _ in residue_altloc_pairs
+    )
+    in_multi_altloc_residue = np.array(
+        [n_altloc_ids_by_residue[residue_key] > 1 for residue_key in zip(chain_ids, res_ids)],
+        dtype=bool,
+    )
+    return has_altloc_mask & in_multi_altloc_residue
+
+
 def _process_structure(
     input_row: pd.Series,
     cif_root: Path | None,
@@ -421,10 +465,10 @@ def _process_structure(
         logger.warning(f"[{protein}] structure has <2 conformers ({conformer_ids}); skipping")
         return []
 
-    structure_altloc_mask = ~np.isin(atom_array.altloc_id, list(BLANK_ALTLOC_IDS))
+    structure_altloc_mask = _multi_conformer_atom_mask(atom_array, conformer_ids)
     structure_backbone_mask = np.isin(atom_array.atom_name, BACKBONE_ATOM_TYPES)
 
-    # (chain, res_id) pairs that carry any altloc. Used to skip the redundant combined
+    # (chain, res_id) pairs that differ between conformers. Used to skip the redundant combined
     # selection below and to check coverage after classification
     all_altloc_res_ids: set[tuple[str, int]] = {
         (str(c), int(r))
@@ -471,7 +515,7 @@ def _process_structure(
         classified_res_ids.update(covered)
 
     # residues across all classified spans should equal total unique
-    # (chain, res_id) pairs that carry any altloc in the structure.
+    # (chain, res_id) pairs that differ between conformers in the structure.
     if classified_res_ids != all_altloc_res_ids:
         missing = all_altloc_res_ids - classified_res_ids
         extra = classified_res_ids - all_altloc_res_ids

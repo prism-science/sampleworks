@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -18,7 +19,6 @@ from sampleworks.core.samplers.protocol import StepParams
 from sampleworks.core.scalers.fk_steering import FKSteering
 from sampleworks.core.scalers.pure_guidance import PureGuidance
 from sampleworks.core.scalers.step_scalers import DataSpaceDPSScaler, NoiseSpaceDPSScaler
-from sampleworks.utils.atom_array_utils import make_normalized_atom_id
 from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.frame_transforms import apply_forward_transform
 from sampleworks.utils.guidance_script_arguments import GuidanceConfig
@@ -308,7 +308,7 @@ def _model_reference_from_case(case: MismatchCase, reconciler: AtomReconciler) -
     """
     struct_coords = torch.as_tensor(case.struct_atom_array.coord, dtype=torch.float32).unsqueeze(0)
     model_template = torch.as_tensor(case.model_atom_array.coord, dtype=torch.float32).unsqueeze(0)
-    return reconciler.struct_to_model(struct_coords, model_template)
+    return reconciler.input_to_predicted(struct_coords, model_template)
 
 
 @pytest.fixture(scope="session")
@@ -357,7 +357,7 @@ def mismatch_case_catalog(
         description="Real pair from 2YL0 density-input CIF versus full PDB.",
         model_structure=structure_2yl0_density,
         struct_structure=structure_2yl0,
-        expected_n_common=677,
+        expected_n_common=947,
     )
     catalog["from_5sop"] = _build_real_case(
         id="from_5sop",
@@ -506,29 +506,32 @@ class TestReconcilerConstruction:
             mismatch_case.struct_atom_array,
         )
 
-        assert torch.all(reconciler.model_indices >= 0)
-        assert torch.all(reconciler.model_indices < reconciler.n_model)
-        assert torch.all(reconciler.struct_indices >= 0)
-        assert torch.all(reconciler.struct_indices < reconciler.n_struct)
+        assert torch.all(reconciler.predicted_indices >= 0)
+        assert torch.all(reconciler.predicted_indices < reconciler.n_predicted)
+        assert torch.all(reconciler.input_indices >= 0)
+        assert torch.all(reconciler.input_indices < reconciler.n_input)
 
     def test_common_atoms_have_matching_identity(self, mismatch_case: MismatchCase):
-        """Every reconciled common pair has matching normalized atom identity."""
+        """Every reconciled common pair joins the same atom of the same residue type."""
         reconciler = AtomReconciler.from_arrays(
             mismatch_case.model_atom_array,
             mismatch_case.struct_atom_array,
         )
 
-        model_ids = make_normalized_atom_id(mismatch_case.model_atom_array)
-        struct_ids = make_normalized_atom_id(mismatch_case.struct_atom_array)
+        def identities(atoms: AtomArray, indices: torch.Tensor) -> list[tuple[str, str]]:
+            # MSE pairs with MET (SE with SD), as in the reconciler.
+            res_names = np.where(atoms.res_name == "MSE", "MET", atoms.res_name)
+            atom_names = np.where(atoms.atom_name == "SE", "SD", atoms.atom_name)
+            idx = indices.detach().cpu().numpy()
+            return list(zip(res_names[idx], atom_names[idx], strict=True))
 
-        np.testing.assert_array_equal(
-            model_ids[reconciler.model_indices.detach().cpu().numpy()],
-            struct_ids[reconciler.struct_indices.detach().cpu().numpy()],
-        )
+        assert identities(
+            mismatch_case.model_atom_array, reconciler.predicted_indices
+        ) == identities(mismatch_case.struct_atom_array, reconciler.input_indices)
 
 
 class TestCoordinateProjection:
-    """Coordinate projection invariants for struct_to_model mapping."""
+    """Coordinate projection invariants for input_to_predicted mapping."""
 
     def test_common_atoms_roundtrip(self, mismatch_case: MismatchCase):
         """Common structure coordinates copy exactly into model indices."""
@@ -543,11 +546,11 @@ class TestCoordinateProjection:
         ).reshape(1, mismatch_case.n_struct, 3)
         template = torch.full((1, mismatch_case.n_model, 3), -7.0)
 
-        projected = reconciler.struct_to_model(struct_coords, template)
+        projected = reconciler.input_to_predicted(struct_coords, template)
 
         torch.testing.assert_close(
-            projected[0, reconciler.model_indices],
-            struct_coords[0, reconciler.struct_indices],
+            projected[0, reconciler.predicted_indices],
+            struct_coords[0, reconciler.input_indices],
         )
 
     def test_non_common_atoms_retain_template(self, mismatch_case: MismatchCase):
@@ -559,10 +562,10 @@ class TestCoordinateProjection:
 
         struct_coords = torch.randn(1, mismatch_case.n_struct, 3)
         template = torch.full((1, mismatch_case.n_model, 3), 13.5)
-        projected = reconciler.struct_to_model(struct_coords, template)
+        projected = reconciler.input_to_predicted(struct_coords, template)
 
         common_mask = torch.zeros(mismatch_case.n_model, dtype=torch.bool)
-        common_mask[reconciler.model_indices] = True
+        common_mask[reconciler.predicted_indices] = True
 
         if torch.any(~common_mask):
             torch.testing.assert_close(
@@ -579,7 +582,7 @@ class TestCoordinateProjection:
 
         struct_coords = torch.randn(2, mismatch_case.n_struct, 3, requires_grad=True)
         template = torch.randn(2, mismatch_case.n_model, 3)
-        projected = reconciler.struct_to_model(struct_coords, template)
+        projected = reconciler.input_to_predicted(struct_coords, template)
 
         grad = torch.autograd.grad(projected.sum(), struct_coords)[0]
         assert grad is not None
@@ -594,7 +597,7 @@ class TestCoordinateProjection:
 
         struct_coords = torch.randn(3, 2, mismatch_case.n_struct, 3)
         template = torch.zeros(3, 2, mismatch_case.n_model, 3)
-        projected = reconciler.struct_to_model(struct_coords, template)
+        projected = reconciler.input_to_predicted(struct_coords, template)
 
         assert projected.shape == (3, 2, mismatch_case.n_model, 3)
 
@@ -624,7 +627,7 @@ class TestAlignment:
         transformed = reference @ rotation.T + translation
         aligned, _ = reconciler.align(transformed, reference)
 
-        common = reconciler.model_indices
+        common = reconciler.predicted_indices
         rmsd = _rmsd(aligned[..., common, :], reference[..., common, :])
         assert rmsd.item() < 1e-4
 
@@ -680,9 +683,9 @@ class TestPreprocessingPipeline:
 
         atom_coords = cast(np.ndarray, processed.atom_array.coord)
         torch.testing.assert_close(
-            processed.input_coords[0, reconciler.model_indices],
+            processed.input_coords[0, reconciler.predicted_indices],
             torch.as_tensor(
-                atom_coords[reconciler.struct_indices.detach().cpu().numpy()],
+                atom_coords[reconciler.input_indices.detach().cpu().numpy()],
                 dtype=processed.input_coords.dtype,
             ),
         )
@@ -728,11 +731,11 @@ class TestPreprocessingPipeline:
         reconciler = processed.reconciler
 
         expected_common_b_factors = torch.as_tensor(
-            struct_b_factors[reconciler.struct_indices.detach().cpu().numpy()],
+            struct_b_factors[reconciler.input_indices.detach().cpu().numpy()],
             dtype=loss_inputs.b_factors.dtype,
         )
         torch.testing.assert_close(
-            loss_inputs.b_factors[0, reconciler.model_indices],
+            loss_inputs.b_factors[0, reconciler.predicted_indices],
             expected_common_b_factors,
         )
 
@@ -795,7 +798,6 @@ class TestSamplerStep:
             augmentation=False,
             align_to_input=True,
             alignment_reverse_diffusion=False,
-            scale_guidance_to_diffusion=True,
             device="cpu",
         )
         return AF3EDMSampler(config)
@@ -808,10 +810,11 @@ class TestSamplerStep:
         loss_function=None,
         loss_inputs: LossInputs | None = None,
         t: float = 1.0,
+        step_index: int = 0,
     ) -> StepParams:
         """Build deterministic step context with optional loss payload."""
         context = StepParams(
-            step_index=0,
+            step_index=step_index,
             total_steps=5,
             t=torch.tensor([t]),
             dt=torch.tensor([-0.1]),
@@ -859,7 +862,6 @@ class TestSamplerStep:
             augmentation=False,
             align_to_input=False,
             alignment_reverse_diffusion=False,
-            scale_guidance_to_diffusion=True,
             device="cpu",
         )
         sampler_no_align = AF3EDMSampler(config_no_align)
@@ -873,7 +875,7 @@ class TestSamplerStep:
         assert output_aligned.denoised is not None
         assert output_unaligned.denoised is not None
 
-        common = reconciler.model_indices
+        common = reconciler.predicted_indices
         rmsd_aligned = _rmsd(output_aligned.denoised[..., common, :], reference[..., common, :])
         rmsd_unaligned = _rmsd(output_unaligned.denoised[..., common, :], reference[..., common, :])
 
@@ -888,10 +890,11 @@ class TestSamplerStep:
         r"""A guided step shifts the state down the loss gradient by the DPS step size.
 
         With ``noise_scale=0`` and no augmentation, both runs share :math:`\hat{x}_0`.
-        Their Euler updates differ only by :math:`s\,dt\,w\,g\,\lVert\delta\rVert/t`.
+        Their Euler updates differ only by
+        :math:`s\,dt\,k\,\mathrm{clip}(w\,t\,g, \lVert\delta\rVert)`.
         For ``MockGradientLossFunction``, :math:`L(x)=\tfrac12\lVert x\rVert^2`, so
         :math:`g=\nabla L(\hat{x}_0)=\hat{x}_0`. Choosing :math:`t\ne1` exposes the
-        :math:`1/t` factor.
+        :math:`t` factor, and a step past the first gives a nonzero ramp :math:`k`.
         """
         wrapper = MismatchCaseWrapper(mismatch_case)
         reconciler = AtomReconciler.from_arrays(
@@ -904,12 +907,14 @@ class TestSamplerStep:
         state = torch.randn(1, mismatch_case.n_model, 3)
         loss_inputs = _model_space_loss_inputs(mismatch_case.n_model)
         t = 2.0
+        step_index = 4
         context = self._context_with_reference(
             reconciler,
             reference,
             loss_function=mock_gradient_loss,
             loss_inputs=loss_inputs,
             t=t,
+            step_index=step_index,
         )
         step_size = 0.1
 
@@ -947,9 +952,13 @@ class TestSamplerStep:
             f"guidance must move the state against the loss gradient, got cosine {cosine:.4f}"
         )
 
-        expected_shift = (
-            step_scale * dt * step_size * torch.linalg.norm(diffusion_delta) * loss_gradient / t
+        total_steps = cast(int, context.total_steps)
+        ramp = math.cos(0.5 * math.pi * (total_steps - step_index) / total_steps) ** 2
+        likelihood_term = step_size * t * loss_gradient
+        cap = min(
+            1.0, (torch.linalg.norm(diffusion_delta) / torch.linalg.norm(likelihood_term)).item()
         )
+        expected_shift = step_scale * dt * ramp * cap * likelihood_term
         torch.testing.assert_close(shift, expected_shift, rtol=1e-4, atol=1e-6)
 
     def test_denoised_is_model_space(self, mismatch_case: MismatchCase, sampler: AF3EDMSampler):
@@ -1047,10 +1056,10 @@ class TestTrajectoryScalers:
             assert model_atom_array is not None
             assert struct_atom_array is not None
             assert isinstance(reconciler, AtomReconciler)
-            assert len(model_atom_array) == reconciler.n_model
-            assert len(struct_atom_array) == reconciler.n_struct
-            assert reconciler.model_indices.device.type == "cpu"
-            assert reconciler.struct_indices.device.type == "cpu"
+            assert len(model_atom_array) == reconciler.n_predicted
+            assert len(struct_atom_array) == reconciler.n_input
+            assert reconciler.predicted_indices.device.type == "cpu"
+            assert reconciler.input_indices.device.type == "cpu"
         else:
             assert metadata.get("model_atom_array") is None
             assert metadata.get("struct_atom_array") is None
@@ -1074,8 +1083,8 @@ class TestTrajectoryScalers:
         reconciler = metadata.get("reconciler")
         assert isinstance(reconciler, AtomReconciler)
         assert result.final_state.device.type == "cuda"
-        assert reconciler.model_indices.device.type == "cpu"
-        assert reconciler.struct_indices.device.type == "cpu"
+        assert reconciler.predicted_indices.device.type == "cpu"
+        assert reconciler.input_indices.device.type == "cpu"
 
     @pytest.mark.parametrize("scaler_type", ["pure_guidance", "fk_steering"])
     def test_trajectory_shapes_consistent(
@@ -1171,6 +1180,7 @@ class TestSave:
             traj_next_step=[],
             final_state=final_state,
             model_atom_array=model_atom_array,
+            deposit=None,
         )
 
         saved = ensure_atom_array_stack(load_any(tmp_path / "refined.cif"))

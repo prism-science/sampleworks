@@ -11,7 +11,12 @@ from pathlib import Path
 import pandas as pd
 import pytest
 from atomworks.io.utils.io_utils import load_any
-from sampleworks.utils.atom_array_utils import detect_altlocs, load_structure_with_altlocs
+from loguru import logger
+from sampleworks.utils.atom_array_utils import (
+    detect_altlocs,
+    load_structure_with_altlocs,
+    save_structure_to_cif,
+)
 from sampleworks.utils.cif_utils import find_altloc_selections
 
 from tests.utils.atom_array_builders import altlocs_to_ensemble_cif
@@ -139,3 +144,49 @@ def test_ensemble_classification_matches_single_model(
     # Every loop row is scored by the one conformer pair; other rows have no pair scores
     assert set().union(*single_pairs) == {"A-B"}
     assert set().union(*ensemble_pairs) == {"model_0-model_1"}
+
+
+def test_single_altloc_residue_does_not_break_coverage(
+    tmp_path: Path, resources_dir: Path, classify_script
+) -> None:
+    """A residue modelled with one altloc letter and no alternate is not an altloc residue.
+
+    Such a residue has nothing to compare, so ``find_altloc_selections`` builds no span for
+    it and the coverage check must not report it as missing from the classification.
+
+    Parameters
+    ----------
+    tmp_path
+        Directory for the edited CIF.
+    resources_dir
+        Test resources root.
+    classify_script
+        The script module.
+    """
+    source_path = resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
+    input_atom_array = load_structure_with_altlocs(source_path)
+    # Residue 13 is a one-residue altloc span; dropping its altloc A leaves only letter B.
+    is_dropped_alternate = (input_atom_array.res_id == 13) & (input_atom_array.altloc_id == "A")
+    assert is_dropped_alternate.any()
+    cif_path = save_structure_to_cif(
+        input_atom_array[~is_dropped_alternate], tmp_path / "single_altloc_residue.cif"
+    )
+    spans = list(find_altloc_selections(cif_path, min_span=1, include_all_altlocs=False))
+    assert "chain A and resi 13-13" not in spans
+    row = pd.Series({"protein": "1VME", "structure": str(cif_path), "selection": ";".join(spans)})
+
+    warnings: list[str] = []
+    sink_id = logger.add(warnings.append, level="WARNING")
+    try:
+        rows = classify_script._process_structure(
+            input_row=row,
+            cif_root=None,
+            domain_shift_min_span=50,
+            scoring_strategy=classify_script.LOOP_SCORERS["lddt"],
+            loop_score_threshold=classify_script.LOOP_SCORERS["lddt"].default_threshold,
+        )
+    finally:
+        logger.remove(sink_id)
+
+    assert [r["selection"] for r in rows] == spans
+    assert not [w for w in warnings if "residue coverage invariant" in w]

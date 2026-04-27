@@ -241,8 +241,6 @@ class LossFunctionProtocol(Protocol):
         elements: Int[torch.Tensor, "batch n_atoms"],
         b_factors: Float[torch.Tensor, "batch n_atoms"],
         occupancies: Float[torch.Tensor, "batch n_atoms"],
-        unique_combinations: torch.Tensor | None = None,
-        inverse_indices: torch.Tensor | None = None,
     ) -> Float[torch.Tensor, ""]:
         """Compute loss value from atomic coordinates and properties.
 
@@ -256,12 +254,6 @@ class LossFunctionProtocol(Protocol):
             Per-atom B-factors, shape [batch, n_atoms]
         occupancies
             Per-atom occupancies, shape [batch, n_atoms]
-
-        These next parameters are required for vmap compatibility:
-        unique_combinations
-            Optional pre-computed unique (element, b_factor) pairs
-        inverse_indices
-            Optional pre-computed inverse indices for vmap compatibility
 
         Returns
         -------
@@ -330,34 +322,3 @@ def prepare_loss_if_needed(
     """
     if isinstance(loss_function, PreparableLossFunctionProtocol):
         loss_function.prepare(loss_inputs, device=device)
-
-
-@runtime_checkable
-class PrecomputableLossFunctionProtocol(LossFunctionProtocol, Protocol):
-    """Protocol for loss functions with precomputation for vmap compatibility.
-
-    Extends LossFunctionProtocol with a method to precompute unique
-    (element, b_factor) combinations, avoiding dynamic shapes in vmap contexts.
-    """
-
-    def precompute_unique_combinations(
-        self,
-        elements: Int[torch.Tensor, "batch n_atoms"],
-        b_factors: Float[torch.Tensor, "batch n_atoms"],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Pre-compute unique (element, b_factor) combinations.
-
-        Parameters
-        ----------
-        elements
-            Atomic element indices
-        b_factors
-            Per-atom B-factors
-
-        Returns
-        -------
-        tuple[torch.Tensor, torch.Tensor]
-            unique_combinations: Unique (element, b_factor) pairs
-            inverse_indices: Indices to reconstruct original from unique
-        """
-        ...

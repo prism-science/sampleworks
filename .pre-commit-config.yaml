@@ -26,15 +26,23 @@ repos:
       - id: commitizen
         stages: [commit-msg]
 
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.0
+  # Ruff runs from the pixi dev environment rather than a pinned hook repo, so the
+  # version pinned in pyproject.toml is the one hooks, editors, and CI all use.
+  - repo: local
     hooks:
-      # Run the linter.
       - id: ruff-check
-        args: [--verbose, --fix]
-      # Run the formatter.
+        name: ruff check
+        entry: bash -c 'pixi run -e boltz-dev ruff check --force-exclude --verbose --fix "$@"' --
+        language: system
+        types_or: [python, pyi, jupyter]
+        require_serial: true
+
       - id: ruff-format
-        args: [--verbose]
+        name: ruff format
+        entry: bash -c 'pixi run -e boltz-dev ruff format --force-exclude --verbose "$@"' --
+        language: system
+        types_or: [python, pyi, jupyter]
+        require_serial: true
 
   - repo: local
     hooks:

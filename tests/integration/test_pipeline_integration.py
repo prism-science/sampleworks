@@ -13,6 +13,9 @@ This file consolidates tests for:
 Tests are organized from fast (mock-based) to slow (real wrappers).
 """
 
+import math
+from dataclasses import replace
+
 import pytest
 import torch
 from sampleworks.core.losses.protocol import LossInputs
@@ -918,6 +921,82 @@ class TestEDMScheduleBehavior:
         for i in range(10):
             context = edm_sampler.get_context_for_step(i, schedule)
             assert context.dt is not None and context.dt < 0, f"dt should be negative at step {i}"
+
+
+class TestGuidanceWeighting:
+    """Guidance is the ramped DPS likelihood score, capped at the model's own step."""
+
+    num_steps = 200
+    step_size = 0.1
+
+    @staticmethod
+    def _sampler(device: torch.device, **config) -> AF3EDMSampler:
+        return AF3EDMSampler(
+            EDMSamplerConfig(device=device, augmentation=False, align_to_input=False, **config)
+        )
+
+    def _guidance_shift(
+        self, sampler: AF3EDMSampler, step_index: int, excess: float, device: torch.device
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Take one noise-free step from the same state with and without guidance.
+
+        ``excess`` sets the uncapped likelihood term ``t_hat * w * g`` to that multiple of the
+        model score's norm. Returns the guidance shift (guided - unguided next state), the
+        unguided model step, and the unit guidance direction, each ``[batch, atoms, 3]``.
+        """
+        schedule = sampler.compute_schedule(self.num_steps)
+        context = replace(
+            sampler.get_context_for_step(step_index, schedule),
+            noise_scale=torch.tensor(0.0),
+        )
+        t_hat = float(context.t_effective)
+        unit = torch.randn(2, 30, 3, device=device, dtype=torch.float64)
+        unit = unit - unit.mean(dim=-2, keepdim=True)
+        state = t_hat * unit  # the mock predicts x0_hat = 0, so delta == unit
+        g_hat = torch.randn_like(unit)
+        g_hat = g_hat / torch.linalg.norm(g_hat, dim=(-1, -2), keepdim=True)
+        guidance = (
+            g_hat
+            * excess
+            * torch.linalg.norm(unit, dim=(-1, -2), keepdim=True)
+            / (self.step_size * t_hat)
+        )
+
+        wrapper = MockFlowModelWrapper(num_atoms=30, device=device)
+        features = wrapper.featurize({})
+        scaler = MockStepScaler(guidance_tensor=guidance, step_size=self.step_size)
+        unguided = sampler.step(state, wrapper, context, features=features).state
+        guided = sampler.step(state, wrapper, context, scaler=scaler, features=features).state
+        return guided - unguided, unguided - state, g_hat
+
+    @pytest.mark.parametrize("step_index", [0, 100, 199])
+    @pytest.mark.parametrize("excess", [0.5, 10.0], ids=["below_cap", "capped"])
+    def test_shift_is_ramped_and_capped_at_model_step(
+        self, device: torch.device, step_index: int, excess: float
+    ):
+        """Shift is -cos^2(pi/2 * (N-i)/N) * min(excess, 1) * ||model step|| along g."""
+        shift, model_step, g_hat = self._guidance_shift(
+            self._sampler(device), step_index, excess, device
+        )
+        ramp = math.cos(0.5 * math.pi * (self.num_steps - step_index) / self.num_steps) ** 2
+        model_step_norm = torch.linalg.norm(model_step, dim=(-1, -2), keepdim=True)
+        expected = -ramp * min(excess, 1.0) * model_step_norm * g_hat
+        torch.testing.assert_close(
+            shift, expected, rtol=1e-5, atol=1e-9 * model_step_norm.max().item()
+        )
+
+    def test_custom_ramp_replaces_cosine(self, device: torch.device):
+        """A constant ramp applies full guidance at the first step, where cosine gives none."""
+        sampler = self._sampler(device, guidance_ramp=torch.ones_like)
+        shift, model_step, g_hat = self._guidance_shift(sampler, 0, 0.5, device)
+        model_step_norm = torch.linalg.norm(model_step, dim=(-1, -2), keepdim=True)
+        torch.testing.assert_close(shift, -0.5 * model_step_norm * g_hat)
+
+    def test_out_of_range_ramp_raises(self, device: torch.device):
+        """A ramp weight above 1 is rejected instead of letting guidance outrun the model."""
+        sampler = self._sampler(device, guidance_ramp=lambda tau: 2 * torch.ones_like(tau))
+        with pytest.raises(ValueError, match="guidance_ramp"):
+            self._guidance_shift(sampler, 100, 0.5, device)
 
 
 class TestOutputShapeConsistency:
