@@ -214,6 +214,22 @@ pandas = "==2.3.1"
 gemmi = "==0.6.7"
 
 [tool.pixi.pypi-dependencies]
+# Differentiable structure factors and diffuse scattering, used by the diffuse
+# guidance target. The `sf` extra pulls torch and gemmi, both already present in
+# every environment.
+#
+# Pinned to a rev rather than the `sf` branch. A branch pin resolves to a SHA at
+# lock time and then never moves: the manifest still reads the same, so `pixi
+# lock` sees nothing stale and re-resolves nothing, and new lunus commits never
+# reach the environment. Bumping the rev is what makes a re-lock pick them up.
+#
+# fb22633 is the aniso extraction; DiffuseBraggRewardFunction needs
+# lunus.sf.IsotropicBackground, which does not exist before b73e5c6.
+#
+# Re-locking after changing this rev must start from a lock that does not
+# already carry lunus at the old rev, otherwise the osx-arm64 environments go
+# stale and the Linux runner cannot re-resolve them. See the PR for details.
+lunus = {rev = "fb22633f3279baf3e97f207d0bea4ce34733e6f8", extras = ["sf"], git = "https://github.com/lanl/lunus.git"}
 sampleworks = {editable = true, path = "."}
 
 [tool.pixi.system-requirements]
