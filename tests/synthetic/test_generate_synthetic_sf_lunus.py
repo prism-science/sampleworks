@@ -242,6 +242,12 @@ class TestCrossEngineAgreement:
     MIN_CORRELATION = 0.9999
     MAX_R_FACTOR = 0.002
 
+    # Unlike the two above, this is NOT a measured tolerance -- it is a floor
+    # that detects the engines disagreeing about which reflections are in the
+    # ASU at all. The test prints the achieved coverage both ways; once those
+    # are recorded from a run, tighten this to just under them.
+    MIN_COVERAGE = 0.5
+
     @pytest.fixture(scope="class")
     @staticmethod
     def sfcalculator_amplitudes(structure_1vme, crystal_1vme, device):
@@ -290,9 +296,22 @@ class TestCrossEngineAgreement:
             for h, a in zip(hkl, lunus_amplitude, strict=True)
             if tuple(h) in sfcalculator_amplitudes
         ]
-        assert len(shared) > 0.5 * len(hkl), (
-            f"only {len(shared)} of {len(hkl)} lunus reflections were also produced by "
-            "SFcalculator; the two ASU conventions disagree"
+        # Coverage BOTH ways. A one-sided check passes when lunus emits a small
+        # subset of SFcalculator's reflections, which is a real failure mode: a
+        # truncated resolution shell or a mis-sized grid drops reflections
+        # without perturbing the ones that survive, so the amplitude agreement
+        # below would still look perfect over a shrunken intersection.
+        lunus_coverage = len(shared) / len(hkl)
+        sfc_coverage = len(shared) / len(sfcalculator_amplitudes)
+        print(
+            f"\nreflection-set overlap: {len(shared)} shared, "
+            f"{lunus_coverage:.4f} of lunus's {len(hkl)}, "
+            f"{sfc_coverage:.4f} of SFcalculator's {len(sfcalculator_amplitudes)}"
+        )
+        assert min(lunus_coverage, sfc_coverage) > self.MIN_COVERAGE, (
+            f"{len(shared)} reflections shared: {lunus_coverage:.4f} of lunus's "
+            f"{len(hkl)} and {sfc_coverage:.4f} of SFcalculator's "
+            f"{len(sfcalculator_amplitudes)}; the two ASU conventions disagree"
         )
 
         lunus_shared = np.array([s[0] for s in shared])

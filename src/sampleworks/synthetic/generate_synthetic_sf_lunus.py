@@ -168,6 +168,10 @@ def load_configurations(
                 ("--remove-waters", strip_waters),
                 ("--remove-ligands", strip_ligands),
                 ("--occupancy-mode", occupancy_mode != "default"),
+                # The models ARE the ensemble here; expanding altlocs on top of
+                # them is not a meaningful composition, and this branch returns
+                # before the altloc path is reached, so it would be ignored.
+                ("--altlocs-as-models", altlocs_as_models),
             )
             if active
         ]
@@ -253,10 +257,13 @@ def _expand_altlocs(
     topology = stack[0]
     topology.set_annotation("b_factor", b_factors.mean(axis=0).astype(np.float32))
 
-    # Row 0 identifies which atoms are alternates: with return_full_array=True
-    # every configuration holds the shared atoms plus its own conformer, so a
-    # non-blank altloc in any row marks a position that differs between them.
-    is_alternate = ~np.isin(altloc_ids[0], list(BLANK_ALTLOC_IDS))
+    # A slot is an alternate if ANY configuration labels it: with
+    # return_full_array=True every configuration holds the shared atoms plus its
+    # own conformer, so a non-blank altloc in any row marks a position that
+    # differs between them. filter_to_common_atoms drops slots missing from any
+    # configuration, so the rows do agree in practice; reducing over them anyway
+    # keeps this from resting on that.
+    is_alternate = (~np.isin(altloc_ids, list(BLANK_ALTLOC_IDS))).any(axis=0)
     per_atom_occupancy = occupancies[0].copy()
     per_atom_occupancy[is_alternate] = 1.0
     topology.set_annotation("occupancy", per_atom_occupancy.astype(np.float32))
