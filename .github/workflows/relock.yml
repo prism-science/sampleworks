@@ -5,6 +5,12 @@ name: Relock
 # from-scratch solve must build them for linux-64 — which cannot be done on
 # macOS. Run this workflow (Actions tab -> Relock -> Run workflow, pick the
 # branch) whenever pyproject.toml changes and the lock needs refreshing.
+#
+# Bumping a git dependency's rev: start from a lock that does not already carry
+# the old rev, otherwise the osx-arm64 environments go stale and this Linux
+# runner cannot re-resolve them (see #383). Deleting pixi.lock before the run
+# forces a fresh solve and sidesteps it, at the cost of churning unrelated
+# versions.
 on:
   workflow_dispatch:
 
