@@ -214,6 +214,11 @@ pandas = "==2.3.1"
 gemmi = "==0.6.7"
 
 [tool.pixi.pypi-dependencies]
+# Differentiable structure factors and diffuse scattering for the diffuse
+# guidance target; the `sf` extra pulls torch and gemmi, already in every env.
+# Pinned to a release tag, not a branch -- a branch pin resolves once at lock
+# time and never moves, so new work would never arrive. Bump the tag instead.
+lunus = {tag = "v0.2.0", extras = ["sf"], git = "https://github.com/lanl/lunus.git"}
 sampleworks = {editable = true, path = "."}
 
 [tool.pixi.system-requirements]
