@@ -130,7 +130,7 @@ passes per guided step**, with `use_checkpoint=True` once N or the grid is large
 ### Dependency wiring (done)
 
 lunus **is** declared in `pyproject.toml` and resolved in `pixi.lock`, pinned to
-rev `fb22633` with the `sf` extra. Every pixi environment gets it; no manual
+the `v0.2.0` release tag with the `sf` extra. Every pixi environment gets it; no manual
 install step is part of normal use.
 
 What to know before touching that declaration:
@@ -148,9 +148,11 @@ What to know before touching that declaration:
   `fairscale`, `antlr4-python3-runtime` and `scikit-learn-extra`. Because every
   `modelcif` requires `ihm`, no pin combination removes the source builds —
   this constraint is permanent, not transitional.
-- **Pin a rev, never a branch.** A branch pin resolves to a SHA once and then
-  never moves: the manifest still reads the same, so `pixi lock` sees nothing
-  stale and new lunus commits never reach the environment.
+- **Pin a tag or a rev, never a branch.** A branch pin resolves to a SHA once
+  and then never moves: the manifest still reads the same, so `pixi lock` sees
+  nothing stale and new lunus commits never reach the environment. A tag is
+  immutable by convention and reads better than a SHA, so bumps become version
+  changes; the lock resolves either to a commit, so reproducibility is the same.
 - **Only ever re-lock with the pinned pixi version.** The Relock workflow pins
   v0.73.0. Others rewrite the lock wholesale — 0.76.2 stripped the `osx-arm64`
   entries, 0.71.2 produced a ~9,900-line diff. A lock change not confined to the
@@ -158,9 +160,11 @@ What to know before touching that declaration:
 
 `scripts/install_lunus.sh` exists only to test a lunus commit newer than the pin
 without a CI round trip. Publishing lunus as a `py3-none-any` wheel would retire
-both the script and the rev pin: the packaging already builds pure Python, since
-the C library and the `lunus_ext` extension are built by SCons on a path
-`pyproject.toml` never touches.
+the git pin — bumps would become ordinary version specifiers — but **not** the
+script: testing an unreleased commit still has to go around pixi this way, because
+the lock is CI-only for reasons that have nothing to do with lunus. The packaging
+already builds pure Python, since the C library and the `lunus_ext` extension are
+built by SCons on a path `pyproject.toml` never touches.
 
 ## Phases (sampleworks)
 
