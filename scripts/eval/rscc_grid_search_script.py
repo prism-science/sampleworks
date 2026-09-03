@@ -29,6 +29,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+from biotite.structure import AtomArray, AtomArrayStack
 
 # Import local modules for density calculation
 from joblib import delayed, Parallel
@@ -42,7 +43,9 @@ from sampleworks.eval.structure_utils import (
     get_reference_structure_coords,
 )
 from sampleworks.utils.atom_array_utils import (
+    ATOMWORKS_COMPARISON_OPS,
     filter_to_common_atoms,
+    get_mask_from_old_selection_string,
     parse_structure,
     remove_atoms_with_any_nan_coords,
 )
@@ -60,6 +63,45 @@ from sampleworks.utils.framework_utils import match_batch
 OccKey = tuple[tuple[str, float], ...]
 
 
+def filter_to_selection(
+    atom_array: AtomArray | AtomArrayStack, selection: str
+) -> AtomArray | AtomArrayStack:
+    """Restrict an atom array to the atoms matching ``selection``.
+
+    Mirrors the masking used by
+    :func:`sampleworks.eval.structure_utils.extract_selection_coordinates` (so the
+    filtered atoms correspond to the same residues as the reference selection
+    coordinates), while preserving every model of an ``AtomArrayStack``.
+
+    Parameters
+    ----------
+    atom_array : AtomArray | AtomArrayStack
+        Structure to filter. For a stack the same atom mask is applied to all models.
+    selection : str
+        Legacy (``chain A and resi 60-65``) or atomworks-style
+        (``chain_id == 'A' and ...``) selection string.
+
+    Returns
+    -------
+    AtomArray | AtomArrayStack
+        The subset of ``atom_array`` matching ``selection``.
+
+    Raises
+    ------
+    ValueError
+        If the selection matches no atoms.
+    """
+    working = atom_array[0] if isinstance(atom_array, AtomArrayStack) else atom_array
+    if not any(op in selection for op in ATOMWORKS_COMPARISON_OPS):
+        # get_mask_from_old_selection_string raises ValueError on an empty match.
+        mask = get_mask_from_old_selection_string(atom_array, selection)
+    else:
+        mask = working.mask(selection)
+        if not mask.any():
+            raise ValueError(f"Selection '{selection}' matched no atoms")
+    return atom_array[:, mask] if isinstance(atom_array, AtomArrayStack) else atom_array[mask]
+
+
 def process_group(
     trials: list[Trial],
     protein: str,
@@ -67,6 +109,7 @@ def process_group(
     group_ref_coords: dict[str, np.ndarray],
     base_map_path: Path,
     group_index: int,
+    selected_residues_only: bool = False,
 ) -> list[dict]:
     """
     Process all trials sharing one (protein, occ_key) group.
@@ -90,6 +133,11 @@ def process_group(
     group_index : int
         Position of this group in the dispatch order; used to round-robin the
         group onto one of the available GPUs.
+    selected_residues_only : bool
+        If True, compute each refined structure's density from only the atoms in
+        that selection (rather than the whole structure) before extracting the
+        region and correlating, so RSCC reflects just the selected residues. The
+        density is then computed per selection instead of once per trial.
 
     Returns
     -------
@@ -211,17 +259,20 @@ def process_group(
             )
             atom_array.coord = aligned_coords_torch.numpy()
 
-            # Compute density from the aligned refined structure
-            computed_density = run_density_transformer(transformer, atom_array)
-            # Shallow-copy the base xmap so .array can be rebound without touching the cache.
-            # XMap.extract_tight reads self.array live, so the two wrappers stay independent.
-            computed_xmap = copy.copy(base_xmap)
-            computed_xmap.array = computed_density.cpu().numpy()
-            if computed_xmap.array.shape != base_xmap.array.shape:
-                raise ValueError(
-                    f"density shape {computed_xmap.array.shape} does not match base map "
-                    f"shape {base_xmap.array.shape}"
-                )
+            # Compute density from the whole aligned refined structure, shared across all
+            # selections. When selected_residues_only is set, this is deferred to the
+            # per-selection loop below so each map contains only that selection's atoms.
+            if not selected_residues_only:
+                computed_density = run_density_transformer(transformer, atom_array)
+                # Shallow-copy the base xmap so .array can be rebound without touching the cache.
+                # XMap.extract_tight reads self.array live, so the two wrappers stay independent.
+                computed_xmap = copy.copy(base_xmap)
+                computed_xmap.array = computed_density.cpu().numpy()
+                if computed_xmap.array.shape != base_xmap.array.shape:
+                    raise ValueError(
+                        f"density shape {computed_xmap.array.shape} does not match base map "
+                        f"shape {base_xmap.array.shape}"
+                    )
         except (
             FileNotFoundError,
             OSError,
@@ -257,6 +308,14 @@ def process_group(
                     if extracted_base is None or extracted_base.shape[0] == 0:
                         raise ValueError(f"Extracted base map empty for selection {selection}")
                     extracted_base_cache[selection] = extracted_base
+
+                if selected_residues_only:
+                    # Compute density from only this selection's atoms on the shared grid, so
+                    # the extracted region carries no signal from the surrounding structure.
+                    selected_atoms = filter_to_selection(atom_array, selection)
+                    selected_density = run_density_transformer(transformer, selected_atoms)
+                    computed_xmap = copy.copy(base_xmap)
+                    computed_xmap.array = selected_density.cpu().numpy()
 
                 _, extracted_computed = computed_xmap.extract_tight(
                     sel_coords, padding=DEFAULT_SELECTION_PADDING
@@ -348,7 +407,13 @@ def main(args: argparse.Namespace):
 
     group_results = Parallel(n_jobs=args.n_jobs, verbose=10)(
         delayed(process_group)(
-            trials, protein, protein_configs[protein], group_ref_coords, base_map_path, i
+            trials,
+            protein,
+            protein_configs[protein],
+            group_ref_coords,
+            base_map_path,
+            i,
+            selected_residues_only=args.selected_residues_only,
         )
         for i, (protein, trials, base_map_path, group_ref_coords) in enumerate(groups)
     )
