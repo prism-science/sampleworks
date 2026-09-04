@@ -588,6 +588,19 @@ def _process_single_row(
         )
         return
 
+    if write_diffuse and coords.shape[0] < 2:
+        # <|F|^2> - |<F>|^2 is identically zero for one configuration, so a
+        # diffuse target from a single model would be a file full of float32
+        # noise. Refusing is better than writing something that looks like data,
+        # and testing before the structure-factor call keeps a row that cannot
+        # produce what was asked for from paying for the expensive part.
+        logger.error(
+            f"{row.filename}: --write-diffuse needs a multi-model structure; "
+            f"got {coords.shape[0]} configuration, whose diffuse term is zero "
+            "by construction. Supply an ensemble. Row skipped."
+        )
+        return
+
     try:
         hkl, mean_f, diffuse = compute_ensemble_amplitudes(
             atom_array,
@@ -607,31 +620,19 @@ def _process_single_row(
         return
 
     if write_diffuse:
-        # <|F|²> − |<F>|² is identically zero for one configuration, so a diffuse
-        # target from a single model would be a file full of float32 noise.
-        # Refusing is better than writing something that looks like data.
-        if coords.shape[0] < 2:
+        logger.info(
+            f"{row.filename}: {coords.shape[0]} configurations, "
+            f"mean diffuse intensity {float(diffuse.mean()):.4g}"
+        )
+        diffuse_path = output_dir / (f"{structure_path.stem}_{resolution:.2f}A_diffuse.mtz")
+        try:
+            dataset_from_intensities(hkl, diffuse, unit_cell, space_group, output_path=diffuse_path)
+        except Exception as e:
             logger.error(
-                f"{row.filename}: --write-diffuse needs a multi-model structure; "
-                f"got {coords.shape[0]} configuration, whose diffuse term is zero "
-                "by construction. Supply an ensemble."
+                f"Failed to write diffuse MTZ for {row.filename} to {diffuse_path} "
+                f"({type(e).__name__}): {e}\n"
+                f"{''.join(traceback.format_tb(e.__traceback__))}"
             )
-        else:
-            logger.info(
-                f"{row.filename}: {coords.shape[0]} configurations, "
-                f"mean diffuse intensity {float(diffuse.mean()):.4g}"
-            )
-            diffuse_path = output_dir / (f"{structure_path.stem}_{resolution:.2f}A_diffuse.mtz")
-            try:
-                dataset_from_intensities(
-                    hkl, diffuse, unit_cell, space_group, output_path=diffuse_path
-                )
-            except Exception as e:
-                logger.error(
-                    f"Failed to write diffuse MTZ for {row.filename} to {diffuse_path} "
-                    f"({type(e).__name__}): {e}\n"
-                    f"{''.join(traceback.format_tb(e.__traceback__))}"
-                )
 
     label = "total" if solvent_cutoff is not None else "protein"
     output_path = output_dir / (row.mtzfile or f"{structure_path.stem}_{resolution:.2f}A.mtz")

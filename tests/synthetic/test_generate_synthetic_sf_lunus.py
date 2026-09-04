@@ -22,12 +22,23 @@ lunus's own convention. First measured 2026-08-17 on 1VME chain A at 1.8 A
 
 from pathlib import Path
 
+import gemmi
 import numpy as np
 import pytest
 import torch
 
 
 pytest.importorskip("lunus.sf", reason="lunus[sf] not installed")
+
+# Imported below the guard, not above it: the generator module is importable
+# without lunus, but it does pull in the rest of the crystallography stack, and
+# a missing piece there should skip this module rather than fail collection.
+from sampleworks.synthetic.generate_synthetic_sf import BatchRowForMTZ
+from sampleworks.synthetic.generate_synthetic_sf_lunus import (
+    compute_ensemble_amplitudes,
+    load_configurations,
+)
+
 
 # Slow, but needing neither a GPU nor model weights: ~90 s of splat and FFT on
 # CPU. Marked at module scope, following tests/eval/test_rscc_grid_search_script.py,
@@ -39,22 +50,28 @@ SOURCE_CIF = "1vme_final.cif"
 
 
 @pytest.fixture(scope="module")
-def device() -> torch.device:
-    """CPU: these tests check numerics, not throughput, and must run in CI."""
+def cpu_device() -> torch.device:
+    """CPU: these tests check numerics, not throughput, and must run in CI.
+
+    Named apart from the session-wide ``device`` fixture in ``tests/conftest.py``,
+    which resolves to a GPU when one is present: the tolerances below were
+    measured on CPU.
+    """
     return torch.device("cpu")
 
 
 @pytest.fixture(scope="module")
-def structure_1vme(resources_dir: Path):
+def configurations_1vme(resources_dir: Path):
     """Chain A of 1VME with hydrogens and waters stripped, as a topology + coordinates.
+
+    Distinct from the session-wide ``structure_1vme`` fixture, which is a parsed
+    atomworks dict; this one is the ``(atom_array, coords)`` pair the lunus
+    generator consumes.
 
     Deliberately the same selection the SFcalculator reward fixtures use
     (``tests/rewards/conftest.py``), so the two engines are compared on identical
     inputs.
     """
-    from sampleworks.synthetic.generate_synthetic_sf import BatchRowForMTZ
-    from sampleworks.synthetic.generate_synthetic_sf_lunus import load_configurations
-
     source_dir = resources_dir / "1vme"
     if not (source_dir / SOURCE_CIF).exists():
         pytest.skip(f"Source structure not found at {source_dir / SOURCE_CIF}")
@@ -73,16 +90,12 @@ def structure_1vme(resources_dir: Path):
 @pytest.fixture(scope="module")
 def crystal_1vme(resources_dir: Path):
     """Unit cell and space group read from the deposited file."""
-    import gemmi
-
     meta = gemmi.read_structure(str(resources_dir / "1vme" / SOURCE_CIF))
     return meta.cell, gemmi.SpaceGroup(meta.spacegroup_hm)
 
 
 def _amplitudes(atom_array, coords, cell, spacegroup, device, **kwargs):
     """Run the lunus generator's compute step and return (hkl, <F>, diffuse)."""
-    from sampleworks.synthetic.generate_synthetic_sf_lunus import compute_ensemble_amplitudes
-
     return compute_ensemble_amplitudes(
         atom_array, coords, cell, spacegroup, RESOLUTION, device, **kwargs
     )
@@ -91,18 +104,20 @@ def _amplitudes(atom_array, coords, cell, spacegroup, device, **kwargs):
 class TestSelfConsistency:
     """Properties that follow from the definitions, independent of any other engine."""
 
-    def test_identical_configurations_have_zero_diffuse(self, structure_1vme, crystal_1vme, device):
+    def test_identical_configurations_have_zero_diffuse(
+        self, configurations_1vme, crystal_1vme, cpu_device
+    ):
         """N copies of one structure have <|F|^2> == |<F>|^2, so diffuse is zero.
 
         This is the sharpest check that the ensemble axis is wired correctly: if
         configurations were being summed rather than averaged, or the occupancy
         convention were doubly applied, the variance would not vanish.
         """
-        atom_array, coords = structure_1vme
+        atom_array, coords = configurations_1vme
         cell, spacegroup = crystal_1vme
         replicated = np.repeat(coords[:1], 4, axis=0)
 
-        _, mean_f, diffuse = _amplitudes(atom_array, replicated, cell, spacegroup, device)
+        _, mean_f, diffuse = _amplitudes(atom_array, replicated, cell, spacegroup, cpu_device)
 
         # Diffuse is a difference of two large, nearly equal numbers, so in
         # float32 it is exactly zero only where the intensity is small. Compare
@@ -122,18 +137,18 @@ class TestSelfConsistency:
         assert ratio < 1e-6
 
     def test_single_configuration_matches_its_own_replication(
-        self, structure_1vme, crystal_1vme, device
+        self, configurations_1vme, crystal_1vme, cpu_device
     ):
         """<F> over N identical copies equals F of one copy.
 
         Guards against an ensemble weighting that scales with N.
         """
-        atom_array, coords = structure_1vme
+        atom_array, coords = configurations_1vme
         cell, spacegroup = crystal_1vme
 
-        _, single, _ = _amplitudes(atom_array, coords[:1], cell, spacegroup, device)
+        _, single, _ = _amplitudes(atom_array, coords[:1], cell, spacegroup, cpu_device)
         _, replicated, _ = _amplitudes(
-            atom_array, np.repeat(coords[:1], 3, axis=0), cell, spacegroup, device
+            atom_array, np.repeat(coords[:1], 3, axis=0), cell, spacegroup, cpu_device
         )
 
         # A norm ratio rather than elementwise tolerances: the two differ only by
@@ -152,7 +167,7 @@ class TestSelfConsistency:
         return np.stack([coords[0], coords[0] + rng.normal(0, 0.3, coords[0].shape)])
 
     def test_diffuse_is_invariant_to_rigid_translation_in_p1(
-        self, structure_1vme, crystal_1vme, device
+        self, configurations_1vme, crystal_1vme, cpu_device
     ):
         """In P1, translating every configuration identically leaves diffuse unchanged.
 
@@ -174,16 +189,14 @@ class TestSelfConsistency:
         bounds are set; what makes the result unambiguous is the contrast with
         the symmetry case, which is ~800x larger.
         """
-        import gemmi
-
-        atom_array, coords = structure_1vme
+        atom_array, coords = configurations_1vme
         cell, _ = crystal_1vme
         p1 = gemmi.SpaceGroup("P 1")
         ensemble = self._perturbed_ensemble(coords)
 
-        _, _, diffuse = _amplitudes(atom_array, ensemble, cell, p1, device)
+        _, _, diffuse = _amplitudes(atom_array, ensemble, cell, p1, cpu_device)
         _, _, shifted = _amplitudes(
-            atom_array, ensemble + np.array([1.7, -0.4, 2.3]), cell, p1, device
+            atom_array, ensemble + np.array([1.7, -0.4, 2.3]), cell, p1, cpu_device
         )
 
         assert float(np.mean(diffuse)) > 0, "no diffuse signal to test invariance of"
@@ -191,7 +204,9 @@ class TestSelfConsistency:
         print(f"\nP1 diffuse deviation under rigid translation: {deviation:.2e}")
         assert deviation < 1e-2
 
-    def test_diffuse_is_not_invariant_under_symmetry(self, structure_1vme, crystal_1vme, device):
+    def test_diffuse_is_not_invariant_under_symmetry(
+        self, configurations_1vme, crystal_1vme, cpu_device
+    ):
         """Translating the ASU contents in a non-P1 group DOES change diffuse.
 
         Characterization test for a result that corrected the plan. Translating
@@ -212,14 +227,14 @@ class TestSelfConsistency:
         If this test ever starts passing, symmetry expansion has silently stopped
         happening, which the cross-engine test would not necessarily catch.
         """
-        atom_array, coords = structure_1vme
+        atom_array, coords = configurations_1vme
         cell, spacegroup = crystal_1vme
         assert spacegroup.hm != "P 1", "this test needs a non-trivial space group"
         ensemble = self._perturbed_ensemble(coords)
 
-        _, _, diffuse = _amplitudes(atom_array, ensemble, cell, spacegroup, device)
+        _, _, diffuse = _amplitudes(atom_array, ensemble, cell, spacegroup, cpu_device)
         _, _, shifted = _amplitudes(
-            atom_array, ensemble + np.array([1.7, -0.4, 2.3]), cell, spacegroup, device
+            atom_array, ensemble + np.array([1.7, -0.4, 2.3]), cell, spacegroup, cpu_device
         )
 
         deviation = float(np.linalg.norm(diffuse - shifted) / np.linalg.norm(diffuse))
@@ -250,14 +265,14 @@ class TestCrossEngineAgreement:
 
     @pytest.fixture(scope="class")
     @staticmethod
-    def sfcalculator_amplitudes(structure_1vme, crystal_1vme, device):
+    def sfcalculator_amplitudes(configurations_1vme, crystal_1vme, cpu_device):
         """|F| from SFcalculator on the same atoms, indexed by Miller index."""
         pytest.importorskip("SFC_Torch", reason="sfcalculator-torch not installed")
         from sampleworks.synthetic.synthetic_utils import atomarray_to_gemmi
         from SFC_Torch import SFcalculator
         from SFC_Torch.io import PDBParser
 
-        atom_array, _ = structure_1vme
+        atom_array, _ = configurations_1vme
         cell, spacegroup = crystal_1vme
         gemmi_structure = atomarray_to_gemmi(atom_array, cell, spacegroup.hm)
 
@@ -268,7 +283,7 @@ class TestCrossEngineAgreement:
             mode="xray",
             anomalous=False,
             set_experiment=False,
-            device=device,
+            device=cpu_device,
         )
         sfc.calc_fprotein()
         hkl = np.asarray(sfc.Hasu_array, dtype=np.int64)
@@ -276,7 +291,7 @@ class TestCrossEngineAgreement:
         return {tuple(h): a for h, a in zip(hkl, amplitude, strict=True)}
 
     def test_amplitudes_agree_with_sfcalculator(
-        self, structure_1vme, crystal_1vme, device, sfcalculator_amplitudes
+        self, configurations_1vme, crystal_1vme, cpu_device, sfcalculator_amplitudes
     ):
         """Correlation and R-factor over the reflections both engines produced.
 
@@ -285,10 +300,10 @@ class TestCrossEngineAgreement:
         A small intersection is itself a failure -- it would mean the ASU
         conventions disagree.
         """
-        atom_array, coords = structure_1vme
+        atom_array, coords = configurations_1vme
         cell, spacegroup = crystal_1vme
 
-        hkl, mean_f, _ = _amplitudes(atom_array, coords[:1], cell, spacegroup, device)
+        hkl, mean_f, _ = _amplitudes(atom_array, coords[:1], cell, spacegroup, cpu_device)
         lunus_amplitude = np.abs(mean_f)
 
         shared = [

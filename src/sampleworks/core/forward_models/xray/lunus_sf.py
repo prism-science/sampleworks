@@ -33,7 +33,7 @@ than an assumption baked into the setup.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import gemmi
@@ -102,8 +102,11 @@ def space_group_operations(
     translations: list[np.ndarray] = []
     for op in resolved.operations():
         # float_seitz() is the 4x4 augmented matrix with the rotation in the
-        # upper-left block and the fractional translation in the last column,
-        # already divided by gemmi's DEN. Using it avoids hand-scaling op.rot.
+        # upper-left block and the fractional translation in the last column.
+        # gemmi holds both as integers scaled by Op.DEN, a fixed denominator
+        # chosen so that every crystallographic rational translation (1/2, 1/3,
+        # 1/4, 1/6, ...) is represented exactly; float_seitz() has already
+        # divided it out, so op.rot and op.tran need no hand-scaling here.
         seitz = np.asarray(op.float_seitz(), dtype=np.float64)
         rotation = seitz[:3, :3]
         translation = seitz[:3, 3]
@@ -134,11 +137,9 @@ class LunusSetup:
         ``(Nu, Nv, Nw)`` unit-cell grid, symmetry-commensurate and FFT-friendly.
     orth_matrix
         ``(3, 3)`` orthogonalization matrix, ``cartesian = orth_matrix @ fractional``.
-    orth_matrix_np
-        The same matrix as numpy, kept because several lunus setup helpers want
-        it in that form.
     cell_volume
-        Unit-cell volume in Å³.
+        Unit-cell volume in Å³. Derived from ``orth_matrix`` in
+        ``__post_init__``, not passed to the constructor.
     grid_ops
         Integer grid operations from ``build_grid_ops``, excluding the identity.
         Empty for P1, which lunus reads as "no symmetry expansion".
@@ -161,8 +162,6 @@ class LunusSetup:
 
     grid_shape: tuple[int, int, int]
     orth_matrix: Float[torch.Tensor, "3 3"]
-    orth_matrix_np: np.ndarray
-    cell_volume: float
     grid_ops: list
     element_idx: Int[torch.Tensor, " n_atoms"]
     atom_A: Float[torch.Tensor, "n_atoms 5"]
@@ -172,6 +171,15 @@ class LunusSetup:
     taper_width: float
     blur: float
     n_atoms: int
+    cell_volume: float = field(init=False)
+
+    def __post_init__(self) -> None:
+        """Derive the cell volume so it cannot drift from ``orth_matrix``."""
+        # |det| of the orthogonalization matrix is the cell volume by
+        # construction. Taken in float64 whatever the tensor dtype: the volume
+        # scales the structure factors, so the extra digits are worth having.
+        orth = self.orth_matrix.detach().cpu().numpy().astype(np.float64)
+        object.__setattr__(self, "cell_volume", float(abs(np.linalg.det(orth))))
 
 
 def build_setup(
@@ -260,10 +268,16 @@ def build_setup(
     try:
         coefficients = it92_coefficients(distinct_elements)
     except KeyError as e:
+        # KeyError renders as the repr of its argument, so interpolating the
+        # exception itself would wrap the text in a second layer of quotes.
+        # lunus puts a sentence naming the offending symbol in args[0]; surface
+        # that directly.
+        detail = e.args[0] if e.args else e
         raise ValueError(
-            f"No IT92 scattering coefficients for element {e} in "
-            f"{distinct_elements}. Check the structure's element annotations; "
-            "strip or rename the offending atoms if the element is spurious."
+            "No IT92 scattering coefficients for an element of "
+            f"{distinct_elements}: {detail}. Check the structure's element "
+            "annotations; strip or rename the offending atoms if the element "
+            "is spurious."
         ) from e
 
     a, b, c = unit_cell.a, unit_cell.b, unit_cell.c
@@ -301,8 +315,6 @@ def build_setup(
     return LunusSetup(
         grid_shape=tuple(grid_shape),
         orth_matrix=orth_t,
-        orth_matrix_np=orth_np,
-        cell_volume=float(abs(np.linalg.det(orth_np))),
         grid_ops=grid_ops,
         element_idx=element_idx,
         atom_A=atom_A,
