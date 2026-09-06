@@ -20,8 +20,9 @@ module, because SFcalculator's memory scales with the reflection count and 1.8 A
 exhausts a 15 GiB machine. See the constant for the measurements.
 
 Thresholds come from measured values, recorded in each test's docstring, per
-lunus's own convention. First measured 2026-08-17 on 1VME chain A at 1.8 A
-(P 1 21 1, 3357 atoms, grid 96x160x160, 86499 reflections), CPU.
+lunus's own convention. First measured 2026-08-17 on 1VME chain A (P 1 21 1,
+3357 atoms) at 1.8 A, grid 96x160x160, 86499 reflections, CPU. The cross-engine
+bounds were remeasured at 2.2 A / 47499 reflections on 2026-09-06.
 """
 
 from pathlib import Path
@@ -43,10 +44,17 @@ from sampleworks.synthetic.generate_synthetic_sf_lunus import (
 )
 
 
-# Slow, but needing neither a GPU nor model weights: ~90 s of splat and FFT on
-# CPU. Marked at module scope, following tests/eval/test_rscc_grid_search_script.py,
-# where `slow` already covers runtime alone rather than hardware.
-pytestmark = pytest.mark.slow
+# Deliberately unmarked. These need neither a GPU nor model weights, and the
+# whole module runs in ~7 s on CPU -- the same order as unmarked tests
+# elsewhere, and as the `slow`-only precedent in
+# tests/eval/test_rscc_grid_search_script.py, whose slowest test is 2.4 s.
+#
+# It previously carried a module-scope `slow` mark justified as "~90 s of splat
+# and FFT on CPU", which does not reproduce: measured 6.8 s for all five tests
+# on 2026-09-06 (4-core aarch64). Marking it hid the only coverage the diffuse
+# forward model has from `pixi run -e <env> tests`, which is the loop where a
+# structure-factor regression most wants to fire. Note that CI is unaffected
+# either way -- `cpu-tests` deselects `gpu`, not `slow`.
 
 RESOLUTION = 1.8
 
