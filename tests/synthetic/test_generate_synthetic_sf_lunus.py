@@ -15,6 +15,10 @@ correlation 0.999989 and R ≈ 0.0077 against gemmi, with its smooth density tap
 the main source of the difference; SFcalculator is a third implementation, so
 expect agreement of that order but not better.
 
+That test runs at ``CROSS_ENGINE_RESOLUTION``, coarser than the rest of the
+module, because SFcalculator's memory scales with the reflection count and 1.8 A
+exhausts a 15 GiB machine. See the constant for the measurements.
+
 Thresholds come from measured values, recorded in each test's docstring, per
 lunus's own convention. First measured 2026-08-17 on 1VME chain A at 1.8 A
 (P 1 21 1, 3357 atoms, grid 96x160x160, 86499 reflections), CPU.
@@ -45,6 +49,25 @@ from sampleworks.synthetic.generate_synthetic_sf_lunus import (
 pytestmark = pytest.mark.slow
 
 RESOLUTION = 1.8
+
+# The cross-engine test runs coarser than the rest of the module, because
+# SFcalculator is the memory bound. Its F_protein builds several
+# [n_atoms, n_refl] tensors before reducing over atoms (SFC_Torch/Fmodel.py),
+# so peak memory is linear in the reflection count -- measured on this
+# structure at 3357 atoms:
+#
+#     3.0 A   18858 refl   4.91 GiB
+#     2.5 A   32467 refl   7.29 GiB
+#     2.2 A   47499 refl   9.92 GiB
+#     1.8 A   86499 refl   ~16.7 GiB (extrapolated; OOM-killed a 15 GiB machine)
+#
+# 2.2 A is the finest that fits with headroom. Coarser is cheaper but blunts
+# the test: lunus sizes its grid from the resolution, so a coarser grid means
+# more splat discretization error against SFcalculator's direct summation, and
+# the R-factor bound below has to open up to match (R was 0.0009 at 2.2 A,
+# 0.0026 at 2.5 A, 0.0119 at 3.0 A).
+CROSS_ENGINE_RESOLUTION = 2.2
+
 SOURCE_CIF = "1vme_final.cif"
 
 
@@ -93,10 +116,10 @@ def crystal_1vme(resources_dir: Path):
     return meta.cell, gemmi.SpaceGroup(meta.spacegroup_hm)
 
 
-def _amplitudes(atom_array, coords, cell, spacegroup, device, **kwargs):
+def _amplitudes(atom_array, coords, cell, spacegroup, device, *, resolution=RESOLUTION, **kwargs):
     """Run the lunus generator's compute step and return (hkl, <F>, diffuse)."""
     return compute_ensemble_amplitudes(
-        atom_array, coords, cell, spacegroup, RESOLUTION, device, **kwargs
+        atom_array, coords, cell, spacegroup, resolution, device, **kwargs
     )
 
 
@@ -247,20 +270,26 @@ class TestCrossEngineAgreement:
     Thresholds are provisional; see the module docstring.
     """
 
-    # Measured on 1VME chain A at 1.8 A, 86499 reflections: correlation
-    # 1.000000, R 0.0002, scale 1.0000 -- better than lunus's own agreement with
+    # Measured on 1VME chain A at 2.2 A, 47499 reflections: correlation
+    # 0.999999, R 0.0009, scale 1.0000 -- better than lunus's own agreement with
     # gemmi (0.999989 / 0.0077), the two engines' shared IT92 coefficients and
     # identical atom input leaving little room to disagree. Bounds are set an
     # order of magnitude looser than measured, to tolerate platform variation
     # without admitting a real regression.
+    #
+    # Both improve monotonically with resolution (R 0.0119 / 0.0026 / 0.0009 at
+    # 3.0 / 2.5 / 2.2 A, extrapolating onto the 0.0002 recorded at 1.8 A), so
+    # these bounds are tied to CROSS_ENGINE_RESOLUTION and must be remeasured
+    # if it moves.
     MIN_CORRELATION = 0.9999
-    MAX_R_FACTOR = 0.002
+    MAX_R_FACTOR = 0.009
 
     # Unlike the two above, this is NOT a measured tolerance -- it is a floor
     # that detects the engines disagreeing about which reflections are in the
-    # ASU at all. The test prints the achieved coverage both ways; once those
-    # are recorded from a run, tighten this to just under them.
-    MIN_COVERAGE = 0.5
+    # ASU at all. Both coverages measured exactly 1.0000 at 3.0, 2.5 and 2.2 A,
+    # so this sits just under a complete intersection rather than at the loose
+    # placeholder it started as.
+    MIN_COVERAGE = 0.99
 
     @pytest.fixture(scope="class")
     @staticmethod
@@ -278,7 +307,7 @@ class TestCrossEngineAgreement:
         sfc = SFcalculator(
             pdbmodel=PDBParser(gemmi_structure),
             mtzdata=None,
-            dmin=RESOLUTION,
+            dmin=CROSS_ENGINE_RESOLUTION,
             mode="xray",
             anomalous=False,
             set_experiment=False,
@@ -302,7 +331,14 @@ class TestCrossEngineAgreement:
         atom_array, coords = configurations_1vme
         cell, spacegroup = crystal_1vme
 
-        hkl, mean_f, _ = _amplitudes(atom_array, coords[:1], cell, spacegroup, cpu_device)
+        hkl, mean_f, _ = _amplitudes(
+            atom_array,
+            coords[:1],
+            cell,
+            spacegroup,
+            cpu_device,
+            resolution=CROSS_ENGINE_RESOLUTION,
+        )
         lunus_amplitude = np.abs(mean_f)
 
         shared = [
