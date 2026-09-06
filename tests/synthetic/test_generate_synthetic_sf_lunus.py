@@ -30,9 +30,8 @@ import torch
 
 pytest.importorskip("lunus.sf", reason="lunus[sf] not installed")
 
-# Imported below the guard, not above it: the generator module is importable
-# without lunus, but it does pull in the rest of the crystallography stack, and
-# a missing piece there should skip this module rather than fail collection.
+# Imported below the guard, not above it: the generator module imports lunus.sf
+# at module scope, so without lunus this has to skip rather than fail collection.
 from sampleworks.synthetic.generate_synthetic_sf import BatchRowForMTZ
 from sampleworks.synthetic.generate_synthetic_sf_lunus import (
     compute_ensemble_amplitudes,

@@ -38,6 +38,7 @@ import torch
 from atomworks.io.utils.io_utils import load_any
 from biotite.structure import AtomArray, AtomArrayStack
 from loguru import logger
+from lunus.sf import mean_and_diffuse
 
 from sampleworks.core.forward_models.xray import lunus_sf
 from sampleworks.synthetic.generate_synthetic_sf import BatchRowForMTZ, load_batch_csv
@@ -331,8 +332,6 @@ def compute_ensemble_amplitudes(
     diffuse : numpy.ndarray
         ``(n_refl,)`` real ``<|F|²> − |<F>|²``. Zero for a single configuration.
     """
-    from lunus.sf import mean_and_diffuse
-
     setup = lunus_sf.build_setup(atom_array, unit_cell, space_group, resolution, device=device)
 
     hkl_np = generate_asu_hkl(unit_cell, space_group, resolution)
