@@ -48,6 +48,19 @@ platforms = ["osx-arm64"]
 pypi-dependencies = {"protenix" = "*", "einx" = "*", "triton" = "*"}
 platforms = ["linux-64"]
 
+# Differentiable structure factors and diffuse scattering. Scoped to a feature
+# rather than declared workspace-level so the analysis-only environments do not
+# solve a git dependency they never import; both platforms, so it stays
+# available on macOS (see #383, which chose workspace-level for that reason).
+[tool.pixi.feature.diffuse]
+platforms = ["linux-64", "osx-arm64"]
+
+[tool.pixi.feature.diffuse.pypi-dependencies]
+# Pinned to a release tag, not a branch -- a branch pin resolves once at lock
+# time and never moves, so new work would never arrive. Bump the tag instead.
+# The `sf` extra pulls torch and gemmi, already in every environment.
+lunus = {tag = "v0.2.0", extras = ["sf"], git = "https://github.com/lanl/lunus.git"}
+
 [tool.pixi.feature.external-tools]
 # Binaries the eval scripts shell out to. Kept separate from the `analysis`
 # feature so adding one does not re-solve the model environments, and bioconda
@@ -189,16 +202,16 @@ gxx_linux-64 = ">=9,<13"
 [tool.pixi.environments]
 analysis = {features = ["analysis", "external-tools"]}
 analysis-dev = {features = ["analysis", "dev", "external-tools"]}
-boltz = {features = ["boltz"]}
+boltz = {features = ["boltz", "diffuse"]}
 boltz-analysis = {features = ["boltz", "analysis"]}
-boltz-dev = {features = ["boltz", "dev"]}
-boltz-osx = {features = ["boltz-osx", "dev", "analysis"]}
-protenix = {features = ["protenix"]}
-protenix-dev = {features = ["protenix", "dev"]}
-protpardelle = {features = ["protpardelle"]}
-protpardelle-dev = {features = ["protpardelle", "dev"]}
-rf3 = {features = ["rf3"]}
-rf3-dev = {features = ["rf3", "dev"]}
+boltz-dev = {features = ["boltz", "dev", "diffuse"]}
+boltz-osx = {features = ["boltz-osx", "dev", "analysis", "diffuse"]}
+protenix = {features = ["protenix", "diffuse"]}
+protenix-dev = {features = ["protenix", "dev", "diffuse"]}
+protpardelle = {features = ["protpardelle", "diffuse"]}
+protpardelle-dev = {features = ["protpardelle", "dev", "diffuse"]}
+rf3 = {features = ["rf3", "diffuse"]}
+rf3-dev = {features = ["rf3", "dev", "diffuse"]}
 
 [tool.pixi.feature.protenix.pypi-options.dependency-overrides]
 rdkit = ">=2024.3.5,<2025.9"
@@ -214,11 +227,6 @@ pandas = "==2.3.1"
 gemmi = "==0.6.7"
 
 [tool.pixi.pypi-dependencies]
-# Differentiable structure factors and diffuse scattering for the diffuse
-# guidance target; the `sf` extra pulls torch and gemmi, already in every env.
-# Pinned to a release tag, not a branch -- a branch pin resolves once at lock
-# time and never moves, so new work would never arrive. Bump the tag instead.
-lunus = {tag = "v0.2.0", extras = ["sf"], git = "https://github.com/lanl/lunus.git"}
 sampleworks = {editable = true, path = "."}
 
 [tool.pixi.system-requirements]

@@ -41,6 +41,15 @@ import numpy as np
 import torch
 from jaxtyping import Complex, Float, Int
 from loguru import logger
+from lunus.sf import (
+    adjust_grid_for_symmetry,
+    build_atom_kernels_torch,
+    build_grid_ops,
+    grid_shape_for_resolution,
+    it92_coefficients,
+    orth_matrix as build_orth_matrix,
+    structure_factors_batch,
+)
 
 from sampleworks.utils.elements import normalize_element
 
@@ -235,15 +244,6 @@ def build_setup(
         If the atom array carries non-finite B-factors, which would produce
         meaningless kernels.
     """
-    from lunus.sf import (
-        adjust_grid_for_symmetry,
-        build_atom_kernels_torch,
-        build_grid_ops,
-        grid_shape_for_resolution,
-        it92_coefficients,
-        orth_matrix as build_orth_matrix,
-    )
-
     b_factors = np.asarray(atom_array.b_factor, dtype=np.float64)
     if not np.isfinite(b_factors).all():
         raise ValueError(
@@ -406,8 +406,6 @@ def structure_factors(
         If ``coords`` is not 3-dimensional, or its atom count disagrees with the
         setup's.
     """
-    from lunus.sf import structure_factors_batch
-
     if coords.ndim != 3:
         raise ValueError(
             f"coords must be [n_configs, n_atoms, 3]; got shape {tuple(coords.shape)}. "
