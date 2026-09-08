@@ -153,7 +153,10 @@ def annotate_structure_for_protpardelle(structure: dict) -> dict:
     dict
         Structure dict with a ``"_protpardelle_config"`` key added.
     """
-    return {**structure, "_protpardelle_config": ProtpardelleConfig()}
+    return {
+        **structure,
+        "_protpardelle_config": ProtpardelleConfig(),
+    }
 
 
 def extract_protein_sequences(structure: dict) -> list[str]:
@@ -484,6 +487,10 @@ class ProtpardelleWrapper:
         GenerativeModelInput[ProtpardelleConditioning]
             Sequence conditioning for :meth:`step`.
         """
+        config = structure.get("_protpardelle_config", ProtpardelleConfig())
+        if isinstance(config, dict):
+            config = ProtpardelleConfig(**config)
+
         if "asym_unit" not in structure:
             raise ValueError(
                 "Protpardelle featurization requires an 'asym_unit' atom array to "

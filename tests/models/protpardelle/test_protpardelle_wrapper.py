@@ -134,6 +134,13 @@ class TestExtractProteinSequences:
         structure = _protein_structure(SEQ_A, SEQ_B)
         assert extract_protein_sequences(structure) == [SEQ_A, SEQ_B]
 
+    def test_sequence_override_replaces_structure_sequence(self):
+        from sampleworks.utils.sequence import apply_sequence_override
+
+        structure = apply_sequence_override(_protein_structure(SEQ_A), SEQ_B)
+
+        assert extract_protein_sequences(structure) == [SEQ_B]
+
     def test_skips_non_protein_chains(self):
         structure = _protein_structure(SEQ_A)
         structure["chain_info"]["L"] = {
@@ -167,6 +174,14 @@ class TestAnnotateStructure:
         assert isinstance(config, ProtpardelleConfig)
         # Original structure is not mutated.
         assert "_protpardelle_config" not in structure
+
+    def test_sequence_override_applied_upstream_reaches_annotated(self):
+        from sampleworks.utils.sequence import apply_sequence_override
+
+        structure = apply_sequence_override(_protein_structure(SEQ_A), SEQ_B)
+        annotated = annotate_structure_for_protpardelle(structure)
+
+        assert extract_protein_sequences(annotated) == [SEQ_B]
 
 
 class TestProtocolConformance:

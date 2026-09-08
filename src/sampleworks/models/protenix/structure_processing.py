@@ -568,6 +568,7 @@ def structure_to_protenix_json(structure: dict) -> dict[str, Any]:
     # entity_seq: {label_entity_id -> amino-acid / nucleotide sequence string}
     # copy_id annotation: distinguishes homo-multimer copies of the same entity
     entity_seq = get_sequences(atom_array, chain_info, valid_positions)
+
     atom_array = add_unique_chain_and_copy_ids(atom_array)
 
     # label_entity_id_to_sequences: ligand CCD residue-name lists (e.g. ["ATP"])
