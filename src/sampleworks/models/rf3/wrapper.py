@@ -83,9 +83,9 @@ class RF3Config:
         coordinates into out-of-distribution chiral configurations. Default is False.
     track_chiral_features : bool
         If True, log the chiral gradient L2 norm at each denoising step. The
-        chiral gradient (output of calc_chiral_grads_flat_impl on the
-        EDM scaled coordinates) is the input feature to the model's chiral
-        processing layer. Uses original features when disable_chiral_features is True to
+        chiral gradient (output of calc_chiral_grads_flat_impl on the EDM scaled
+        coordinates) is the input feature to the model's chiral processing layer.
+        Uses original features when disable_chiral_features is True to
         determine if guidance would be breaking them (e.g. magnitude is much larger when guidance
         is on than off). Default is False.
     """
