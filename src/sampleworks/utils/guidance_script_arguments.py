@@ -191,6 +191,14 @@ _DYNAMIC_ATTRS = [
     "num_gd_steps",
     "guidance_weight",
     "guidance_interval",
+    # latent optimization (IT-opt) -- must be listed here or from_cli() drops the parsed
+    # values and _run_guidance()'s getattr(args, ...) always sees the defaults (flags = no-ops).
+    "which_latent",
+    "learning_rate",
+    "outer_steps",
+    "anchor_weight",
+    "max_grad_norm",
+    "bond_length_weight",
     # model-specific
     "model_checkpoint",
     "method",
@@ -646,9 +654,46 @@ _MODEL_ARG_ADDERS: dict[str, Any] = {
     "protpardelle": add_protpardelle_specific_args,
 }
 
+
+def add_latent_opt_args(parser: argparse.ArgumentParser | GuidanceConfig):
+    """Add CLI arguments specific to inference-time latent optimization (IT-opt)."""
+    parser.add_argument(
+        "--which-latent",
+        type=str,
+        default="pair",
+        choices=["single", "pair", "both"],
+        help="Which trunk latent(s) to optimize: single (s), pair (z), or both",
+    )
+    parser.add_argument("--learning-rate", type=float, default=0.05, help="Adam learning rate")
+    parser.add_argument(
+        "--outer-steps",
+        type=int,
+        default=2,
+        help="Number of optimization rounds (fresh diffusion noise per round)",
+    )
+    parser.add_argument(
+        "--anchor-weight",
+        type=float,
+        default=0.0,
+        help="On-manifold L2-to-baseline anchor weight for the optimized latent(s)",
+    )
+    parser.add_argument(
+        "--max-grad-norm", type=float, default=1.0, help="Per-latent gradient-clip threshold"
+    )
+    parser.add_argument(
+        "--bond-length-weight",
+        type=float,
+        default=5e-5,
+        help="Weight of the coordinate-space bond-geometry penalty (bond-length + steric-clash "
+        "hinges) added to the IT-opt loss. Default 5e-5 = smallest weight that fixes mean clash "
+        "while keeping density fit and diversity; use 1e-3 for median clash 0; 0 disables it",
+    )
+
+
 _GUIDANCE_ARG_ADDERS: dict[str, Any] = {
     "pure_guidance": add_pure_guidance_args,
     "fk_steering": add_fk_steering_args,
+    "latent_opt": add_latent_opt_args,
 }
 
 

@@ -23,6 +23,7 @@ from sampleworks.core.rewards.real_space_density import (
 )
 from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
 from sampleworks.core.scalers.fk_steering import FKSteering
+from sampleworks.core.scalers.latent_optimization import LatentOptimization  # IT-opt wiring (added)
 from sampleworks.core.scalers.pure_guidance import PureGuidance
 from sampleworks.core.scalers.step_scalers import (
     DataSpaceDPSScaler,
@@ -85,7 +86,11 @@ def save_trajectory(
     save_every=10,
 ):
     """Dispatch trajectory serialization to the handler for the selected scaler."""
-    if scaler_type == GuidanceType.PURE_GUIDANCE:
+    # IT-opt wiring (changed): this condition was `== GuidanceType.PURE_GUIDANCE`; we widened it to
+    # also accept LATENT_OPT. Latent optimization reuses the pure-guidance trajectory writer because
+    # its final sampling pass emits a trajectory with the same [ensemble, atoms, 3] layout that
+    # _save_trajectory already expects, so no separate writer is needed for it.
+    if scaler_type in (GuidanceType.PURE_GUIDANCE, GuidanceType.LATENT_OPT):
         _save_trajectory(trajectory, atom_array, output_dir, subdir_name, save_every)
     elif scaler_type == GuidanceType.FK_STEERING:
         _save_fk_steering_trajectory(trajectory, atom_array, output_dir, subdir_name, save_every)
@@ -440,7 +445,7 @@ def run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, device
         Result of the guidance run including status and timing.
     """
 
-    log_path = getattr(args, "log_path", None) or os.path.join(args.output_dir, "run.log")
+    log_path = args.log_path or os.path.join(args.output_dir, "run.log")
     os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
 
     # just in case log_path does not go to args.output_dir, make sure the latter exists
@@ -502,16 +507,23 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
     if "Protenix" in wrapper_class_name:
         from sampleworks.models.protenix.wrapper import annotate_structure_for_protenix
 
-        structure = annotate_structure_for_protenix(structure, recycling_steps=recycling_steps)
+        structure = annotate_structure_for_protenix(
+            structure,
+            recycling_steps=recycling_steps,
+            # Disable diffusion shared-vars cache for LATENT_OPT so gradients can
+            # flow to z_trunk; cached tensors can otherwise become stale.
+            # Keep cache enabled for other guidance types.
+            enable_diffusion_shared_vars_cache=(guidance_type != GuidanceType.LATENT_OPT),
+        )
     elif "RF3" in wrapper_class_name:
         from sampleworks.models.rf3.wrapper import annotate_structure_for_rf3
 
         structure = annotate_structure_for_rf3(
             structure,
             recycling_steps=recycling_steps,
-            msa_path=getattr(args, "msa_path", None),
-            disable_chiral_features=getattr(args, "disable_chiral_features", False),
-            track_chiral_features=getattr(args, "track_chiral_features", False),
+            msa_path=args.msa_path,
+            disable_chiral_features=args.disable_chiral_features,
+            track_chiral_features=args.track_chiral_features,
         )
     elif "Boltz" in wrapper_class_name:
         from sampleworks.models.boltz.wrapper import process_structure_for_boltz
@@ -639,6 +651,76 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
         losses = result.losses if result.losses else []
         traj_denoised = result.metadata.get("trajectory_denoised", []) if result.metadata else []
         traj_next_step = list(result.trajectory) if result.trajectory else []
+
+    # ----- IT-opt wiring (added): the inference-time latent optimization branch (LATENT_OPT) -----
+    # This branch belongs to _run_guidance() and is the entry point for latent optimization. Whereas
+    # pure guidance and FK steering steer the atomic coordinates, latent optimization instead
+    # optimizes the frozen model's cached trunk latents (the single representation s and/or the pair
+    # representation z) against the reward, then samples with those latents held fixed. We read the
+    # knobs off the config as the other branches do and hand the optimize-then-sample loop to
+    # LatentOptimization.
+    elif guidance_type == GuidanceType.LATENT_OPT:
+        logger.info("Initializing inference-time latent optimization (IT-opt)")
+
+        # We import the representation-name maps inside this branch so the model-adapter dependency
+        # stays local to the only code that needs it. The attribute that stores each representation
+        # differs per model (for example "s_trunk"/"z_trunk" on Protenix and RF3 versus "s"/"z" on
+        # Boltz), so we look the names up by model instead of hard-coding them.
+        from sampleworks.models.latent_adapter import (
+            DEFAULT_PAIR_REP_ATTR,
+            DEFAULT_SINGLE_REP_ATTR,
+        )
+
+        # LatentOptimization expects guidance start as a fraction of the schedule, but the config
+        # carries it as an integer step count, so we convert it here and default to optimizing from
+        # the first step.
+        guidance_t_start = args.guidance_start / num_steps if args.guidance_start > 0 else 0.0
+        which_latent = args.which_latent  # This is "single", "pair", or "both".
+        anchor_weight = args.anchor_weight
+        bond_length_weight = args.bond_length_weight
+        # GuidanceConfig exposes the model as `model_name` (not `args.model`); normalize to the
+        # lowercase key the DEFAULT_*_REP_ATTR maps use (as checkpoint resolution does below).
+        model_key = str(args.model_name).lower().replace("structurepredictor.", "")
+        try:
+            single_attr = DEFAULT_SINGLE_REP_ATTR[model_key]
+            pair_attr = DEFAULT_PAIR_REP_ATTR[model_key]
+        except KeyError as e:
+            raise ValueError(
+                "Latent optimization has no latent-attribute names registered for model "
+                f"{model_key!r}."
+            ) from e
+
+        guidance = LatentOptimization(
+            ensemble_size=args.ensemble_size,
+            num_steps=num_steps,
+            guidance_t_start=guidance_t_start,
+            outer_steps=args.outer_steps,
+            learning_rate=args.learning_rate,
+            max_grad_norm=args.max_grad_norm,
+            optimize_single=which_latent in ("single", "both"),
+            optimize_pair=which_latent in ("pair", "both"),
+            single_attr=single_attr,
+            pair_attr=pair_attr,
+            anchor_weight_single=anchor_weight if which_latent in ("single", "both") else 0.0,
+            anchor_weight_pair=anchor_weight if which_latent in ("pair", "both") else 0.0,
+            bond_length_weight=bond_length_weight,
+        )
+
+        logger.info(f"Running latent optimization ({which_latent}) on model {model_key}")
+        # We still pass step_scaler so this call matches the signature the other guidance scalers
+        # use, but LatentOptimization ignores it -- v1 steers only through the latents.
+        result = guidance.sample(
+            structure=structure,
+            model=model_wrapper,
+            sampler=sampler,
+            step_scaler=step_scaler,
+            reward=reward_function,
+        )
+
+        refined_structure = result.structure
+        losses = result.losses if result.losses else []
+        traj_denoised = result.metadata.get("trajectory_denoised", []) if result.metadata else []
+        traj_next_step = list(result.trajectory) if result.trajectory else []
     else:
         logger.error(f"Unknown guidance type: {guidance_type}")
         raise TypeError("Unknown guidance type!")
@@ -725,7 +807,7 @@ def get_job_result(
         runtime_seconds=round(end_time - start_time, 2),
         started_at=started_at.isoformat(),
         finished_at=ended_at.isoformat(),
-        log_path=getattr(args, "log_path", None) or os.path.join(args.output_dir, "run.log"),
+        log_path=args.log_path or os.path.join(args.output_dir, "run.log"),
         output_dir=args.output_dir,
     )
     return result
