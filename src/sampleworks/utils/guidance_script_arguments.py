@@ -24,6 +24,64 @@ DEFAULT_REWARD_TYPE = Rewards.REAL_SPACE_DENSITY
 # a model or guidance argument of the same name.
 _REWARD_OPTION_PREFIX = "reward_option_"
 
+def resolve_sequence_arg(
+    value: str | os.PathLike[str] | None,
+    root: str | os.PathLike[str] | None = None,
+) -> str | None:
+    """Resolve a sequence value or FASTA path to an amino-acid sequence.
+
+    Parameters
+    ----------
+    value : str or os.PathLike or None
+        An amino-acid string, a path to a FASTA file, or an empty value.
+    root : str or os.PathLike or None
+        Base directory for resolving relative FASTA paths.
+
+    Returns
+    -------
+    str or None
+        The amino-acid sequence, or ``None`` when *value* is empty.
+
+    Raises
+    ------
+    ValueError
+        If a FASTA file contains no sequence or more than one sequence.
+    """
+    if value is None:
+        return None
+
+    sequence = os.fspath(value).strip()
+    if not sequence:
+        return None
+
+    path = Path(sequence).expanduser()
+    if root is not None and not path.is_absolute():
+        path = Path(root).expanduser() / path
+
+    if not path.is_file():
+        return sequence
+
+    sequence_lines: list[str] = []
+    record_count = 0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith(">"):
+            record_count += 1
+            if record_count > 1:
+                # TODO: Deal with ligands and multichain
+                raise ValueError(f"FASTA file contains multiple sequences: {path}")
+            continue
+        if line.startswith(";") and not sequence_lines:
+            continue
+        sequence_lines.append("".join(line.split()))
+
+    if not sequence_lines:
+        raise ValueError(f"FASTA file contains no sequence: {path}")
+    return "".join(sequence_lines)
+
+
 # Baked-in checkpoint paths (Docker image), ACTL shared-storage paths, and
 # legacy fallbacks. Environment variables win when present.
 _CHECKPOINT_ENV_VARS = {
@@ -254,6 +312,7 @@ class GuidanceConfig:
     # in from the density fields below, which is how grid search and older
     # pickles keep working.
     reward_config: dict[str, Any] = field(default_factory=dict)
+    sequence: str | None = None
 
     # DO NOT remove the **kwargs, it is for compatibility with argparse.
     def add_argument(self, name: str, default: Any = None, **kwargs):
@@ -390,6 +449,7 @@ class GuidanceConfig:
             align_to_input=args.align_to_input,
             alignment_reverse_diffusion=args.alignment_reverse_diffusion,
             reward_config=reward_config.to_mapping(),
+            sequence=resolve_sequence_arg(args.sequence),
         )
 
         # __post_init__ already set defaults for model/guidance-specific
@@ -671,6 +731,15 @@ def reward_options_from_args(args: argparse.Namespace) -> dict[str, Any]:
 def add_generic_args(parser: argparse.ArgumentParser | GuidanceConfig):
     """Add CLI arguments shared by all models and guidance methods."""
     parser.add_argument("--structure", type=str, required=True, help="Input structure")
+    parser.add_argument("--density", type=str, required=True, help="Input density map")
+    parser.add_argument(
+        "--sequence",
+        type=str,
+        default=None,
+        help="Ground-truth sequence (amino acid string or path to a FASTA file)."
+        "This sequence will be what gets passed into the structure predictor in the case of "
+        "unmodeled regions.",
+    )
     parser.add_argument("--output-dir", type=str, default="output", help="Output directory")
     parser.add_argument(
         "--log-path", type=str, default=None, help="Log file path (default: output-dir/run.log)"
@@ -904,6 +973,7 @@ class JobConfig:
     method: str | None
     output_dir: str
     log_path: str
+    sequence: str | None = None
 
 
 @dataclass

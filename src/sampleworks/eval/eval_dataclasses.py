@@ -6,6 +6,7 @@ import numpy as np
 from loguru import logger
 from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.volume import XMap
 from sampleworks.eval.occupancy_utils import occupancy_to_str
+from sampleworks.utils.guidance_script_arguments import resolve_sequence_arg
 
 
 @dataclass
@@ -55,6 +56,7 @@ class ProteinConfig:
     resolution: float
     map_pattern: str
     structure_pattern: str = ""
+    sequence: str | None = None
 
     def __post_init__(self):
         # TODO validate structure patterns? Anything else we should check to avoid later errors?
@@ -220,6 +222,9 @@ class ProteinConfig:
                     # Structure pattern is optional
                     structure_pattern = row.get("structure_pattern", "").strip()
 
+                    # Sequence is optional (raw string or FASTA file path)
+                    sequence = resolve_sequence_arg(row.get("sequence", ""), workspace_root)
+
                     # Create ProteinConfig object
                     config = cls(
                         protein=protein,
@@ -228,6 +233,7 @@ class ProteinConfig:
                         resolution=resolution,
                         map_pattern=row["map_pattern"].strip(),
                         structure_pattern=structure_pattern,
+                        sequence=sequence,
                     )
 
                     # Check for duplicate protein names
