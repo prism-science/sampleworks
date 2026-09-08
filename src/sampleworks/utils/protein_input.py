@@ -3,6 +3,8 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
+from sampleworks.utils.sequence import resolve_sequence_arg
+
 
 @dataclass
 class ProteinInput:
@@ -14,7 +16,7 @@ class ProteinInput:
     structure: Path
     density: Path
     resolution: float
-    sequence: str | None
+    sequence: str | None = None
 
     def __post_init__(self):
         self.structure = Path(self.structure)
@@ -82,7 +84,7 @@ class ProteinInput:
                         f"Row {row_idx}: invalid resolution '{resolution_raw}' for protein '{name}'"
                     ) from err
 
-                sequence = sequence_raw if sequence_raw else None
+                sequence = resolve_sequence_arg(sequence_raw, csv_dir)
 
                 protein_inputs.append(
                     cls(

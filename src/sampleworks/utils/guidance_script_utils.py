@@ -43,6 +43,7 @@ from sampleworks.utils.guidance_script_arguments import (
     validate_model_checkpoint,
 )
 from sampleworks.utils.msa import MSAManager
+from sampleworks.utils.sequence import apply_sequence_override
 
 
 # The following imports aren't compatible with each other and are supported in separate
@@ -489,6 +490,8 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
     wrapper_class_name = model_wrapper.__class__.__name__
     is_boltz = "Boltz" in wrapper_class_name
 
+    structure = apply_sequence_override(structure, args.sequence)
+
     # Annotate structure with model-specific configuration (including recycling_steps)
     # See https://github.com/prism-science/sampleworks/issues/192 for a plan to organize this
     # better.
@@ -502,7 +505,10 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
     if "Protenix" in wrapper_class_name:
         from sampleworks.models.protenix.wrapper import annotate_structure_for_protenix
 
-        structure = annotate_structure_for_protenix(structure, recycling_steps=recycling_steps)
+        structure = annotate_structure_for_protenix(
+            structure,
+            recycling_steps=recycling_steps,
+        )
     elif "RF3" in wrapper_class_name:
         from sampleworks.models.rf3.wrapper import annotate_structure_for_rf3
 
