@@ -16,8 +16,54 @@ from sampleworks.utils.guidance_script_arguments import (
     GuidanceConfig,
     JobConfig,
     JobResult,
+    resolve_sequence_arg,
     validate_model_checkpoint,
 )
+
+
+# ============================================================================
+# resolve_sequence_arg tests
+# ============================================================================
+
+
+def test_resolve_sequence_arg_handles_empty_values():
+    """Empty and whitespace-only values should result in a None return value."""
+    assert resolve_sequence_arg(None) is None
+    assert resolve_sequence_arg("") is None
+    assert resolve_sequence_arg("   ") is None
+
+
+def test_resolve_sequence_arg_returns_trimmed_literal_sequence():
+    """Non-file values should be returned as normalized sequence strings."""
+    assert resolve_sequence_arg(" ACDEFG ") == "ACDEFG"
+
+
+def test_resolve_sequence_arg_reads_relative_fasta_from_root(tmp_path: Path):
+    """Relative FASTA paths should be resolved against the supplied root."""
+    fasta = tmp_path / "sequence.fasta"
+    fasta.write_text("; comment\n  >protein\n AC D \n EF\n")
+
+    assert resolve_sequence_arg("sequence.fasta", tmp_path) == "ACDEF"
+
+
+def test_resolve_sequence_arg_rejects_multiple_fasta_records(tmp_path: Path):
+    """A sequence argument should not silently concatenate FASTA records."""
+    fasta = tmp_path / "sequences.fasta"
+    fasta.write_text(">first\nACD\n>second\nEFG\n")
+
+    # TODO: eventually we will need to scale this to multiple sequences and ligands
+    # which will invalidate this test
+    with pytest.raises(ValueError, match="multiple sequences"):
+        resolve_sequence_arg(fasta)
+
+
+def test_resolve_sequence_arg_rejects_empty_fasta(tmp_path: Path):
+    """FASTA files without sequence data should fail with a useful error."""
+    fasta = tmp_path / "empty.fasta"
+    fasta.write_text(">protein\n")
+
+    with pytest.raises(ValueError, match="no sequence"):
+        resolve_sequence_arg(fasta)
 
 
 # ============================================================================
