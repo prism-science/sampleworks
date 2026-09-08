@@ -14,6 +14,7 @@ class ProteinInput:
     structure: Path
     density: Path
     resolution: float
+    sequence: str | None
 
     def __post_init__(self):
         self.structure = Path(self.structure)
@@ -33,6 +34,9 @@ class ProteinInput:
                 f"Resolution must be a positive finite number for protein '{self.name}', "
                 f"got {self.resolution}."
             )
+
+        if self.sequence is not None and not isinstance(self.sequence, str):
+            raise ValueError(f"Sequence must be a string or None, got {type(self.sequence)}")
 
     @classmethod
     def from_csv(cls, csv_path: Path) -> list["ProteinInput"]:
@@ -61,6 +65,7 @@ class ProteinInput:
                 structure_raw = (row.get("structure") or "").strip()
                 density_raw = (row.get("density") or "").strip()
                 resolution_raw = (row.get("resolution") or "").strip()
+                sequence_raw = (row.get("sequence") or "").strip()
 
                 structure = Path(structure_raw)
                 if not structure.is_absolute():
@@ -77,12 +82,15 @@ class ProteinInput:
                         f"Row {row_idx}: invalid resolution '{resolution_raw}' for protein '{name}'"
                     ) from err
 
+                sequence = sequence_raw if sequence_raw else None
+
                 protein_inputs.append(
                     cls(
                         name=name,
                         structure=structure,
                         density=density,
                         resolution=resolution,
+                        sequence=sequence,
                     )
                 )
 
