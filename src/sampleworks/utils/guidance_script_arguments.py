@@ -14,6 +14,7 @@ from sampleworks.core.rewards.config import REWARD_OPTIONS_KEY, RewardConfig
 from sampleworks.core.rewards.options import option_type
 from sampleworks.core.rewards.registry import get_reward_spec, reward_type_names
 from sampleworks.utils.guidance_constants import GuidanceType, Rewards, StructurePredictor
+from sampleworks.utils.sequence import resolve_sequence_arg
 
 
 # Reward used when a run does not say which one it wants. Keeps every command
@@ -23,64 +24,6 @@ DEFAULT_REWARD_TYPE = Rewards.REAL_SPACE_DENSITY
 # Namespace prefix for generated reward-option flags, so they cannot collide with
 # a model or guidance argument of the same name.
 _REWARD_OPTION_PREFIX = "reward_option_"
-
-def resolve_sequence_arg(
-    value: str | os.PathLike[str] | None,
-    root: str | os.PathLike[str] | None = None,
-) -> str | None:
-    """Resolve a sequence value or FASTA path to an amino-acid sequence.
-
-    Parameters
-    ----------
-    value : str or os.PathLike or None
-        An amino-acid string, a path to a FASTA file, or an empty value.
-    root : str or os.PathLike or None
-        Base directory for resolving relative FASTA paths.
-
-    Returns
-    -------
-    str or None
-        The amino-acid sequence, or ``None`` when *value* is empty.
-
-    Raises
-    ------
-    ValueError
-        If a FASTA file contains no sequence or more than one sequence.
-    """
-    if value is None:
-        return None
-
-    sequence = os.fspath(value).strip()
-    if not sequence:
-        return None
-
-    path = Path(sequence).expanduser()
-    if root is not None and not path.is_absolute():
-        path = Path(root).expanduser() / path
-
-    if not path.is_file():
-        return sequence
-
-    sequence_lines: list[str] = []
-    record_count = 0
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith(">"):
-            record_count += 1
-            if record_count > 1:
-                # TODO: Deal with ligands and multichain
-                raise ValueError(f"FASTA file contains multiple sequences: {path}")
-            continue
-        if line.startswith(";") and not sequence_lines:
-            continue
-        sequence_lines.append("".join(line.split()))
-
-    if not sequence_lines:
-        raise ValueError(f"FASTA file contains no sequence: {path}")
-    return "".join(sequence_lines)
-
 
 # Baked-in checkpoint paths (Docker image), ACTL shared-storage paths, and
 # legacy fallbacks. Environment variables win when present.
