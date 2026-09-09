@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from sampleworks.utils.guidance_constants import GuidanceType, StructurePredictor
 
 
@@ -366,6 +368,9 @@ class GuidanceConfig:
             if val is not None:
                 setattr(config, attr, val)
 
+        # Checked here, not in __post_init__: ensemble_size is a dynamic attr,
+        # so the CLI value only lands in the loop above.
+        config.warn_if_diffuse_cannot_contribute()
         return config
 
     def __post_init__(self):
@@ -414,6 +419,29 @@ class GuidanceConfig:
                 f"(got {self.bragg_weight})."
             )
 
+    def warn_if_diffuse_cannot_contribute(self) -> None:
+        """Warn when the diffuse term is weighted but cannot produce a gradient.
+
+        ``<|F|^2> - |<F>|^2`` is identically zero for a single configuration, so
+        with ``--ensemble-size 1`` the diffuse residual collapses to a constant:
+        the scale fit lands on zero and the normalized residual on 1.0, with no
+        gradient. Nothing breaks -- Bragg guidance carries on at its own weight
+        -- so this is a warning rather than an error, but the diffuse target is
+        doing nothing and the run should probably be configured differently.
+        """
+        if self.target_type != "diffuse" or self.bragg_weight >= 1.0:
+            return
+        if getattr(self, "ensemble_size", 2) >= 2:
+            return
+
+        logger.warning(
+            f"--ensemble-size 1 with --bragg-weight {self.bragg_weight}: the diffuse "
+            "term is <|F|^2> - |<F>|^2, which is identically zero for one "
+            "configuration, so it contributes a constant and no gradient. Raise "
+            "--ensemble-size to score diffuse, or set --bragg-weight 1 to drop the "
+            "term and score Bragg alone."
+        )
+
     def populate_config_for_guidance_type(self, job: JobConfig, args: argparse.Namespace):
         """Apply per-job grid-search values onto this guidance configuration."""
         checkpoint = get_checkpoint(args)
@@ -443,6 +471,8 @@ class GuidanceConfig:
             self.step_scaler_type = args.step_scaler_type
             self.ensemble_size = job.ensemble_size
 
+        self.warn_if_diffuse_cannot_contribute()
+
     def as_dict(self) -> dict[str, Any]:
         """Return a dictionary representation of the guidance config, converting Path to strings.
 
@@ -455,6 +485,13 @@ class GuidanceConfig:
         output["structure"] = _remap_container_path(str(self.structure))
         output["output_dir"] = _remap_container_path(str(self.output_dir))
         output["log_path"] = _remap_container_path(str(self.log_path))
+        # The diffuse targets are typed `Path | str | None`. A programmatic run
+        # passing Path would otherwise leave PosixPath here, and the
+        # unconditional json.dump in _write_job_metadata raises on it. None must
+        # survive as None: "None" would read as a path that was set.
+        for target in ("bragg_target", "diffuse_target"):
+            value = getattr(self, target, None)
+            output[target] = None if value is None else _remap_container_path(str(value))
         return output
 
     def __setstate__(self, state: dict[str, Any]) -> None:

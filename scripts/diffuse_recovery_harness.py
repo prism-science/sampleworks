@@ -139,6 +139,38 @@ def build_truth_ensemble(atom_array, coords, residue_range, displacement):
     return truth, moving
 
 
+def _invocation_path() -> str:
+    """How to name this script in a command the reader can paste back.
+
+    ``Path(__file__).name`` drops the directory, so a run started from the repo
+    root as ``python scripts/diffuse_recovery_harness.py`` printed a follow-up
+    command naming a file that does not exist there.
+    """
+    here = Path(__file__).resolve()
+    try:
+        return str(here.relative_to(Path.cwd()))
+    except ValueError:
+        return str(here)
+
+
+def _identity_mismatches(truth, guided) -> list[str]:
+    """Positions where the two structures disagree about which atom sits there.
+
+    Compares chain, residue number, atom name and element: the annotations that
+    identify an atom independently of its coordinates and survive a round trip
+    through a CIF.
+    """
+    fields = ("chain_id", "res_id", "atom_name", "element")
+    truth_keys = list(zip(*(np.asarray(getattr(truth, f)) for f in fields), strict=True))
+    guided_keys = list(zip(*(np.asarray(getattr(guided, f)) for f in fields), strict=True))
+
+    return [
+        f"{i}: truth {'/'.join(map(str, a))} vs guided {'/'.join(map(str, b))}"
+        for i, (a, b) in enumerate(zip(truth_keys, guided_keys, strict=True))
+        if a != b
+    ]
+
+
 def rmsf(coords: np.ndarray) -> np.ndarray:
     """Per-atom root-mean-square fluctuation about the ensemble mean."""
     return np.sqrt(((coords - coords.mean(axis=0)) ** 2).sum(axis=-1).mean(axis=0))
@@ -201,7 +233,7 @@ def generate(args: argparse.Namespace) -> None:
         f"      --output-dir {args.output_dir / 'guided'}\n"
     )
     print(
-        f"Then: python {Path(__file__).name} evaluate "
+        f"Then: python {_invocation_path()} evaluate "
         f"--truth {truth_path} --guided {args.output_dir / 'guided' / 'refined.cif'}\n"
     )
 
@@ -232,6 +264,19 @@ def evaluate(args: argparse.Namespace) -> None:
         raise ValueError(
             f"Atom counts differ: truth {truth_coords.shape[1]}, guided "
             f"{guided_coords.shape[1]}. They must be the same topology."
+        )
+
+    # Equal counts are not equal topology. The RMSF profiles are compared
+    # position by position, so a reordering -- or the same number of chemically
+    # different atoms -- gives a confident, meaningless correlation. That is the
+    # mismatch this harness exists to rule out, so check identity, not size.
+    mismatched = _identity_mismatches(truth, guided)
+    if mismatched:
+        shown = ", ".join(mismatched[:5])
+        raise ValueError(
+            f"Atom identities differ at {len(mismatched)} position(s): {shown}"
+            f"{' ...' if len(mismatched) > 5 else ''}. The two files must carry the "
+            "same atoms in the same order."
         )
 
     truth_rmsf, guided_rmsf = rmsf(truth_coords), rmsf(guided_coords)
