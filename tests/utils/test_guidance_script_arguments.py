@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import pickle
 from argparse import Namespace
 from pathlib import Path
@@ -543,3 +544,108 @@ def test_density_remains_the_default_target_type_on_the_command_line():
     assert args.target_type == "density"
     assert args.bragg_target is None
     assert args.diffuse_target is None
+
+
+# ============================================================================
+# diffuse target serialization and ensemble-size warning
+# ============================================================================
+
+
+def test_as_dict_stringifies_the_diffuse_target_paths():
+    """job_metadata.json is written with an unconditional json.dump.
+
+    The target fields are typed ``Path | str | None``, so a programmatic run
+    passing Path would otherwise leave PosixPath in the metadata and raise
+    TypeError after the run had already finished.
+    """
+    config = _config(
+        target_type="diffuse",
+        density=None,
+        bragg_weight=0.5,
+        bragg_target=Path("/tmp/bragg.mtz"),
+        diffuse_target=Path("/tmp/diffuse.mtz"),
+    )
+
+    output = config.as_dict()
+
+    assert isinstance(output["bragg_target"], str)
+    assert isinstance(output["diffuse_target"], str)
+    json.dumps(output)  # must not raise
+
+
+def test_as_dict_keeps_absent_diffuse_targets_as_none():
+    """None must not become the string "None", which would read as a real path."""
+    config = _config(
+        target_type="diffuse",
+        density=None,
+        bragg_weight=1.0,
+        bragg_target="/tmp/bragg.mtz",
+    )
+
+    output = config.as_dict()
+
+    assert output["diffuse_target"] is None
+    json.dumps(output)
+
+
+def test_single_configuration_with_a_weighted_diffuse_term_warns(caplog):
+    """Diffuse is <|F|^2> - |<F>|^2, identically zero for one configuration.
+
+    The run still works -- Bragg carries it, and the diffuse residual collapses
+    to a constant with no gradient -- so this warns rather than raising.
+    """
+    config = _config(
+        target_type="diffuse",
+        density=None,
+        bragg_weight=0.5,
+        bragg_target="/tmp/bragg.mtz",
+        diffuse_target="/tmp/diffuse.mtz",
+    )
+    config.ensemble_size = 1
+
+    with caplog.at_level("WARNING"):
+        config.warn_if_diffuse_cannot_contribute()
+
+    assert "identically zero for one" in caplog.text
+
+
+def test_no_warning_when_the_diffuse_term_carries_no_weight(caplog):
+    """bragg_weight == 1 drops the diffuse term, so one configuration is fine."""
+    config = _config(
+        target_type="diffuse",
+        density=None,
+        bragg_weight=1.0,
+        bragg_target="/tmp/bragg.mtz",
+    )
+    config.ensemble_size = 1
+
+    with caplog.at_level("WARNING"):
+        config.warn_if_diffuse_cannot_contribute()
+
+    assert caplog.text == ""
+
+
+def test_no_warning_when_the_ensemble_can_produce_a_diffuse_signal(caplog):
+    config = _config(
+        target_type="diffuse",
+        density=None,
+        bragg_weight=0.5,
+        bragg_target="/tmp/bragg.mtz",
+        diffuse_target="/tmp/diffuse.mtz",
+    )
+    config.ensemble_size = 4
+
+    with caplog.at_level("WARNING"):
+        config.warn_if_diffuse_cannot_contribute()
+
+    assert caplog.text == ""
+
+
+def test_no_warning_for_a_density_run(caplog):
+    config = _config()
+    config.ensemble_size = 1
+
+    with caplog.at_level("WARNING"):
+        config.warn_if_diffuse_cannot_contribute()
+
+    assert caplog.text == ""
