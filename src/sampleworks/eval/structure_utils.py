@@ -8,15 +8,17 @@ from typing import Any, cast, overload
 import numpy as np
 import torch
 from atomworks.io.transforms.atom_array import ensure_atom_array_stack
-from atomworks.io.utils.ccd import ChainType, UNKNOWN_AA
-from atomworks.io.utils.sequence import get_1_from_3_letter_code, get_3_from_1_letter_code
 from biotite.structure import AtomArray, AtomArrayStack, from_template
 from loguru import logger
 from sampleworks.core.rewards.protocol import RewardInputs
 from sampleworks.eval.eval_dataclasses import ProteinConfig
 from sampleworks.models.protocol import GenerativeModelInput
 from sampleworks.utils import atom_array_utils
-from sampleworks.utils.atom_array_utils import BLANK_ALTLOC_IDS, load_structure_with_altlocs
+from sampleworks.utils.atom_array_utils import (
+    BLANK_ALTLOC_IDS,
+    closest_canonical_residue_name,
+    load_structure_with_altlocs,
+)
 from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.framework_utils import match_batch
 
@@ -391,29 +393,6 @@ def get_asym_unit_from_structure(
     return atom_array
 
 
-def _closest_canonical_amino_acid(res_name: str) -> str | None:
-    """Map a (possibly modified) residue name to its canonical parent amino acid.
-
-    Uses atomworks' mapping, e.g. ``CSO -> CYS``, ``MSE -> MET``. Standard amino
-    acids map to themselves and "residues" with no amino-acid (ligands, waters) return ``None``.
-
-    Parameters
-    ----------
-    res_name : str
-        Three letter amino acid name.
-
-    Returns
-    -------
-    str | None
-        Canonical three letter amino acid name, or ``None`` if HETATM.
-    """
-    one_letter = get_1_from_3_letter_code(
-        res_name, ChainType.POLYPEPTIDE_L, use_closest_canonical=True
-    )
-    parent = get_3_from_1_letter_code(one_letter, ChainType.POLYPEPTIDE_L)
-    return None if parent == UNKNOWN_AA else parent
-
-
 def canonicalize_mixed_altloc_residues(
     atom_array: AtomArray | AtomArrayStack,
 ) -> AtomArray | AtomArrayStack:
@@ -426,7 +405,8 @@ def canonicalize_mixed_altloc_residues(
     oxygens). This function makes such positions stackable by
 
     1. renaming every residue at a mixed position to their shared canonical parent (via
-       :func:`_closest_canonical_amino_acid`) and clearing ``hetero``, but only when *all*
+       :func:`~sampleworks.utils.atom_array_utils.closest_canonical_residue_name`) and clearing
+       ``hetero``, but only when *all*
        residue names at that position resolve to the *same* canonical parent, and
     2. dropping atoms that are not shared by every altloc at a canonicalized position, so each
        conformer ends with an identical atom set. The modified-only atoms are removed while both
@@ -481,7 +461,7 @@ def canonicalize_mixed_altloc_residues(
     #    stackable anyway, so it's better to leave those untouched and warn.
     canonical_parent_by_position: dict[tuple, str] = {}
     for position in mixed_positions:
-        parents = {_closest_canonical_amino_acid(name) for name in res_names_by_position[position]}
+        parents = {closest_canonical_residue_name(name) for name in res_names_by_position[position]}
         if len(parents) == 1 and (parent := parents.pop()) is not None:
             canonical_parent_by_position[position] = parent
         else:

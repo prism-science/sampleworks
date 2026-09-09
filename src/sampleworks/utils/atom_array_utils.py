@@ -8,7 +8,9 @@ import einx
 import numpy as np
 from atomworks import parse
 from atomworks.io.transforms.atom_array import ensure_atom_array_stack
+from atomworks.io.utils.ccd import ChainType, UNKNOWN_AA
 from atomworks.io.utils.io_utils import load_any
+from atomworks.io.utils.sequence import get_1_from_3_letter_code, get_3_from_1_letter_code
 from biotite.structure import AtomArray, AtomArrayStack, filter_amino_acids, filter_polymer, stack
 from biotite.structure.io.pdbx import CIFFile, set_structure
 from loguru import logger
@@ -17,6 +19,32 @@ from loguru import logger
 BACKBONE_ATOM_TYPES = ["C", "CA", "N", "O"]
 BLANK_ALTLOC_IDS = {"", ".", " ", "?"}
 ATOMWORKS_COMPARISON_OPS = ("==", ">", "<", "<=", ">=", " in ")
+
+
+def closest_canonical_residue_name(residue_name: str) -> str | None:
+    """Find a modified residue's canonical amino-acid parent.
+
+    Uses atomworks' closest-canonical mapping, e.g. ``CSO -> CYS``, ``MSE -> MET``.
+    Canonical amino acids map to themselves.
+
+    Parameters
+    ----------
+    residue_name : str
+        CCD component name.
+
+    Returns
+    -------
+    str | None
+        Canonical three-letter name, or ``None`` for a non-protein component
+        (ligand, water) that has no amino-acid parent.
+    """
+    one_letter = get_1_from_3_letter_code(
+        residue_name,
+        chain_type=ChainType.POLYPEPTIDE_L,
+        use_closest_canonical=True,
+    )
+    name = get_3_from_1_letter_code(one_letter, chain_type=ChainType.POLYPEPTIDE_L)
+    return None if name == UNKNOWN_AA else name
 
 
 @dataclass

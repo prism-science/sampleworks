@@ -8,7 +8,6 @@ import pytest
 from biotite.structure import AtomArray, AtomArrayStack
 from sampleworks.eval.eval_dataclasses import ProteinConfig
 from sampleworks.eval.structure_utils import (
-    _closest_canonical_amino_acid,
     canonicalize_mixed_altloc_residues,
     extract_selection_coordinates,
     get_asym_unit_from_structure,
@@ -17,6 +16,7 @@ from sampleworks.eval.structure_utils import (
 )
 from sampleworks.utils.atom_array_utils import (
     apply_selection,
+    closest_canonical_residue_name,
     map_altlocs_to_stack,
     parse_selection_string,
 )
@@ -435,7 +435,7 @@ class TestCanonicalizeMixedAltlocResidues:
     )
     def test_closest_canonical_amino_acid(self, res_name, expected):
         """The modified-to-canonical mapping resolves PTMs and rejects non-amino-acids."""
-        assert _closest_canonical_amino_acid(res_name) == expected
+        assert closest_canonical_residue_name(res_name) == expected
 
     def test_renames_modified_at_mixed_position(self):
         """Modified records at a mixed position are renamed and de-heteroed; lone MSE is kept."""
