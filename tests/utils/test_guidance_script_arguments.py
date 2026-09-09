@@ -376,3 +376,124 @@ def test_job_result_migrates_legacy_model_pickle() -> None:
     assert restored.model_name == "boltz2"
     assert "model" not in restored.__dict__
     assert "model" not in restored.as_dict()
+
+
+# ============================================================================
+# _validate_target tests
+# ============================================================================
+#
+# Which arguments are required depends on --target-type and, for diffuse, on
+# --bragg-weight: a pure-diffuse run needs no amplitudes and a pure-Bragg run no
+# diffuse map. Validation runs in __post_init__ so a misconfigured run fails
+# before the model weights load, which is the behaviour these pin.
+
+
+def _config(**overrides) -> GuidanceConfig:
+    """A GuidanceConfig with the target arguments under test overridable."""
+    kwargs = {
+        "protein": "protein",
+        "structure": "/tmp/structure.cif",
+        "density": "/tmp/density.mrc",
+        "model_name": StructurePredictor.BOLTZ_2,
+        "guidance_type": GuidanceType.PURE_GUIDANCE,
+        "log_path": "/tmp/output/run.log",
+    }
+    kwargs.update(overrides)
+    return GuidanceConfig(**kwargs)
+
+
+def test_density_target_is_the_default_and_accepts_a_map():
+    config = _config()
+
+    assert config.target_type == "density"
+    assert config.bragg_weight == 0.5
+
+
+def test_density_target_requires_a_density_map():
+    with pytest.raises(ValueError, match="--density is required"):
+        _config(density=None)
+
+
+def test_unknown_target_type_is_rejected():
+    with pytest.raises(ValueError, match="Unknown target type: sasa"):
+        _config(target_type="sasa")
+
+
+@pytest.mark.parametrize("weight", [-0.1, 1.5])
+def test_bragg_weight_outside_the_unit_interval_is_rejected(weight):
+    """The weight mixes two targets convexly, so values outside [0, 1] are meaningless."""
+    with pytest.raises(ValueError, match="convex mixture"):
+        _config(
+            target_type="diffuse",
+            density=None,
+            bragg_weight=weight,
+            bragg_target="/tmp/bragg.mtz",
+            diffuse_target="/tmp/diffuse.mtz",
+        )
+
+
+def test_diffuse_target_requires_bragg_amplitudes_when_they_are_weighted():
+    with pytest.raises(ValueError, match="--bragg-target is required"):
+        _config(
+            target_type="diffuse",
+            density=None,
+            bragg_weight=0.5,
+            diffuse_target="/tmp/diffuse.mtz",
+        )
+
+
+def test_diffuse_target_requires_a_diffuse_map_unless_the_weight_is_all_bragg():
+    with pytest.raises(ValueError, match="--diffuse-target is required"):
+        _config(
+            target_type="diffuse",
+            density=None,
+            bragg_weight=0.5,
+            bragg_target="/tmp/bragg.mtz",
+        )
+
+
+def test_pure_diffuse_run_needs_no_bragg_amplitudes():
+    """bragg_weight == 0 drops the Bragg term entirely, so its target is optional."""
+    config = _config(
+        target_type="diffuse",
+        density=None,
+        bragg_weight=0.0,
+        diffuse_target="/tmp/diffuse.mtz",
+    )
+
+    assert config.bragg_target is None
+
+
+def test_pure_bragg_run_needs_no_diffuse_map():
+    config = _config(
+        target_type="diffuse",
+        density=None,
+        bragg_weight=1.0,
+        bragg_target="/tmp/bragg.mtz",
+    )
+
+    assert config.diffuse_target is None
+
+
+def test_mixed_run_accepts_both_targets():
+    config = _config(
+        target_type="diffuse",
+        density=None,
+        bragg_weight=0.25,
+        bragg_target="/tmp/bragg.mtz",
+        diffuse_target="/tmp/diffuse.mtz",
+    )
+
+    assert (config.bragg_weight, config.target_type) == (0.25, "diffuse")
+
+
+def test_diffuse_target_does_not_require_a_density_map():
+    """--density is for the real-space reward; a diffuse run should not demand one."""
+    config = _config(
+        target_type="diffuse",
+        density=None,
+        bragg_weight=0.0,
+        diffuse_target="/tmp/diffuse.mtz",
+    )
+
+    assert config.density is None
