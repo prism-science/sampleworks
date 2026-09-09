@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import pickle
 from argparse import Namespace
 from pathlib import Path
@@ -11,6 +12,7 @@ import pytest
 from sampleworks.utils.guidance_constants import GuidanceType, StructurePredictor
 from sampleworks.utils.guidance_script_arguments import (
     _remap_container_path,
+    add_generic_args,
     get_checkpoint,
     GuidanceConfig,
     JobConfig,
@@ -497,3 +499,47 @@ def test_diffuse_target_does_not_require_a_density_map():
     )
 
     assert config.density is None
+
+
+def test_diffuse_target_arguments_are_exposed_on_the_command_line():
+    """--target-type and the diffuse targets must reach GuidanceConfig from argv.
+
+    The config reads them with ``getattr(args, ..., default)``, which silently
+    tolerates their absence, so a missing flag would not fail loudly -- it would
+    quietly run a density job instead.
+    """
+    parser = argparse.ArgumentParser()
+    add_generic_args(parser)
+
+    args = parser.parse_args(
+        [
+            "--structure",
+            "/tmp/structure.cif",
+            "--resolution",
+            "1.8",
+            "--target-type",
+            "diffuse",
+            "--bragg-target",
+            "/tmp/bragg.mtz",
+            "--diffuse-target",
+            "/tmp/diffuse.mtz",
+            "--bragg-weight",
+            "0.25",
+        ]
+    )
+
+    assert args.target_type == "diffuse"
+    assert str(args.bragg_target) == "/tmp/bragg.mtz"
+    assert str(args.diffuse_target) == "/tmp/diffuse.mtz"
+    assert args.bragg_weight == 0.25
+
+
+def test_density_remains_the_default_target_type_on_the_command_line():
+    parser = argparse.ArgumentParser()
+    add_generic_args(parser)
+
+    args = parser.parse_args(["--structure", "/tmp/structure.cif", "--resolution", "1.8"])
+
+    assert args.target_type == "density"
+    assert args.bragg_target is None
+    assert args.diffuse_target is None
