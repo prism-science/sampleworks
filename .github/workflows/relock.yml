@@ -1,16 +1,28 @@
 name: Relock
 
 # Regenerate pixi.lock on Linux and commit it back to the dispatched branch.
-# The workspace pins system-requirements.cuda and uses git/editable deps, so a
-# from-scratch solve must build them for linux-64 — which cannot be done on
-# macOS. Run this workflow (Actions tab -> Relock -> Run workflow, pick the
-# branch) whenever pyproject.toml changes and the lock needs refreshing.
+# Run it (Actions tab -> Relock -> Run workflow, pick the branch) whenever
+# pyproject.toml changes and the lock needs refreshing. It is the only way to
+# regenerate the lock: `pixi lock` is all-or-nothing, with no --environment or
+# --platform selector, and solving a linux-64 environment needs a linux-64
+# prefix, which a Mac cannot create.
 #
-# Bumping a git dependency's rev: start from a lock that does not already carry
-# the old rev, otherwise the osx-arm64 environments go stale and this Linux
-# runner cannot re-resolve them (see #383). Deleting pixi.lock before the run
-# forces a fresh solve and sidesteps it, at the cost of churning unrelated
-# versions.
+# Some dependencies have to be BUILT to read their metadata, which is what ties
+# the solve to a platform. Those are the sdist-only ones -- ihm has no wheel at
+# any version, modelcif's start at 1.6 while boltz and protenix pin below it --
+# not the editable `sampleworks` path dependency, whose metadata is static and
+# never built (#383).
+#
+# ONE KNOWN FAILURE, and it is narrow. If the lock and the manifest disagree
+# about a git dependency's REV, the affected environments go stale and are
+# re-resolved from scratch, and a from-scratch osx-arm64 resolve needs an osx
+# prefix this Linux runner cannot create. Reset pixi.lock to a state without
+# that rev first and the change becomes additive, which resolves fine. Deleting
+# pixi.lock also works and churns unrelated versions.
+#
+# Everything else relocks normally. Changing which environments carry a
+# dependency, at an unchanged rev, is additive: measured at 7 lines and 1 line
+# of diff on two runs, both green.
 on:
   workflow_dispatch:
 
