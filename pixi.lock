@@ -18494,6 +18494,7 @@ packages:
   - loguru
   - omegaconf
   - python-dotenv
+  - reciprocalspaceship
   - sfcalculator-torch>=0.3.3
   requires_python: '>=3.11,<3.14'
 - pypi: git+https://github.com/ProteinDesignLab/protpardelle-1c.git?rev=ee378400f25b801fa481028000f9060183d7fb4c#ee378400f25b801fa481028000f9060183d7fb4c
