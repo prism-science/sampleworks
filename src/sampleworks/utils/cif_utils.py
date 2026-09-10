@@ -1,4 +1,5 @@
 import itertools
+import re
 import tempfile
 from collections import OrderedDict
 from collections.abc import Iterable
@@ -16,6 +17,16 @@ from sampleworks.utils.atom_array_utils import (
     save_structure_to_cif,
     select_altloc,
 )
+
+
+ATOM_SITE_COLUMN_DEFAULTS = {
+    "occupancy": 1.0,
+    "B_iso_or_equiv": 20.0,
+}
+# Extended PDB IDs use `pdb_` plus eight alphanumerics. Legacy IDs have four
+# alphanumerics and start with a digit, which excludes folder names such as `TEST`.
+RCSB_ID_PATTERN = re.compile(r"pdb_[A-Za-z0-9]{8}|[0-9][A-Za-z0-9]{3}")
+SAMPLEWORKS_RCSB_CACHE = Path("~/.sampleworks/rcsb").expanduser()
 
 
 def find_altloc_selections(
@@ -340,3 +351,20 @@ def _normalize_nulls(value: Any) -> Any:
     if isinstance(value, Iterable) and not isinstance(value, str | bytes):
         return ["?" if item is None else item for item in value]
     return "?" if value is None else value
+
+
+def ensure_atom_site_metadata(atom_site: CIFCategory) -> None:
+    """Add the occupancy and B-factor columns required by downstream evaluation.
+
+    This function mutates ``atom_site``, appending absent columns after the
+    existing ones. Present columns are never overwritten.
+
+    Parameters
+    ----------
+    atom_site : biotite.structure.io.pdbx.cif.CIFCategory
+        Atom-site category modified in place.
+    """
+    num_atoms = atom_site.row_count
+    for column_name, default in ATOM_SITE_COLUMN_DEFAULTS.items():
+        if column_name not in atom_site:
+            atom_site[column_name] = np.full(num_atoms, str(default))

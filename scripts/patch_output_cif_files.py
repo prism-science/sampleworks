@@ -13,22 +13,19 @@ from biotite.database.rcsb import fetch
 from biotite.structure.io.pdbx import CIFColumn, CIFFile, set_structure
 from loguru import logger
 from sampleworks.utils.atom_array_utils import remove_atoms_with_any_nan_coords
-from sampleworks.utils.cif_utils import add_category_to_cif, resolve_mixed_hetatm_atom_altlocs
+from sampleworks.utils.cif_utils import (
+    add_category_to_cif,
+    ensure_atom_site_metadata,
+    RCSB_ID_PATTERN,
+    resolve_mixed_hetatm_atom_altlocs,
+    SAMPLEWORKS_RCSB_CACHE,
+)
 
-
-SAMPLEWORKS_CACHE = Path("~/.sampleworks/rcsb").expanduser()
-
-
-# A valid PDB ID is either the extended 12-char form `pdb_` + 8 alphanumerics
-# (e.g. `pdb_00004hhb`) or the legacy 4-char form, whose first character is always a digit (0-9).
-# The leading-digit rule is what distinguishes a real legacy ID from a stray folder name like
-# `TEST`/`logs`.
-_VALID_RCSB_ID = re.compile(r"pdb_[A-Za-z0-9]{8}|[0-9][A-Za-z0-9]{3}")
 
 # Default --rcsb-pattern: locate the id (one capturing group) right after the
-# grid_search_results/ folder. Its group IS _VALID_RCSB_ID, so the default pattern and the
+# grid_search_results/ folder. Its group uses RCSB_ID_PATTERN, so the default pattern and the
 # validator can never drift apart.
-DEFAULT_RCSB_PATTERN = rf"grid_search_results/({_VALID_RCSB_ID.pattern})"
+DEFAULT_RCSB_PATTERN = rf"grid_search_results/({RCSB_ID_PATTERN.pattern})"
 
 
 def crawl_dir_by_depth(
@@ -128,7 +125,7 @@ def main(
         ``0`` when all matched files patch successfully, otherwise ``1``.
     """
     # make sure the cache exists
-    SAMPLEWORKS_CACHE.mkdir(parents=True, exist_ok=True)
+    SAMPLEWORKS_RCSB_CACHE.mkdir(parents=True, exist_ok=True)
 
     cif_files_to_patch = crawl_dir_by_depth(input_dir, target_pattern, n_levels=depth)
     if not cif_files_to_patch:
@@ -225,7 +222,7 @@ def extract_rcsb_id(cif_path: Path, rcsb_regex: str) -> str | None:
     if not (start_ok and end_ok):
         return None
     token = m.group(1)
-    if not _VALID_RCSB_ID.fullmatch(token):
+    if not RCSB_ID_PATTERN.fullmatch(token):
         raise InvalidRcsbIdError(token, rcsb_regex)
     return token
 
@@ -240,7 +237,7 @@ def patch_individual_cif_file(
         msg = (
             f"--rcsb-pattern {rcsb_regex!r} matched {cif_file} but captured {exc.token!r}, "
             f"which is not a valid PDB id (expected e.g. '4hhb' or 'pdb_00004hhb'; "
-            f"regex {_VALID_RCSB_ID.pattern!r}). Check that the capturing group targets the id."
+            f"regex {RCSB_ID_PATTERN.pattern!r}). Check that the capturing group targets the id."
         )
         logger.warning(msg)
         return msg
@@ -248,7 +245,7 @@ def patch_individual_cif_file(
         msg = (
             f"--rcsb-pattern {rcsb_regex!r} did not find a complete PDB-id folder in "
             f"{cif_file}. Expected a folder named exactly a PDB id (e.g. '4hhb' or "
-            f"'pdb_00004hhb'; regex {_VALID_RCSB_ID.pattern!r}). "
+            f"'pdb_00004hhb'; regex {RCSB_ID_PATTERN.pattern!r}). "
             f"Check the directory layout or the pattern."
         )
         logger.warning(msg)
@@ -257,7 +254,11 @@ def patch_individual_cif_file(
     try:
         reference_path = reference_dir / input_pdb_pattern.format(pdb_id=rcsb_id)
         # fetch only downloads the file if it isn't already present.
-        rcsb_path = fetch(rcsb_id, format="cif", target_path=str(SAMPLEWORKS_CACHE))
+        rcsb_path = fetch(
+            rcsb_id,
+            format="cif",
+            target_path=str(SAMPLEWORKS_RCSB_CACHE),
+        )
 
         # Mirror the fix from guidance_script_utils - strip mixed ATOM/HETATM altlocs
         # at the same residue position (e.g. 6NI5/6 CYS/CSO) so the reference matches
@@ -365,15 +366,8 @@ def patch_individual_cif_file(
     # Make sure the id field is unique to each atom
     template.block["atom_site"]["id"] = CIFColumn(np.arange(np.prod(asym_unit.shape)))
 
-    # make sure there are "occupancy" and "B_iso_or_equiv" annotations
-    if "occupancy" not in template.block["atom_site"].keys():
-        template.block["atom_site"]["occupancy"] = CIFColumn(
-            [1.0] * len(template.block["atom_site"]["id"])
-        )
-    if "B_iso_or_equiv" not in template.block["atom_site"].keys():
-        template.block["atom_site"]["B_iso_or_equiv"] = CIFColumn(
-            [20.0] * len(template.block["atom_site"]["id"])
-        )
+    # make sure occupancy and B-factor annotations exist
+    ensure_atom_site_metadata(template.block["atom_site"])
 
     template.block.name = cif_path.stem
     patched_cif_name = cif_path.parent / (cif_path.stem + "-patched.cif")
