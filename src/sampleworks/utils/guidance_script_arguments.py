@@ -412,23 +412,11 @@ class GuidanceConfig:
             self.fk_resampling_interval = args.fk_resampling_interval
             self.ensemble_size = job.ensemble_size
         elif job.scaler == GuidanceType.LATENT_OPT:
-            # IT-opt tunables are scalar flags rather than grid axes, so they come straight off
-            # the driver's namespace. This copy is what makes them work at all: the grid builds
-            # its GuidanceConfig directly and never calls from_cli(), so the _DYNAMIC_ATTRS loop
-            # that normally moves parsed values onto a config is unreachable from here. Without
-            # it every --which-latent / --learning-rate / --outer-steps flag is a silent no-op,
-            # left at the add_latent_opt_args default that __post_init__ already seeded.
             for attr in _LATENT_OPT_ATTRS:
                 value = getattr(args, attr, None)
                 if value is not None:
                     setattr(self, attr, value)
-            # _run_guidance reads ensemble_size directly rather than via getattr, so it must
-            # be set here or a latent_opt job raises AttributeError.
             self.ensemble_size = job.ensemble_size
-            # Deliberately no step_size / step_scaler_type here. add_latent_opt_args does not
-            # define them, so leaving them unset makes _run_guidance fall through to the same
-            # defaults the scratch runner hit (step_size 0.01, noisespace). Setting them would
-            # silently change what the recorded runs did.
         else:
             self.step_size = job.gradient_weight
             self.step_scaler_type = args.step_scaler_type

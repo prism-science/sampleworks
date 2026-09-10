@@ -144,38 +144,51 @@ class _PerMemberStepper:
     def __init__(
         self,
         model,
-        io: AttrLatentIO,
+        latent_io: AttrLatentIO,
         *,
         optimize_single: bool,
         optimize_pair: bool,
-        ensemble_size: int,
     ):
+        """Initialize the per-member stepping adapter.
+
+        Parameters
+        ----------
+        model
+            Model wrapper to loop over; its ``step`` is called once per member.
+        latent_io
+            Reads and writes the single/pair representations on the conditioning.
+        optimize_single
+            Whether the single representation is per-member and should be sliced.
+            When False it stays on the conditioning as the shared baseline.
+        optimize_pair
+            Same, for the pair representation.
+        """
         self._model = model
-        self._io = io
+        self._latent_io = latent_io
         self._optimize_single = optimize_single
         self._optimize_pair = optimize_pair
-        self._ensemble_size = ensemble_size
 
     def step(self, x_t: Tensor, t, *, features: GenerativeModelInput) -> Tensor:
         """Loop the wrapped model's ``step`` over ensemble members; stack the per-member results."""
         cond = features.conditioning
         per_member: list[Tensor] = []
-        for i in range(self._ensemble_size):
+        for i in range(x_t.shape[0]):
             # Slice only the OPTIMIZED latents (they carry the ensemble batch dim); a non-optimized
             # latent stays the shared un-batched baseline already on ``cond``.
             cond_i = cond
             if self._optimize_single:
-                cond_i = self._io.write_single(cond_i, self._io.read_single(cond)[i])
+                cond_i = self._latent_io.write_single(cond_i, self._latent_io.read_single(cond)[i])
             if self._optimize_pair:
-                # read_pair returns None when the io addresses no pair rep. sample() only sets
-                # optimize_pair together with a pair_attr, so this is a misconfigured io reaching
-                # us directly; say so rather than failing on a None subscript mid-denoise.
-                pair = self._io.read_pair(cond)
+                # read_pair returns None when the latent_io addresses no pair rep. sample() only
+                # sets optimize_pair together with a pair_attr, so this is a misconfigured
+                # latent_io reaching us directly; say so rather than failing on a None subscript
+                # mid-denoise.
+                pair = self._latent_io.read_pair(cond)
                 if pair is None:
                     raise ValueError(
-                        "optimize_pair is set, but the io addresses no pair representation."
+                        "optimize_pair is set, but the latent_io addresses no pair representation."
                     )
-                cond_i = self._io.write_pair(cond_i, pair[i])
+                cond_i = self._latent_io.write_pair(cond_i, pair[i])
             t_i = t
             if isinstance(t, Tensor) and t.ndim >= 1 and t.shape[0] == x_t.shape[0]:
                 t_i = t[i : i + 1]
@@ -299,7 +312,7 @@ class LatentOptimization:
         coordinate-space guidance). ``reward`` is evaluated on the
         reconciler-aligned denoised prediction.
         """
-        io = AttrLatentIO(
+        latent_io = AttrLatentIO(
             single_attr=self.single_attr,
             pair_attr=self.pair_attr if self.optimize_pair else None,
         )
@@ -309,7 +322,7 @@ class LatentOptimization:
         # from detached copies. (reference: get_msa_features + clone/detach.)
         with torch.no_grad():
             features = model.featurize(structure)
-        features, latents, baselines, anchor_weights = self._leaf_latents(features, io)
+        features, latents, baselines, anchor_weights = self._leaf_latents(features, latent_io)
         anchor = LatentAnchor(anchor_weights)
 
         # --- shared per-trajectory context (reconciler + reward inputs) ---------
@@ -331,10 +344,9 @@ class LatentOptimization:
         # un-batched conditioning, so the batched per-member latents can't go through in one call.
         stepper = _PerMemberStepper(
             model,
-            io,
+            latent_io,
             optimize_single=self.optimize_single,
             optimize_pair=self.optimize_pair,
-            ensemble_size=self.ensemble_size,
         )
 
         # --- optional coordinate-space geometry penalty -------------------------
@@ -388,7 +400,7 @@ class LatentOptimization:
             model=stepper,
             sampler=sampler,
             reward=reward,
-            io=io,
+            latent_io=latent_io,
             features=features,
             latents=latents,
             schedule=schedule,
@@ -413,7 +425,7 @@ class LatentOptimization:
             metadata=metadata,
         )
 
-    def _leaf_latents(self, features: GenerativeModelInput, io: AttrLatentIO):
+    def _leaf_latents(self, features: GenerativeModelInput, latent_io: AttrLatentIO):
         """Replace ``s``/``z`` on the conditioning with fresh optimizable leaves.
 
         Returns the rewritten ``features`` plus parallel lists of leaves, their
@@ -435,8 +447,8 @@ class LatentOptimization:
         # One row per optimizable latent: (optimize it?, its attribute on the conditioning, its
         # anchor weight). We handle the single representation, then the pair.
         specs = (
-            (self.optimize_single, io.single_attr, self.anchor_weight_single),
-            (self.optimize_pair, io.pair_attr, self.anchor_weight_pair),
+            (self.optimize_single, latent_io.single_attr, self.anchor_weight_single),
+            (self.optimize_pair, latent_io.pair_attr, self.anchor_weight_pair),
         )
         for enabled, attr, anchor_weight in specs:
             if not enabled:
@@ -601,7 +613,7 @@ class LatentOptimization:
         model,
         sampler,
         reward,
-        io,
+        latent_io,
         features,
         latents,
         schedule,
@@ -619,10 +631,10 @@ class LatentOptimization:
         # Re-inject detached copies so the final round is purely a frozen sampler.
         conditioning = features.conditioning
         detached = [lat.detach() for lat in latents]
-        if self.optimize_single and io.read_single(conditioning) is not None:
-            conditioning = io.write_single(conditioning, detached.pop(0))
-        if self.optimize_pair and io.read_pair(conditioning) is not None:
-            conditioning = io.write_pair(conditioning, detached.pop(0))
+        if self.optimize_single and latent_io.read_single(conditioning) is not None:
+            conditioning = latent_io.write_single(conditioning, detached.pop(0))
+        if self.optimize_pair and latent_io.read_pair(conditioning) is not None:
+            conditioning = latent_io.write_pair(conditioning, detached.pop(0))
         frozen_features = GenerativeModelInput(conditioning=conditioning)  # #330: conditioning-only
 
         coords = torch.as_tensor(

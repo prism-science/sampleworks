@@ -507,10 +507,8 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
 
         structure = annotate_structure_for_protenix(
             structure,
-            # Root Protenix's per-sample input dump (protenix_input*.json) under the job's output
-            # dir; otherwise out_dir falls back to the input id, resolves against the CWD, and
-            # leaves a stray <input_id>/ folder there on every run.
-            out_dir=str(Path(args.output_dir) / "protenix_input"),
+            # Deferred to its own PR: affects every Protenix run, not just latent-opt.
+            # out_dir=str(Path(args.output_dir) / "protenix_input"),
             recycling_steps=recycling_steps,
             # Disable diffusion shared-vars cache for LATENT_OPT so gradients can
             # flow to z_trunk; cached tensors can otherwise become stale.

@@ -12,7 +12,6 @@ from biotite.structure.io.pdbx.cif import CIFCategory, CIFFile
 from loguru import logger
 
 from sampleworks.utils.atom_array_utils import (
-    BLANK_ALTLOC_IDS,
     find_all_altloc_ids,
     save_structure_to_cif,
     select_altloc,
@@ -245,79 +244,6 @@ def resolve_mixed_hetatm_atom_altlocs(cif_path: Path | str) -> Path:
 
     save_structure_to_cif(fixed_array, tmp_path)
     logger.info(f"Wrote altloc-fixed CIF to temporary file: {tmp_path}")
-    return tmp_path
-
-
-def remap_altlocs_to_ab(cif_path: Path | str) -> Path:
-    """Relabel a residue's non-A/B alternate altloc(s) to fill the A/B slots.
-
-    Some depositions label a residue's two conformers ``A``/``C`` (or ``A``/``D``, etc.) instead of
-    ``A``/``B``. Tools that assume the two altlocs are literally named A and B -- e.g. a
-    min-RMSD-to-altloc-A/altloc-B scorer -- then silently drop the second conformer. This is an
-    optional pre-processing step that, per residue, maps the alternate label onto the free ``B``
-    slot: an atom with altloc ``A`` stays ``A`` and the other non-blank altloc becomes ``B``; if
-    ``A`` is absent, the two labels are assigned to ``A``/``B`` in sorted order.
-
-    Only residues with **exactly two** non-blank altlocs that are **not already** ``{A, B}`` are
-    touched. Residues that are already A/B, have a single or blank altloc, or carry three or more
-    altlocs (ambiguous which two to keep) are left unchanged, so the metric's numbers do not move
-    for structures that were already A/B.
-
-    A warning is logged for every remapped ``(chain, residue)`` position.
-
-    Parameters
-    ----------
-    cif_path
-        Path to the input CIF file.
-
-    Returns
-    -------
-    Path
-        Path to a remapped temporary CIF file if any position was changed, or the original
-        ``cif_path`` unchanged if none were.
-    """
-    cif_path = Path(cif_path)
-    atom_array = load_any(cif_path, altloc="all", extra_fields=["occupancy", "b_factor"])
-    if isinstance(atom_array, AtomArrayStack):
-        atom_array = atom_array[0]
-    if not hasattr(atom_array, "altloc_id"):
-        return cif_path  # no altloc annotation -> nothing to remap
-
-    altloc = atom_array.altloc_id.copy()  # per-atom altloc characters, mutated in place below
-    chain_id = atom_array.chain_id
-    res_id = atom_array.res_id
-    remapped = 0
-
-    for chain in np.unique(chain_id):
-        for rid in np.unique(res_id[chain_id == chain]):
-            pos = (chain_id == chain) & (res_id == rid)
-            labels = sorted(set(altloc[pos].tolist()) - BLANK_ALTLOC_IDS)
-            if len(labels) != 2 or set(labels) == {"A", "B"}:
-                continue
-            if "A" in labels:
-                mapping = {next(x for x in labels if x != "A"): "B"}
-            else:
-                mapping = {labels[0]: "A", labels[1]: "B"}
-            for src, dst in mapping.items():
-                sel = pos & (altloc == src)
-                altloc[sel] = dst
-                remapped += int(sel.sum())
-            logger.warning(
-                f"Chain {chain}, residue {rid}: remapped altlocs {labels} -> A/B so the alternate "
-                "conformer is not dropped by A/B-only tooling."
-            )
-
-    if remapped == 0:
-        return cif_path
-
-    atom_array.set_annotation("altloc_id", altloc)
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".cif", prefix="sampleworks_altloc_ab_", delete=False
-    ) as tmp_file:
-        tmp_path = Path(tmp_file.name)
-
-    save_structure_to_cif(atom_array, tmp_path)
-    logger.info(f"Wrote altloc-remapped CIF to temporary file: {tmp_path}")
     return tmp_path
 
 

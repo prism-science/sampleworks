@@ -8,10 +8,9 @@ import pytest
 from atomworks.io.utils.io_utils import load_any
 from biotite.structure import array, Atom, AtomArray, AtomArrayStack
 from biotite.structure.io.pdbx.cif import CIFColumn, CIFFile
-from sampleworks.utils.atom_array_utils import BLANK_ALTLOC_IDS, save_structure_to_cif
+from sampleworks.utils.atom_array_utils import save_structure_to_cif
 from sampleworks.utils.cif_utils import (
     add_category_to_cif,
-    remap_altlocs_to_ab,
     resolve_mixed_hetatm_atom_altlocs,
 )
 
@@ -382,84 +381,3 @@ class TestAddCategoryToCif:
         # Verify None was replaced (with "none" or "?" depending on implementation)
         assert "missing" in category
 
-
-# ---------------------------------------------------------------------------
-# remap_altlocs_to_ab
-#
-# Some depositions label a residue's two conformers A/C rather than A/B, and a scorer that looks
-# for literal A and B then drops the second conformer. remap_altlocs_to_ab moves the alternate
-# label into the free B slot. The tests below cover the cases the docstring promises: a pair that
-# gets relabelled, a pair that is already A/B, a pair with no A at all, a residue with three
-# altlocs, and an ordinary blank-altloc residue.
-# ---------------------------------------------------------------------------
-
-
-def _altloc_atom(res_id: int, altloc: str) -> Atom:
-    """A one-atom SER residue carrying an explicit altloc label."""
-    return Atom(
-        [0.0, 0.0, 0.0],
-        chain_id="A",
-        res_id=res_id,
-        res_name="SER",
-        hetero=False,
-        atom_name="CA",
-        element="C",
-        altloc_id=altloc,
-    )
-
-
-def _write_altloc_cif(tmp_path: Path, labels: list[str], name: str) -> Path:
-    """Write a CIF whose residue 10 carries one atom per label in *labels*.
-
-    Residue 11 is always added with a blank altloc, so every case also carries an ordinary
-    residue that remap_altlocs_to_ab has to leave alone.
-    """
-    atoms = [_altloc_atom(10, label) for label in labels]
-    atoms.append(_altloc_atom(11, ""))
-    return _write_cif(atoms, tmp_path / name)
-
-
-class TestRemapAltlocsToAb:
-    """Relabelling a residue's non-A/B alternate conformer into the free B slot."""
-
-    def test_alternate_label_becomes_b(self, tmp_path):
-        cif_path = _write_altloc_cif(tmp_path, ["A", "C"], "altloc_ac.cif")
-        result = _load(remap_altlocs_to_ab(cif_path))
-
-        at_10 = result.altloc_id[result.res_id == 10]
-        assert sorted(at_10.tolist()) == ["A", "B"]  # the C conformer is kept, relabelled to B
-        assert len(result) == 3  # and nothing was dropped on the way through
-
-    def test_blank_altloc_residue_is_untouched(self, tmp_path):
-        cif_path = _write_altloc_cif(tmp_path, ["A", "C"], "altloc_ac.cif")
-        result = _load(remap_altlocs_to_ab(cif_path))
-
-        # A blank altloc can come back as "" or "." depending on how the CIF was written, so the
-        # check is that residue 11 still has one atom and still carries no real altloc label.
-        at_11 = result.altloc_id[result.res_id == 11].tolist()
-        assert len(at_11) == 1
-        assert at_11[0] in BLANK_ALTLOC_IDS
-
-    def test_already_ab_returns_the_original_path(self, tmp_path):
-        # No position changed, so no temporary file is written and the caller keeps its own path.
-        # This is what stops the metric moving for structures that were already A/B.
-        cif_path = _write_altloc_cif(tmp_path, ["A", "B"], "altloc_ab.cif")
-        assert remap_altlocs_to_ab(cif_path) == cif_path
-
-    def test_pair_without_an_a_gets_both_labels(self, tmp_path):
-        cif_path = _write_altloc_cif(tmp_path, ["C", "D"], "altloc_cd.cif")
-        result = _load(remap_altlocs_to_ab(cif_path))
-
-        assert sorted(result.altloc_id[result.res_id == 10].tolist()) == ["A", "B"]
-
-    def test_three_altlocs_are_left_alone(self, tmp_path):
-        # With three conformers there is no way to tell which two belong in A and B, so the
-        # function declines rather than guessing.
-        cif_path = _write_altloc_cif(tmp_path, ["A", "B", "C"], "altloc_three.cif")
-        assert remap_altlocs_to_ab(cif_path) == cif_path
-
-    def test_warning_names_the_remapped_residue(self, tmp_path, caplog):
-        cif_path = _write_altloc_cif(tmp_path, ["A", "C"], "altloc_ac.cif")
-        with caplog.at_level(logging.WARNING):
-            remap_altlocs_to_ab(cif_path)
-        assert "10" in caplog.text

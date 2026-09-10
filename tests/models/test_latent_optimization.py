@@ -193,14 +193,13 @@ def _per_member(shape, n_members):
     return torch.stack([torch.full(shape, float(i)) for i in range(n_members)])
 
 
-def _stepper(model, n_members, *, optimize_single=True, optimize_pair=True):
+def _stepper(model, *, optimize_single=True, optimize_pair=True):
     """Build a stepper over ``model`` for the ``s``/``z`` names the fake conditioning uses."""
     return _PerMemberStepper(
         model,
         AttrLatentIO("s", "z"),
         optimize_single=optimize_single,
         optimize_pair=optimize_pair,
-        ensemble_size=n_members,
     )
 
 
@@ -212,7 +211,7 @@ def test_per_member_stepper_gives_each_member_its_own_latent():
     features = GenerativeModelInput(conditioning=_Cond(s=s, z=z))
 
     model = _RecordingModel()
-    output = _stepper(model, n_members).step(x_t, torch.tensor(0.5), features=features)
+    output = _stepper(model).step(x_t, torch.tensor(0.5), features=features)
 
     # One un-batched forward per member rather than a single batched call.
     assert len(model.calls) == n_members
@@ -233,7 +232,7 @@ def test_per_member_stepper_leaves_an_unoptimized_latent_shared():
 
     model = _RecordingModel()
     x_t = _per_member((5, 3), n_members)
-    _stepper(model, n_members, optimize_single=False).step(
+    _stepper(model, optimize_single=False).step(
         x_t, torch.tensor(0.5), features=features
     )
 
@@ -252,7 +251,7 @@ def test_per_member_stepper_slices_a_per_member_timestep():
     t = torch.tensor([0.1, 0.2, 0.3])
 
     model = _RecordingModel()
-    _stepper(model, n_members).step(_per_member((5, 3), n_members), t, features=features)
+    _stepper(model).step(_per_member((5, 3), n_members), t, features=features)
 
     for i, (_, t_i, _, _) in enumerate(model.calls):
         torch.testing.assert_close(t_i, t[i : i + 1])
@@ -271,7 +270,7 @@ def test_per_member_stepper_keeps_member_gradients_separate():
 
     # Each member gets different coordinates, so a correctly sliced gradient differs per member.
     x_t = _per_member((5, 3), n_members) + 1.0
-    stepper = _stepper(_ScalingModel(), n_members)
+    stepper = _stepper(_ScalingModel())
     output = stepper.step(x_t, torch.tensor(0.5), features=leaf_features)
     output.sum().backward()
 
