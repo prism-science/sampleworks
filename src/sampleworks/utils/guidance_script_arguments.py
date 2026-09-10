@@ -337,29 +337,36 @@ class GuidanceConfig:
                 f" Use sampleworks-guidance for other guidance types."
             )
 
-        config = cls(
-            protein=args.protein,
-            structure=args.structure,
-            density=args.density,
-            model_name=model_name,
-            guidance_type=guidance_type,
-            log_path=getattr(args, "log_path", None) or "",
-            output_dir=args.output_dir,
-            partial_diffusion_step=args.partial_diffusion_step,
-            loss_order=args.loss_order,
-            resolution=args.resolution,
-            device=getattr(args, "device", "") or "",
-            gradient_normalization=args.gradient_normalization,
-            em=args.em,
-            guidance_start=args.guidance_start,
-            augmentation=args.augmentation,
-            align_to_input=args.align_to_input,
-            alignment_reverse_diffusion=args.alignment_reverse_diffusion,
-            target_type=getattr(args, "target_type", "density"),
-            bragg_target=getattr(args, "bragg_target", None),
-            diffuse_target=getattr(args, "diffuse_target", None),
-            bragg_weight=getattr(args, "bragg_weight", 0.5),
-        )
+        # Validation lives in __post_init__ and raises ValueError, which is right
+        # for a dataclass built programmatically. On the command line it should
+        # read as an argument error: parser.error prints to stderr and exits 2,
+        # rather than showing a traceback for a missing flag.
+        try:
+            config = cls(
+                protein=args.protein,
+                structure=args.structure,
+                density=args.density,
+                model_name=model_name,
+                guidance_type=guidance_type,
+                log_path=getattr(args, "log_path", None) or "",
+                output_dir=args.output_dir,
+                partial_diffusion_step=args.partial_diffusion_step,
+                loss_order=args.loss_order,
+                resolution=args.resolution,
+                device=getattr(args, "device", "") or "",
+                gradient_normalization=args.gradient_normalization,
+                em=args.em,
+                guidance_start=args.guidance_start,
+                augmentation=args.augmentation,
+                align_to_input=args.align_to_input,
+                alignment_reverse_diffusion=args.alignment_reverse_diffusion,
+                target_type=getattr(args, "target_type", "density"),
+                bragg_target=getattr(args, "bragg_target", None),
+                diffuse_target=getattr(args, "diffuse_target", None),
+                bragg_weight=getattr(args, "bragg_weight", 0.5),
+            )
+        except ValueError as error:
+            parser.error(str(error))
 
         # __post_init__ already set defaults for model/guidance-specific
         # attrs; override with any explicit CLI values.
