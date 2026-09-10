@@ -133,6 +133,7 @@ dependencies = [
   "loguru",
   "omegaconf",
   "python-dotenv",
+  "reciprocalspaceship",
   "sfcalculator-torch>=0.3.3"
 ]
 description = "Experimentally guided biomolecular ensemble generation."
@@ -219,7 +220,7 @@ rdkit = ">=2024.3.5,<2025.9"
 [tool.pixi.feature.rf3.pypi-dependencies]
 rc-foundry = {editable = true, extras = ["rf3"], git = "https://github.com/k-chrispens/foundry.git"}
 
-# Workspace-level override: reciprocalspaceship (sfcalculator-torch transitive dep)
+# Workspace-level override: reciprocalspaceship
 # caps pandas<=2.2.3 in its metadata, but runs fine on 2.3.1; protenix hard-pins
 # pandas==2.3.1. Standardize all envs on 2.3.1 to avoid silent downgrades.
 [tool.pixi.pypi-options.dependency-overrides]
