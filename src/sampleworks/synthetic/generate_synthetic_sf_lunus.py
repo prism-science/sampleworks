@@ -27,9 +27,11 @@ difference as a floor.
 """
 
 import argparse
+import json
 import sys
 import traceback
 from pathlib import Path
+from typing import Any
 
 import gemmi
 import numpy as np
@@ -558,7 +560,7 @@ def _process_single_row(
     solvent_taper_width: float = DEFAULT_SOLVENT_TAPER_WIDTH,
     write_diffuse: bool = False,
     altlocs_as_models: bool = False,
-) -> None:
+) -> dict[str, Any]:
     """Compute and write synthetic amplitudes for one structure.
 
     With ``write_diffuse``, a second MTZ of diffuse intensities is written
@@ -566,8 +568,22 @@ def _process_single_row(
     multi-model input, since the diffuse term of a single configuration is zero.
 
     Errors are logged and swallowed so a batch run continues past a bad row,
-    matching the SFcalculator script's behaviour.
+    matching the SFcalculator script's behaviour. The traceback stays in the
+    log; what comes back is the one-line record :func:`process_batch` collects
+    into ``batch_report.json``, so a caller can tell which rows produced files
+    without parsing logs.
+
+    Returns
+    -------
+    dict
+        ``filename`` and ``status`` ("success" or "failed", matching JobResult's
+        vocabulary), plus ``output_path`` and ``diffuse_output_path`` for the
+        files actually written, and ``failure_stage`` and ``error`` when the row
+        failed. A row can fail after writing something -- a diffuse write that
+        fails still leaves the amplitudes -- so read the paths, not just the
+        status.
     """
+    record: dict[str, Any] = {"filename": row.filename, "status": "failed"}
     structure_path = base_dir / row.filename
     try:
         atom_array, coords = load_configurations(
@@ -585,7 +601,7 @@ def _process_single_row(
             f"Failed to load {row.filename} ({type(e).__name__}): {e}\n"
             f"{''.join(traceback.format_tb(e.__traceback__))}"
         )
-        return
+        return record | {"failure_stage": "load", "error": f"{type(e).__name__}: {e}"}
 
     if write_diffuse and coords.shape[0] < 2:
         # <|F|^2> - |<F>|^2 is identically zero for one configuration, so a
@@ -598,7 +614,13 @@ def _process_single_row(
             f"got {coords.shape[0]} configuration, whose diffuse term is zero "
             "by construction. Supply an ensemble. Row skipped."
         )
-        return
+        return record | {
+            "failure_stage": "validate",
+            "error": (
+                f"--write-diffuse needs a multi-model structure; got "
+                f"{coords.shape[0]} configuration"
+            ),
+        }
 
     try:
         hkl, mean_f, diffuse = compute_ensemble_amplitudes(
@@ -616,7 +638,10 @@ def _process_single_row(
             f"Failed to compute structure factors for {row.filename} "
             f"({type(e).__name__}): {e}\n{''.join(traceback.format_tb(e.__traceback__))}"
         )
-        return
+        return record | {
+            "failure_stage": "structure_factors",
+            "error": f"{type(e).__name__}: {e}",
+        }
 
     if write_diffuse:
         logger.info(
@@ -626,12 +651,17 @@ def _process_single_row(
         diffuse_path = output_dir / (f"{structure_path.stem}_{resolution:.2f}A_diffuse.mtz")
         try:
             dataset_from_intensities(hkl, diffuse, unit_cell, space_group, output_path=diffuse_path)
+            record["diffuse_output_path"] = str(diffuse_path)
         except Exception as e:
             logger.error(
                 f"Failed to write diffuse MTZ for {row.filename} to {diffuse_path} "
                 f"({type(e).__name__}): {e}\n"
                 f"{''.join(traceback.format_tb(e.__traceback__))}"
             )
+            # Not a return: the amplitudes are still worth writing, so the row
+            # carries on and the record ends up failed with an output_path set.
+            record["failure_stage"] = "write_diffuse"
+            record["error"] = f"{type(e).__name__}: {e}"
 
     label = "total" if solvent_cutoff is not None else "protein"
     output_path = output_dir / (row.mtzfile or f"{structure_path.stem}_{resolution:.2f}A.mtz")
@@ -646,11 +676,19 @@ def _process_single_row(
             seed=seed,
             output_path=output_path,
         )
+        record["output_path"] = str(output_path)
     except Exception as e:
         logger.error(
             f"Failed to write MTZ for {row.filename} to {output_path} "
             f"({type(e).__name__}): {e}\n{''.join(traceback.format_tb(e.__traceback__))}"
         )
+        return record | {"failure_stage": "write", "error": f"{type(e).__name__}: {e}"}
+
+    # Only now is the row a success -- and only if nothing earlier recorded a
+    # stage, which the diffuse write can do without stopping the row.
+    if "failure_stage" not in record:
+        record["status"] = "success"
+    return record
 
 
 def process_batch(
@@ -664,11 +702,16 @@ def process_batch(
     device: torch.device,
     n_jobs: int = -1,
     **row_kwargs,
-) -> None:
+) -> dict[str, Any]:
     """Process every structure listed in a batch CSV.
 
     Parameters mirror :func:`_process_single_row`; ``n_jobs`` is clamped to 1 on
     CUDA by :func:`resolve_parallel_jobs` to avoid multiple CUDA contexts.
+
+    Writes ``batch_report.json`` into ``output_dir``: a summary of how many rows
+    succeeded, then one record per row. Rows fail independently, so a batch can
+    exit having written some files and not others, and the log is the wrong
+    place to find out which. Returns the same report.
     """
     from joblib import delayed, Parallel
 
@@ -676,7 +719,7 @@ def process_batch(
     effective_n_jobs = resolve_parallel_jobs(device, n_jobs)
     logger.info(f"Processing {len(rows)} structures from {csv_path} using {effective_n_jobs} jobs")
 
-    Parallel(n_jobs=effective_n_jobs, backend="loky")(
+    records = Parallel(n_jobs=effective_n_jobs, backend="loky")(
         delayed(_process_single_row)(
             row=row,
             base_dir=base_dir,
@@ -690,6 +733,20 @@ def process_batch(
         )
         for row in rows
     )
+
+    succeeded = sum(1 for r in records if r["status"] == "success")
+    report = {
+        "total": len(records),
+        "succeeded": succeeded,
+        "failed": len(records) - succeeded,
+        "rows": list(records),
+    }
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report_path = output_dir / "batch_report.json"
+    report_path.write_text(json.dumps(report, indent=2))
+    logger.info(f"{succeeded}/{len(records)} rows succeeded; per-row detail in {report_path}")
+    return report
 
 
 def parse_args() -> argparse.Namespace:
