@@ -37,6 +37,7 @@ import gemmi
 import numpy as np
 import reciprocalspaceship as rs
 import torch
+from atomworks.io.transforms.atom_array import remove_waters
 from atomworks.io.utils.io_utils import load_any
 from biotite.structure import AtomArray, AtomArrayStack
 from loguru import logger
@@ -47,6 +48,12 @@ from sampleworks.synthetic.generate_synthetic_sf import BatchRowForMTZ, load_bat
 from sampleworks.synthetic.synthetic_utils import (
     load_structure_for_synthetic_reward,
     resolve_parallel_jobs,
+)
+from sampleworks.utils.atom_array_utils import (
+    apply_selection,
+    keep_amino_acids,
+    keep_polymer,
+    remove_hydrogens,
 )
 from sampleworks.utils.torch_utils import try_gpu
 
@@ -118,10 +125,11 @@ def load_configurations(
     :func:`load_structure_for_synthetic_reward`, so selection, stripping and the
     occupancy modes behave exactly as in the SFcalculator script.
 
-    Multi-model files are loaded directly and **support none of those options**:
-    applying a selection consistently across models needs index plumbing that
-    does not exist yet, and silently applying it to one model would be worse than
-    refusing. Occupancies come from the file as deposited.
+    Multi-model files are loaded directly as a stack. Selection and stripping
+    apply to them too: per-atom annotations are shared across models, so one mask
+    describes every model and the helpers take a stack directly. Occupancies come
+    from the file as deposited -- reassigning them per model is the one option a
+    stack genuinely cannot express, so it is still refused.
 
     With ``altlocs_as_models``, a single-model structure carrying alternate
     conformations is expanded into one configuration per altloc. A deposited
@@ -157,8 +165,8 @@ def load_configurations(
     Raises
     ------
     ValueError
-        If a multi-model file is combined with selection, stripping or a
-        non-default occupancy mode.
+        If a multi-model file is combined with a non-default occupancy mode or
+        ``--altlocs-as-models``, or if selection and stripping leave no atoms.
     """
     loaded = load_any(structure_path, altloc="all", extra_fields=["occupancy", "b_factor"])
 
@@ -166,10 +174,9 @@ def load_configurations(
         unsupported = [
             name
             for name, active in (
-                ("selection", row.selection),
-                ("--remove-hydrogens", strip_hydrogens),
-                ("--remove-waters", strip_waters),
-                ("--remove-ligands", strip_ligands),
+                # Occupancy assignment reads altloc groupings off a single model
+                # and rewrites occupancies per atom; a stack has one shared set,
+                # so there is nowhere to put a per-model answer.
                 ("--occupancy-mode", occupancy_mode != "default"),
                 # The models ARE the ensemble here; expanding altlocs on top of
                 # them is not a meaningful composition, and this branch returns
@@ -184,7 +191,20 @@ def load_configurations(
                 f"{', '.join(unsupported)} is not supported for multi-model input. "
                 "Preprocess the ensemble, or use a single-model file."
             )
-        logger.info(f"Loaded {loaded.stack_depth()} models from {structure_path.name}")
+
+        # Selection and stripping mask the atom axis, which every model shares,
+        # so the stack keeps its depth and all models stay in register.
+        loaded = apply_selection(loaded, row.selection)
+        loaded = remove_hydrogens(loaded) if strip_hydrogens else loaded
+        loaded = remove_waters(loaded) if strip_waters else loaded
+        loaded = keep_polymer(keep_amino_acids(loaded)) if strip_ligands else loaded
+        if loaded.array_length() == 0:
+            raise ValueError(f"{structure_path.name}: selection and stripping left no atoms.")
+
+        logger.info(
+            f"Loaded {loaded.stack_depth()} models, {loaded.array_length()} atoms "
+            f"from {structure_path.name}"
+        )
         return loaded[0], np.asarray(loaded.coord, dtype=np.float64)
 
     if altlocs_as_models:
