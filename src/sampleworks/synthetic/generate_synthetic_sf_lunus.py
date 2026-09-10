@@ -19,9 +19,16 @@ a nonzero diffuse target out of a file like ``1vme_final.cif``.
 
 **Grid method, not direct summation.** lunus splats density onto a unit-cell
 grid, symmetry-expands, and FFTs, where SFcalculator sums over atoms in
-reciprocal space. Agreement is close but not exact — lunus measures correlation
-0.999989 and R ≈ 0.0077 against gemmi, with its smooth density taper the main
-source of the difference. Prefer to keep engine pairs consistent: a target
+reciprocal space. "Splatting" means evaluating each atom's Gaussians on the
+voxels within a cutoff radius and accumulating them; truncating at that radius
+is what needs the smooth taper, since an abrupt cut puts a step in the density
+and the FFT rings on it. See ``core/forward_models/xray/lunus_sf.py`` for the
+taper and for the separate blur, an anti-aliasing device removed exactly in
+reciprocal space rather than a smoothing of the result.
+
+Agreement is close but not exact — lunus measures
+correlation 0.999989 and R ≈ 0.0077 against gemmi, with that taper the
+main source of the difference. Prefer to keep engine pairs consistent: a target
 generated here and scored by the SFcalculator-backed reward carries that
 difference as a floor.
 """
