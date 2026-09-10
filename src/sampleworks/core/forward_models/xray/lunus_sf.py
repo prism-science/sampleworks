@@ -19,16 +19,51 @@ environments, so the rotations and translations are read from gemmi instead.
 
 Symmetry expansion
 ------------------
-``F(hkl)`` is the transform of the whole unit cell, so an input that is only the
-asymmetric unit must be symmetry-expanded before the FFT. That is this module's
-regime, and :func:`build_setup` builds the grid operations accordingly (for P1
-they come back empty, which lunus reads as "nothing to do").
+**Pass the asymmetric unit and the crystal's space group.** ``F(hkl)`` is the
+transform of the whole unit cell, so :func:`build_setup` reads the group's
+operations and expands the ASU onto the full cell before the FFT. Passing P1 is
+also fine and simply means no expansion — the grid operations come back empty,
+which lunus reads as "nothing to do".
 
-It is *not* universally correct. Coordinates that already fill the cell — an MD
-box, or pre-expanded models — must not be expanded, or every atom is counted once
-per symmetry operation. Nothing here detects that case; if this module ever needs
-to serve it, the expansion has to become an explicit choice by the caller rather
-than an assumption baked into the setup.
+**Coordinates that already fill the cell are a different case, and which group
+to pass depends on the observable.** An MD box, possibly a supercell, or a
+pre-expanded model is not an asymmetric unit.
+
+For *Bragg* the expansion is legitimate rather than a bug. Summing over the
+operations projects the box onto its symmetric component, which is what Bragg
+measures, and leaves an overall factor of the operation count that any scale fit
+absorbs. Folding an MD snapshot back this way is an effective route to predicted
+amplitudes.
+
+For *diffuse*, pass P1. The engine cannot tell the two intents apart -- it sees
+an atom array and a group -- so the choice is the caller's.
+
+The splat, the blur and the taper
+---------------------------------
+Three separate mechanisms, easily confused because two of them sound like
+smoothing:
+
+**Splatting** puts the density on the grid. Each atom's scattering is a sum of
+Gaussians; the splat evaluates that on the voxels within a cutoff radius of the
+atom and accumulates it, and the FFT of the grid gives ``F(hkl)``. It is the
+grid-based alternative to summing over atoms in reciprocal space, not a
+smoothing step.
+
+**Blur is anti-aliasing, and is removed exactly.** Atoms are splatted with
+``B + blur`` and the excess is divided back out in reciprocal space with
+``exp(+blur * s^2 / 4)``, so in exact arithmetic the answer is unchanged. What
+changes is sampling: a sharp Gaussian on a coarse grid is badly represented and
+a spread one is not. lunus measures R = 0.186 against exact direct summation at
+B_iso = 2 with no blur, versus 0.0004 with blur = 20 (7FPV, 0.633 A grid,
+d_min 2.0). It is not free — the un-blur amplifies whatever error is present —
+so the blur is sized to reach a sampling target and no further.
+
+**The taper is about the cutoff, not the Gaussians.** A sum of Gaussians is
+already smooth; the hard edge comes from truncating each atom at a finite radius
+to keep the splat cheap. An abrupt cut puts a step in the density and the FFT
+rings on it, so each atom is brought smoothly to zero over ``taper_width`` at
+its cutoff radius. Truncation is also lunus's main source of disagreement with
+gemmi.
 """
 
 from __future__ import annotations
@@ -285,6 +320,13 @@ def build_setup(
 
     rotations, translations = space_group_operations(space_group)
     raw_shape = grid_shape_for_resolution(a, b, c, resolution, rate)
+    # The grid has to be invariant under the group, or expanding the ASU onto it
+    # would need interpolation between voxels. Two constraints: translations must
+    # land on grid points, so a 2_1 screw with t = 1/2 forces an even N along that
+    # axis; and axes a rotation maps onto each other must share an N, so a 4-fold
+    # relating a and b forces Nu = Nv. Each axis is kept 5-smooth for the FFT on
+    # top of that. gemmi applies equivalent constraints when it sizes its own
+    # grid, which is why a naive per-axis rounding does not match it.
     grid_shape = adjust_grid_for_symmetry(raw_shape, rotations, translations)
     if tuple(grid_shape) != tuple(raw_shape):
         logger.debug(
