@@ -8,8 +8,9 @@ from typing import Any
 
 import numpy as np
 from atomworks.io.utils.io_utils import load_any
+from biotite.database.rcsb import fetch
 from biotite.structure import AtomArrayStack
-from biotite.structure.io.pdbx.cif import CIFCategory, CIFFile
+from biotite.structure.io.pdbx.cif import CIFBlock, CIFCategory, CIFFile
 from loguru import logger
 
 from sampleworks.utils.atom_array_utils import (
@@ -19,9 +20,45 @@ from sampleworks.utils.atom_array_utils import (
 )
 
 
+AtomRecord = dict[str, str]
+ResidueKey = tuple[str, str, str, str, str]
+ResidueRecords = OrderedDict[ResidueKey, list[AtomRecord]]
+
+ATOM_SITE_CATEGORY = "atom_site"
 ATOM_SITE_COLUMN_DEFAULTS = {
     "occupancy": 1.0,
     "B_iso_or_equiv": 20.0,
+}
+REQUIRED_ATOM_SITE_COLUMNS = {
+    "group_PDB",
+    "type_symbol",
+    "label_atom_id",
+    "label_alt_id",
+    "label_comp_id",
+    "label_asym_id",
+    "label_entity_id",
+    "label_seq_id",
+    "pdbx_PDB_ins_code",
+    "Cartn_x",
+    "Cartn_y",
+    "Cartn_z",
+}
+# Categories needed to reconstruct the polymer from a carved or refined coordinate file.
+REQUIRED_RCSB_METADATA_CATEGORIES = {
+    "chem_comp",
+    "entity",
+    "entity_poly",
+    "entity_poly_seq",
+    "entry",
+    "pdbx_poly_seq_scheme",
+    "struct_asym",
+}
+# Deposited categories that describe atoms we may have carved away or edited.
+RCSB_GRAFT_EXCLUSIONS = {
+    "atom_site",
+    "atom_site_anisotrop",
+    "pdbx_struct_mod_residue",
+    "pdbx_unobs_or_zero_occ_atoms",
 }
 # Extended PDB IDs use `pdb_` plus eight alphanumerics. Legacy IDs have four
 # alphanumerics and start with a digit, which excludes folder names such as `TEST`.
@@ -353,6 +390,32 @@ def _normalize_nulls(value: Any) -> Any:
     return "?" if value is None else value
 
 
+def require_atom_site(cif_block: CIFBlock) -> CIFCategory:
+    """Return the atom-site category, verifying the columns sanitization needs.
+
+    Parameters
+    ----------
+    cif_block : biotite.structure.io.pdbx.cif.CIFBlock
+        Parsed mmCIF block.
+
+    Returns
+    -------
+    biotite.structure.io.pdbx.cif.CIFCategory
+        The block's atom-site category.
+
+    Raises
+    ------
+    ValueError
+        If the atom-site category or a required column is absent.
+    """
+    if ATOM_SITE_CATEGORY not in cif_block:
+        raise ValueError("mmCIF block has no _atom_site category")
+    atom_site = cif_block[ATOM_SITE_CATEGORY]
+    if missing := REQUIRED_ATOM_SITE_COLUMNS - atom_site.keys():
+        raise ValueError(f"Missing _atom_site columns: {sorted(missing)}")
+    return atom_site
+
+
 def ensure_atom_site_metadata(atom_site: CIFCategory) -> None:
     """Add the occupancy and B-factor columns required by downstream evaluation.
 
@@ -368,3 +431,206 @@ def ensure_atom_site_metadata(atom_site: CIFCategory) -> None:
     for column_name, default in ATOM_SITE_COLUMN_DEFAULTS.items():
         if column_name not in atom_site:
             atom_site[column_name] = np.full(num_atoms, str(default))
+
+
+def atom_site_records(atom_site: CIFCategory) -> list[AtomRecord]:
+    """Transpose an atom-site category into one mutable record per atom.
+
+    Parameters
+    ----------
+    atom_site : biotite.structure.io.pdbx.cif.CIFCategory
+        Atom-site category.
+
+    Returns
+    -------
+    list[AtomRecord]
+        Atom records in file order, each holding every atom-site column. Values
+        are unquoted text; inapplicable and missing values read back as ``'.'``
+        and ``'?'``.
+    """
+    column_names = list(atom_site)
+    columns = [atom_site[column_name].as_array(str) for column_name in column_names]
+    return [
+        dict(zip(column_names, atom_values, strict=True))
+        for atom_values in zip(*columns, strict=True)
+    ]
+
+
+def write_atom_site_records(
+    cif_block: CIFBlock,
+    atom_records: list[AtomRecord],
+    column_names: Iterable[str],
+) -> None:
+    """Replace the atom-site table with these records, retaining its schema.
+
+    This function mutates ``cif_block``.
+
+    Parameters
+    ----------
+    cif_block : biotite.structure.io.pdbx.cif.CIFBlock
+        CIF block modified in place.
+    atom_records : list[AtomRecord]
+        Replacement atom records in output order, one per atom.
+    column_names : Iterable[str]
+        Atom-site columns to write, in order.
+    """
+    cif_block[ATOM_SITE_CATEGORY] = CIFCategory(
+        {
+            column_name: np.array([atom_record[column_name] for atom_record in atom_records])
+            for column_name in column_names
+        }
+    )
+
+
+def group_atom_site_records_by_residue(atom_records: list[AtomRecord]) -> ResidueRecords:
+    """Group atom records by residue position and model.
+
+    Parameters
+    ----------
+    atom_records : list[AtomRecord]
+        Atom records in file order.
+
+    Returns
+    -------
+    ResidueRecords
+        Atom records keyed by entity, chain, residue, insertion code, and model.
+    """
+    residue_records: ResidueRecords = OrderedDict()
+    for atom_record in atom_records:
+        residue_key = (
+            atom_record["label_entity_id"],
+            atom_record["label_asym_id"],
+            atom_record["label_seq_id"],
+            atom_record["pdbx_PDB_ins_code"],
+            atom_record.get("pdbx_PDB_model_num", "1"),
+        )
+        residue_records.setdefault(residue_key, []).append(atom_record)
+    return residue_records
+
+
+def map_category_values(
+    category: CIFCategory,
+    column_names: Iterable[str],
+    replacements: dict[str, str],
+) -> None:
+    """Substitute values in selected columns of one mmCIF category.
+
+    This function mutates ``category``. Absent columns are skipped and values
+    absent from ``replacements`` are retained.
+
+    Parameters
+    ----------
+    category : biotite.structure.io.pdbx.cif.CIFCategory
+        Category modified in place.
+    column_names : Iterable[str]
+        Columns whose values are substituted.
+    replacements : dict[str, str]
+        Source-to-replacement values.
+    """
+    for column_name in column_names:
+        if column_name not in category:
+            continue
+        values = category[column_name].as_array(str)
+        category[column_name] = np.array([replacements.get(value, value) for value in values])
+
+
+def graft_missing_categories(
+    target_block: CIFBlock,
+    source_block: CIFBlock,
+    *,
+    exclude: set[str],
+) -> tuple[str, ...]:
+    """Copy absent mmCIF categories while preserving existing target data.
+
+    This function mutates ``target_block``. Existing target categories are never
+    replaced or merged.
+
+    Parameters
+    ----------
+    target_block : biotite.structure.io.pdbx.cif.CIFBlock
+        CIF block modified in place.
+    source_block : biotite.structure.io.pdbx.cif.CIFBlock
+        CIF block providing missing categories.
+    exclude : set[str]
+        Unqualified category names that must not be copied.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Category names copied, in source order.
+    """
+    copied_categories = []
+    for category_name in list(source_block):
+        if category_name in target_block or category_name in exclude:
+            continue
+        target_block[category_name] = source_block[category_name]
+        copied_categories.append(category_name)
+    return tuple(copied_categories)
+
+
+def graft_metadata_from_rcsb_entry(
+    cif_block: CIFBlock,
+    *,
+    rcsb_id: str | None,
+    rcsb_cache: str | Path,
+) -> int:
+    """Copy absent structure metadata categories from a deposited RCSB mmCIF.
+
+    This function mutates ``cif_block`` and may fetch an mmCIF from the RCSB. No
+    request is made when every required category is already present.
+
+    Parameters
+    ----------
+    cif_block : biotite.structure.io.pdbx.cif.CIFBlock
+        Target CIF block modified in place.
+    rcsb_id : str | None
+        Explicit RCSB identifier, if supplied by the caller.
+    rcsb_cache : str | Path
+        Directory used to cache deposited RCSB mmCIF files.
+
+    Returns
+    -------
+    int
+        Number of metadata categories copied.
+    """
+    if REQUIRED_RCSB_METADATA_CATEGORIES <= cif_block.keys():
+        return 0
+
+    resolved_rcsb_id = resolve_rcsb_id(cif_block, rcsb_id)
+    cache_path = Path(rcsb_cache).expanduser()
+    cache_path.mkdir(parents=True, exist_ok=True)
+    rcsb_path = fetch(resolved_rcsb_id, format="cif", target_path=str(cache_path))
+    source_block = CIFFile.read(str(rcsb_path)).block
+    return len(graft_missing_categories(cif_block, source_block, exclude=RCSB_GRAFT_EXCLUSIONS))
+
+
+def resolve_rcsb_id(cif_block: CIFBlock, explicit_rcsb_id: str | None) -> str:
+    """Resolve and validate the RCSB identifier for metadata grafting.
+
+    Parameters
+    ----------
+    cif_block : biotite.structure.io.pdbx.cif.CIFBlock
+        Target CIF block, which may contain ``_entry.id``.
+    explicit_rcsb_id : str | None
+        Identifier explicitly supplied by the caller.
+
+    Returns
+    -------
+    str
+        Validated legacy or extended PDB identifier.
+
+    Raises
+    ------
+    ValueError
+        If no valid identifier can be resolved.
+    """
+    resolved_rcsb_id = explicit_rcsb_id
+    if resolved_rcsb_id is None and "entry" in cif_block and "id" in cif_block["entry"]:
+        resolved_rcsb_id = cif_block["entry"]["id"].as_item()
+    if resolved_rcsb_id is None:
+        raise ValueError(
+            "The CIF has no _entry.id. Supply rcsb_id explicitly or disable metadata grafting."
+        )
+    if not RCSB_ID_PATTERN.fullmatch(resolved_rcsb_id):
+        raise ValueError(f"Invalid RCSB PDB identifier: {resolved_rcsb_id!r}")
+    return resolved_rcsb_id
