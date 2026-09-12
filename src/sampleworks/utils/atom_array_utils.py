@@ -18,6 +18,10 @@ from loguru import logger
 
 BACKBONE_ATOM_TYPES = ["C", "CA", "N", "O"]
 BLANK_ALTLOC_IDS = {"", ".", " ", "?"}
+# mmCIF spells an inapplicable value ".". The PDB blank is a space, and an array read
+# from a PDB carries it through; a spec-strict reader then takes that space for a real
+# one-character altloc. Measured against iotbx, and so against every Phenix program.
+MMCIF_BLANK_ALTLOC_ID = "."
 ATOMWORKS_COMPARISON_OPS = ("==", ">", "<", "<=", ">=", " in ")
 
 
@@ -271,6 +275,9 @@ def save_structure_to_cif(
     - Biotite's set_structure() automatically preserves all annotations present
       on the atom array. The extra_fields parameter is provided for API
       compatibility but annotations are saved by default.
+    - Blank altloc IDs are written as the mmCIF "." sentinel rather than the PDB
+      blank a structure read from a PDB carries, which a spec-strict reader takes
+      for a real one-character altloc. The input array is not modified.
 
     See Also
     --------
@@ -330,6 +337,16 @@ def save_structure_to_cif(
                     stacklevel=2,
                 )
                 structure_to_save = cast(AtomArray, structure_to_save[~nan_mask])
+
+    if "altloc_id" in structure_to_save.get_annotation_categories():
+        altloc_ids = np.asarray(structure_to_save.altloc_id)
+        pdb_blanks = np.isin(altloc_ids, list(BLANK_ALTLOC_IDS - {MMCIF_BLANK_ALTLOC_ID}))
+        if pdb_blanks.any():
+            # Copy first: `structure_to_save` may still be the caller's own array.
+            structure_to_save = structure_to_save.copy()
+            structure_to_save.set_annotation(
+                "altloc_id", np.where(pdb_blanks, MMCIF_BLANK_ALTLOC_ID, altloc_ids)
+            )
 
     cif_file = CIFFile()
     set_structure(cif_file, structure_to_save)

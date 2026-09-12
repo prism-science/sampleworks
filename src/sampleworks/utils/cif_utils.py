@@ -548,7 +548,8 @@ def graft_missing_categories(
     """Copy absent mmCIF categories while preserving existing target data.
 
     This function mutates ``target_block``. Existing target categories are never
-    replaced or merged.
+    replaced or merged. Categories are copied as deposited text, so every value keeps
+    the deposited quoting instead of being re-quoted by biotite's writer.
 
     Parameters
     ----------
@@ -568,7 +569,14 @@ def graft_missing_categories(
     for category_name in list(source_block):
         if category_name in target_block or category_name in exclude:
             continue
-        target_block[category_name] = source_block[category_name]
+        # Move the deposited text, not `source_block[category_name]`: reading a category
+        # deserializes it, and biotite then re-quotes every value when the block is
+        # written. Biotite's quoting is narrower than the CIF grammar -- it leaves a
+        # value with a reserved leading character (`[`, `$`, `#`, `;`) bare, which cctbx,
+        # and so every Phenix program, rejects. The deposited text is already valid.
+        # `CIFBlock.__setitem__` takes only a `CIFCategory`, so the lazily stored text is
+        # assigned through `_categories`, which `CIFBlock.serialize()` writes verbatim.
+        target_block._categories[category_name] = source_block._categories[category_name]
         copied_categories.append(category_name)
     return tuple(copied_categories)
 
