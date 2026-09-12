@@ -54,9 +54,14 @@ REQUIRED_RCSB_METADATA_CATEGORIES = {
     "struct_asym",
 }
 # Deposited categories that describe atoms we may have carved away or edited.
+# TLS groups are auth chain/residue ranges over the full deposited asymmetric
+# unit, so carving invalidates them; their `selection_details` may also use
+# refinement-program syntax that cctbx cannot parse.
 RCSB_GRAFT_EXCLUSIONS = {
     "atom_site",
     "atom_site_anisotrop",
+    "pdbx_refine_tls",
+    "pdbx_refine_tls_group",
     "pdbx_struct_mod_residue",
     "pdbx_unobs_or_zero_occ_atoms",
 }
