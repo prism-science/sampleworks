@@ -232,9 +232,7 @@ def test_per_member_stepper_leaves_an_unoptimized_latent_shared():
 
     model = _RecordingModel()
     x_t = _per_member((5, 3), n_members)
-    _stepper(model, optimize_single=False).step(
-        x_t, torch.tensor(0.5), features=features
-    )
+    _stepper(model, optimize_single=False).step(x_t, torch.tensor(0.5), features=features)
 
     for i, (_, _, s_i, z_i) in enumerate(model.calls):
         torch.testing.assert_close(s_i, shared_s)  # the same shared latent for every member

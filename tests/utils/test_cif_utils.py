@@ -380,4 +380,3 @@ class TestAddCategoryToCif:
         category = block["test_category"]
         # Verify None was replaced (with "none" or "?" depending on implementation)
         assert "missing" in category
-
