@@ -425,9 +425,6 @@ class TestBoltzWrapperStep:
 class TestBoltzWrapperInitializeFromPrior:
     """Test Boltz wrapper initialize_from_prior method with all structures."""
 
-    # TODO: apply checking of this to all model wrappers once I figure out all the shape issues in
-    # a more general way
-
     def test_initialize_from_prior_returns_tensor(
         self,
         wrapper_type: StructurePredictor,
