@@ -5,6 +5,7 @@ Tests that implementations correctly implement FlowModelWrapper protocol.
 
 import pytest
 import torch
+from sampleworks.utils.sequence import apply_sequence_override
 
 from tests.conftest import (
     annotate_structure_for_wrapper,
@@ -220,3 +221,51 @@ class TestStepRequiresFeatures:
 
         with pytest.raises(ValueError, match="features"):
             wrapper.step(x_t, t, features=None)
+
+
+@pytest.mark.gpu
+@pytest.mark.slow
+@pytest.mark.parametrize("wrapper_info", get_slow_wrapper_infos(), ids=lambda w: w.name)
+class TestFullSequenceAtomCoverage:
+    """Verify that preprocessing with the real deposited sequence override produces
+    features containing atoms for ALL residues and not just the observed residues.
+
+    Uses the 5I09 density-input fixture (single protein chain, 366 observed out of
+    386 deposited residues: 9 N-terminal, 8 internal, and 3 C-terminal gaps).
+    The override uses the actual PDB deposited sequence so that the alignment
+    must handle real gap positions.
+    """
+
+    def test_featurize_includes_all_sequence_residues(
+        self,
+        wrapper_info: ComponentInfo,
+        structure_5i09_density: dict,
+        seq_5i09_deposited: str,
+        temp_output_dir,
+        request,
+    ):
+        """After override with the real 386-residue deposited sequence,
+        initialize_from_prior should produce more atoms than observed-only."""
+        fixture_name = get_fixture_name_for_wrapper(wrapper_info)
+        wrapper = request.getfixturevalue(fixture_name)
+
+        overridden = apply_sequence_override(structure_5i09_density, seq_5i09_deposited)
+
+        annotated = annotate_structure_for_wrapper(wrapper_info, overridden, temp_output_dir)
+        features = wrapper.featurize(annotated)
+        prior = wrapper.initialize_from_prior(batch_size=1, features=features)
+
+        # The prior tensor's atom dimension should be consistent with the full
+        # 386-residue deposited sequence, not the 366 observed residues.
+        observed_only = annotate_structure_for_wrapper(
+            wrapper_info, structure_5i09_density, temp_output_dir
+        )
+        features_observed = wrapper.featurize(observed_only)
+        prior_observed = wrapper.initialize_from_prior(batch_size=1, features=features_observed)
+
+        n_atoms_full = prior.shape[1]
+        n_atoms_observed = prior_observed.shape[1]
+        assert n_atoms_full > n_atoms_observed, (
+            f"{wrapper_info.name}: full-sequence prior ({n_atoms_full} atoms) should have "
+            f"more atoms than observed-only ({n_atoms_observed} atoms)"
+        )

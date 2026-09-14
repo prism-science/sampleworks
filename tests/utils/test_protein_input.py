@@ -57,7 +57,7 @@ class TestSequenceColumn:
     def test_rejects_a_nonexistent_path_as_invalid_sequence(self, inputs_dir):
         csv_path = write_csv(inputs_dir, f"{HEADER},sequence", "1ABC,s.cif,d.ccp4,1.8,absent.fasta")
 
-        with pytest.raises(ValueError, match="Not a valid protein sequence"):
+        with pytest.raises(ValueError, match="Invalid protein sequence"):
             ProteinInput.from_csv(csv_path)
 
     def test_reports_an_empty_name_before_checking_the_sequence(self, inputs_dir):
