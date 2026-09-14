@@ -45,6 +45,28 @@ from tests.mocks import MockFlowModelWrapper, MockStepScaler
 from tests.mocks.rewards import MockGradientRewardFunction
 
 
+@pytest.fixture
+def seq_5i09_deposited() -> str:
+    """Return the deposited 386-residue sequence for PDB 5I09 chain A.
+
+    Returns
+    -------
+    str
+        The deposited sequence, including the residues absent from the density
+        input structure.
+    """
+    return (
+        "MVEATAQETDRPRFSFSIAAREGKARTGTIEMKRGVIRTPAFMPVGTAAT"
+        "VKALKPETVRATGADIILGNTYHLMLRPGAERIAKLGGLHSFMGWDRPI"
+        "LTDSGGYQVMSLSSLTKQSEEGVTFKSHLDGSRHMLSPERSIEIQHLLG"
+        "SDIVMAFDECTPYPATPSRAASSMERSMRWAKRSRDAFDSRKEQAENAAL"
+        "FGIQQGSVFENLRQQSADALAEIGFDGYAVGGLAVGEGQDEMFRVLDFSVP"
+        "MLPDDKPHYLMGVGKPDDIVGAVERGIDMFDCVLPTRSGRNGQAFTWDG"
+        "PINIRNARFSEDLKPLDSECHCAVCQKWSRAYIHHLIRAGEILGAMLMTE"
+        "HNIAFYQQLMQKIRDSISEGRFSQFAQDFRARYFARNS"
+    )
+
+
 if TYPE_CHECKING:
     from sampleworks.models.boltz.wrapper import (
         Boltz1Wrapper,
