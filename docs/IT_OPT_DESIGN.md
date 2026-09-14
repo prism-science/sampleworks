@@ -95,6 +95,7 @@ that still carries a graph back to the latent leaves:
 ```python
 class _GradEnablingScaler:
     requires_gradients = True
+
     def scale(self, state, context, *, model=None):
         return torch.zeros_like(state), torch.zeros(state.shape[0], device=state.device)
 ```
