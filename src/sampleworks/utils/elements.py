@@ -1,5 +1,6 @@
 from collections.abc import Iterable
 
+import gemmi
 from loguru import logger
 
 from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.sf import (
@@ -66,3 +67,42 @@ def elements_to_scattering_indices(elements: Iterable[str]) -> list[int]:
         Scattering tensor indices, one per input element.
     """
     return [element_to_scattering_idx(e) for e in elements]
+
+
+def it92_coefficients(symbols: Iterable[str] | None = None) -> dict[str, tuple[float, ...]]:
+    """Fetch IT92 X-ray scattering coefficients from gemmi.
+
+    Returns the coefficients of ``f(s) = sum_i a_i exp(-b_i s^2) + c`` as
+    ``(a1..a4, b1..b4, c)``, the layout ``lunus.sf``'s kernel builders take.
+    Formal charge is ignored, the neutral-atom convention of the IT92 table.
+
+    Parameters
+    ----------
+    symbols
+        Element symbols to fetch. Defaults to every symbol of
+        :data:`ELEMENT_TO_SCATTERING_INDEX` that gemmi recognizes, which
+        excludes the ``'?'`` placeholder and qfit's valence-state
+        pseudo-elements.
+
+    Returns
+    -------
+    dict[str, tuple[float, ...]]
+        Nine coefficients per symbol, keyed as passed in.
+
+    Raises
+    ------
+    KeyError
+        If an explicitly requested symbol is not a gemmi element.
+    """
+    default_set = symbols is None
+    coefficients: dict[str, tuple[float, ...]] = {}
+    for symbol in ELEMENT_TO_SCATTERING_INDEX if symbols is None else symbols:
+        element = gemmi.Element(symbol.rstrip("+-0123456789"))
+        # gemmi yields the unknown element, atomic number 0, rather than raising.
+        if element.atomic_number == 0:
+            if default_set:
+                continue
+            raise KeyError(f"gemmi does not recognize element symbol {symbol!r}")
+        it92 = element.it92
+        coefficients[symbol] = (*it92.a, *it92.b, it92.c)
+    return coefficients
