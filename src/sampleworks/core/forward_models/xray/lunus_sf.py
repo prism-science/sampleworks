@@ -75,7 +75,7 @@ Truncation is also lunus's main source of disagreement with gemmi.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, InitVar
 from typing import TYPE_CHECKING
 
 import gemmi
@@ -185,11 +185,16 @@ class LunusSetup:
     ----------
     grid_shape
         ``(Nu, Nv, Nw)`` unit-cell grid, symmetry-commensurate and FFT-friendly.
+    orth_np
+        ``(3, 3)`` orthogonalization matrix as NumPy float64. Constructor-only:
+        ``__post_init__`` derives ``orth_matrix`` and ``cell_volume`` from it and
+        it is not stored.
     orth_matrix
         ``(3, 3)`` orthogonalization matrix, ``cartesian = orth_matrix @ fractional``.
+        Derived from ``orth_np``, taking the kernels' dtype and device.
     cell_volume
-        Unit-cell volume in Å³. Derived from ``orth_matrix`` in
-        ``__post_init__``, not passed to the constructor.
+        Unit-cell volume in Å³. Derived from ``orth_np``, not passed to the
+        constructor.
     grid_ops
         Integer grid operations from ``build_grid_ops``, excluding the identity.
         Empty for P1, which lunus reads as "no symmetry expansion".
@@ -218,7 +223,7 @@ class LunusSetup:
     """
 
     grid_shape: tuple[int, int, int]
-    orth_matrix: Float[torch.Tensor, "3 3"]
+    orth_np: InitVar[np.ndarray]
     grid_ops: list
     element_idx: Int[torch.Tensor, " n_atoms"]
     atom_A: Float[torch.Tensor, "n_atoms 5"]
@@ -228,15 +233,22 @@ class LunusSetup:
     taper_width: float
     blur: float
     n_atoms: int
+    orth_matrix: Float[torch.Tensor, "3 3"] = field(init=False)
     cell_volume: float = field(init=False)
 
-    def __post_init__(self) -> None:
-        """Derive the cell volume so it cannot drift from ``orth_matrix``."""
+    def __post_init__(self, orth_np: np.ndarray) -> None:
+        """Derive the cell volume and the matrix tensor from one input."""
         # |det| of the orthogonalization matrix is the cell volume by
-        # construction. Taken in float64 whatever the tensor dtype: the volume
-        # scales the structure factors, so the extra digits are worth having.
-        orth = self.orth_matrix.detach().cpu().numpy().astype(np.float64)
+        # construction, taken in float64 before the cast to the kernels' dtype:
+        # the volume scales the structure factors, so it should not inherit
+        # float32 truncation.
+        orth = np.asarray(orth_np, dtype=np.float64)
         object.__setattr__(self, "cell_volume", float(abs(np.linalg.det(orth))))
+        object.__setattr__(
+            self,
+            "orth_matrix",
+            torch.as_tensor(orth, dtype=self.atom_A.dtype, device=self.atom_A.device),
+        )
 
 
 def build_setup(
@@ -361,7 +373,6 @@ def build_setup(
         dtype=dtype,
     )
 
-    orth_t = torch.as_tensor(orth_np, dtype=dtype, device=device)
     logger.info(
         f"lunus setup: {len(elements)} atoms, grid {tuple(grid_shape)}, "
         f"{len(rotations)} symmetry operations ({len(grid_ops)} beyond identity), "
@@ -370,7 +381,7 @@ def build_setup(
 
     return LunusSetup(
         grid_shape=tuple(grid_shape),
-        orth_matrix=orth_t,
+        orth_np=orth_np,
         grid_ops=grid_ops,
         element_idx=element_idx,
         atom_A=atom_A,
