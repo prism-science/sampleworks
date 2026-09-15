@@ -721,6 +721,8 @@ def protpardelle_checkpoint_path() -> Path:
     # if the user specifies a path to the model_params directory, use that instead.
     path = Path(os.environ.get("PROTPARDELLE_MODEL_PARAMS", builtin_path))
     path = path / "weights/cc89_epoch415.pth"
+    if not path.exists():
+        pytest.skip(f"Protpardelle checkpoint not found at {path}")
     return path
 
 

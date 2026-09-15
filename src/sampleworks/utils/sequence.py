@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import os
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,32 @@ from typing import Any
 import numpy as np
 from biotite.sequence import ProteinSequence
 from biotite.sequence.align import align_optimal, SubstitutionMatrix
+from biotite.structure.info import residue as ccd_residue
+
+
+@functools.cache
+def _heavy_atoms_per_residue(three_letter: str) -> int:
+    """Heavy atom count for a standard residue, excluding OXT."""
+    res = ccd_residue(three_letter)
+    return sum(1 for e, n in zip(res.element, res.atom_name) if e != "H" and n != "OXT")
+
+
+def expected_heavy_atom_count(sequence: str) -> int:
+    """Total heavy atoms (non-H, non-OXT) implied by a protein sequence.
+
+    Parameters
+    ----------
+    sequence : str
+        One-letter amino-acid sequence.
+
+    Returns
+    -------
+    int
+        Sum of heavy atoms across all residues, using CCD definitions.
+    """
+    return sum(
+        _heavy_atoms_per_residue(ProteinSequence.convert_letter_1to3(aa)) for aa in sequence
+    )
 
 
 def validate_seq_with_error(sequence: str) -> None:
