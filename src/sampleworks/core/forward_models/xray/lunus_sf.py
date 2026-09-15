@@ -81,12 +81,11 @@ from lunus.sf import (
     build_atom_kernels_torch,
     build_grid_ops,
     grid_shape_for_resolution,
-    it92_coefficients,
     orth_matrix as build_orth_matrix,
     structure_factors_batch,
 )
 
-from sampleworks.utils.elements import normalize_element
+from sampleworks.utils.elements import it92_coefficients, normalize_element
 
 
 if TYPE_CHECKING:
@@ -299,14 +298,15 @@ def build_setup(
     # lunus's IT92_COEFFS constant: that is a convenience table covering a
     # DEFAULT set, and anything outside it (Se in a selenomethionine structure,
     # metals, halides) raises KeyError deep inside the kernel builder.
-    # it92_coefficients() reads any element gemmi knows, at run time.
+    # it92_coefficients() reads any element gemmi knows, at run time, and is
+    # shared with the real-space density path so both read one table.
     try:
         coefficients = it92_coefficients(distinct_elements)
     except KeyError as e:
         # KeyError renders as the repr of its argument, so interpolating the
         # exception itself would wrap the text in a second layer of quotes.
-        # lunus puts a sentence naming the offending symbol in args[0]; surface
-        # that directly.
+        # it92_coefficients puts a sentence naming the offending symbol in
+        # args[0]; surface that directly.
         detail = e.args[0] if e.args else e
         raise ValueError(
             "No IT92 scattering coefficients for an element of "
