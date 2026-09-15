@@ -39,6 +39,8 @@ pytest.importorskip("lunus.sf", reason="lunus[sf] not installed")
 # at module scope, so without lunus this has to skip rather than fail collection.
 from sampleworks.synthetic.generate_synthetic_sf_lunus import (
     compute_ensemble_amplitudes,
+    dataset_from_amplitudes,
+    dataset_from_intensities,
     load_configurations,
 )
 from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ
@@ -389,3 +391,150 @@ class TestCrossEngineAgreement:
 
         assert correlation > self.MIN_CORRELATION
         assert r_factor < self.MAX_R_FACTOR
+
+
+class TestMTZWriters:
+    """Round-trip coverage for the two MTZ writers.
+
+    These are the module's only rs-dependent code, so they are also the test
+    Marcus asked for in PR #380: run over the writers and a lost
+    reciprocalspaceship dependency fails here rather than silently downstream.
+
+    What they pin is the MTZ column *types*, the letters downstream tools
+    dispatch on. rs assigns them by inferring from the column names, so a
+    renamed column would silently change a type without these.
+    """
+
+    @staticmethod
+    def reflections(n: int = 64) -> np.ndarray:
+        """A small block of Miller indices, origin excluded."""
+        h, k, l = np.meshgrid(np.arange(4), np.arange(4), np.arange(4), indexing="ij")
+        hkl = np.stack([h.ravel(), k.ravel(), l.ravel()], axis=1).astype(np.int32)
+        return hkl[1 : n + 1]
+
+    def test_amplitudes_round_trip_through_mtz(self, tmp_path):
+        """Amplitude, sigma and phase must come back as MTZ F/Q/P with their
+        values intact, and the crystal metadata must survive the write."""
+        hkl = self.reflections()
+        structure_factors = (np.arange(1, len(hkl) + 1) * (1.0 + 0.5j)).astype(np.complex64)
+        cell = gemmi.UnitCell(31.7, 42.3, 55.9, 90.0, 104.5, 90.0)
+        path = tmp_path / "amplitudes.mtz"
+
+        dataset_from_amplitudes(
+            hkl,
+            structure_factors,
+            cell,
+            gemmi.SpaceGroup("P 1 21 1"),
+            label="MODEL",
+            sigma_f_scale=0.2,
+            test_fraction=0.0,
+            output_path=path,
+        )
+
+        mtz = gemmi.read_mtz_file(str(path))
+        assert [(c.label, c.type) for c in mtz.columns] == [
+            ("H", "H"),
+            ("K", "H"),
+            ("L", "H"),
+            ("FMODEL", "F"),
+            ("SIGFMODEL", "Q"),
+            ("PHIFMODEL", "P"),
+        ]
+        assert mtz.spacegroup.hm == "P 1 21 1"
+        assert mtz.cell.a == pytest.approx(31.7, abs=1e-3)
+
+        amplitude = np.abs(structure_factors)
+        np.testing.assert_allclose(mtz.column_with_label("FMODEL").array, amplitude, rtol=1e-6)
+        np.testing.assert_allclose(
+            mtz.column_with_label("SIGFMODEL").array, amplitude * 0.2, rtol=1e-6
+        )
+        np.testing.assert_allclose(
+            mtz.column_with_label("PHIFMODEL").array,
+            np.rad2deg(np.angle(structure_factors)),
+            rtol=1e-5,
+        )
+
+    def test_intensities_round_trip_through_mtz(self, tmp_path):
+        """Diffuse intensities must come back as MTZ type J, the type
+        ``lunus/sf/xtraj.py`` writes, so either source reads the same way."""
+        hkl = self.reflections()
+        intensities = np.linspace(-0.5, 10.0, len(hkl)).astype(np.float32)
+        path = tmp_path / "diffuse.mtz"
+
+        dataset_from_intensities(
+            hkl,
+            intensities,
+            gemmi.UnitCell(31.7, 42.3, 55.9, 90.0, 104.5, 90.0),
+            gemmi.SpaceGroup("P 1 21 1"),
+            output_path=path,
+        )
+
+        mtz = gemmi.read_mtz_file(str(path))
+        assert [(c.label, c.type) for c in mtz.columns] == [
+            ("H", "H"),
+            ("K", "H"),
+            ("L", "H"),
+            ("ID", "J"),
+        ]
+        # Slightly negative diffuse values are written as computed, not clipped.
+        np.testing.assert_allclose(mtz.column_with_label("ID").array, intensities, rtol=1e-6)
+        assert mtz.column_with_label("ID").array.min() < 0.0
+
+    def test_rfree_flags_written_only_when_requested(self, tmp_path):
+        """R-free flags are the one thing here gemmi has no equivalent for, so
+        pin both branches of the switch that generates them."""
+        hkl = self.reflections()
+        structure_factors = np.ones(len(hkl), dtype=np.complex64)
+        args = (hkl, structure_factors, gemmi.UnitCell(30.0, 30.0, 30.0, 90.0, 90.0, 90.0))
+
+        without = tmp_path / "without.mtz"
+        dataset_from_amplitudes(
+            *args, gemmi.SpaceGroup("P 1"), test_fraction=0.0, output_path=without
+        )
+        assert not any(c.type == "I" for c in gemmi.read_mtz_file(str(without)).columns)
+
+        with_flags = tmp_path / "with.mtz"
+        dataset_from_amplitudes(
+            *args, gemmi.SpaceGroup("P 1"), test_fraction=0.25, seed=7, output_path=with_flags
+        )
+        flags = gemmi.read_mtz_file(str(with_flags)).column_with_label("R-free-flags")
+        assert flags.type == "I"
+        assert set(np.unique(flags.array)) <= {0.0, 1.0}
+        assert 0.0 < flags.array.mean() < 1.0
+
+    def test_intensity_type_survives_an_unconventional_label(self, tmp_path):
+        """The MTZ type is the interoperability contract, so it must stay J for
+        any label. rs infers types from column names and only gives an intensity
+        to names starting with "I", so a label like this would otherwise be R."""
+        hkl = self.reflections(8)
+        path = tmp_path / "labelled.mtz"
+
+        dataset_from_intensities(
+            hkl,
+            np.ones(len(hkl), dtype=np.float32),
+            gemmi.UnitCell(30.0, 30.0, 30.0, 90.0, 90.0, 90.0),
+            gemmi.SpaceGroup("P 1"),
+            label="DIFFUSE",
+            output_path=path,
+        )
+
+        column = gemmi.read_mtz_file(str(path)).column_with_label("DIFFUSE")
+        assert column.type == "J"
+
+    def test_dataset_is_returned_without_writing(self, tmp_path):
+        """Both writers are usable as builders: no output_path, no file."""
+        hkl = self.reflections(8)
+        cell = gemmi.UnitCell(30.0, 30.0, 30.0, 90.0, 90.0, 90.0)
+        space_group = gemmi.SpaceGroup("P 1")
+
+        amplitudes = dataset_from_amplitudes(
+            hkl, np.ones(len(hkl), dtype=np.complex64), cell, space_group, test_fraction=0.0
+        )
+        intensities = dataset_from_intensities(
+            hkl, np.ones(len(hkl), dtype=np.float32), cell, space_group
+        )
+
+        assert list(tmp_path.iterdir()) == []
+        assert amplitudes.index.names == ["H", "K", "L"]
+        assert [str(dtype) for dtype in amplitudes.dtypes] == ["SFAmplitude", "Stddev", "Phase"]
+        assert [str(dtype) for dtype in intensities.dtypes] == ["Intensity"]
