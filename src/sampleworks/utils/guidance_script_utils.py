@@ -509,6 +509,8 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
 
         structure = annotate_structure_for_protenix(
             structure,
+            # Deferred to its own PR: affects every Protenix run, not just latent-opt.
+            # out_dir=str(Path(args.output_dir) / "protenix_input"),
             recycling_steps=recycling_steps,
             # Disable diffusion shared-vars cache for LATENT_OPT so gradients can
             # flow to z_trunk; cached tensors can otherwise become stale.
@@ -675,6 +677,8 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
         # carries it as an integer step count, so we convert it here and default to optimizing from
         # the first step.
         guidance_t_start = args.guidance_start / num_steps if args.guidance_start > 0 else 0.0
+        # Same conversion for partial diffusion, matching the pure-guidance branch above.
+        t_start = args.partial_diffusion_step / num_steps if args.partial_diffusion_step else 0.0
         which_latent = args.which_latent  # This is "single", "pair", or "both".
         anchor_weight = args.anchor_weight
         bond_length_weight = args.bond_length_weight
@@ -694,6 +698,7 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
             ensemble_size=args.ensemble_size,
             num_steps=num_steps,
             guidance_t_start=guidance_t_start,
+            t_start=t_start,
             outer_steps=args.outer_steps,
             learning_rate=args.learning_rate,
             max_grad_norm=args.max_grad_norm,

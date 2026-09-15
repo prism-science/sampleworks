@@ -178,6 +178,18 @@ def validate_model_checkpoint(
     return str(checkpoint_path)
 
 
+# Inference-time latent optimization (IT-opt) tunables. Named once here so that from_cli()
+# and populate_config_for_guidance_type(), the two independent paths that copy CLI values onto
+# a config, cannot drift apart as flags are added.
+_LATENT_OPT_ATTRS = (
+    "which_latent",
+    "learning_rate",
+    "outer_steps",
+    "anchor_weight",
+    "max_grad_norm",
+    "bond_length_weight",
+)
+
 # Attributes set dynamically by add_*_args helpers that should be copied
 # from a parsed argparse.Namespace onto a GuidanceConfig instance.
 _DYNAMIC_ATTRS = [
@@ -193,12 +205,7 @@ _DYNAMIC_ATTRS = [
     "guidance_interval",
     # latent optimization (IT-opt) -- must be listed here or from_cli() drops the parsed
     # values and _run_guidance()'s getattr(args, ...) always sees the defaults (flags = no-ops).
-    "which_latent",
-    "learning_rate",
-    "outer_steps",
-    "anchor_weight",
-    "max_grad_norm",
-    "bond_length_weight",
+    *_LATENT_OPT_ATTRS,
     # model-specific
     "model_checkpoint",
     "method",
@@ -403,6 +410,12 @@ class GuidanceConfig:
             self.num_particles = args.num_particles
             self.fk_lambda = args.fk_lambda
             self.fk_resampling_interval = args.fk_resampling_interval
+            self.ensemble_size = job.ensemble_size
+        elif job.scaler == GuidanceType.LATENT_OPT:
+            for attr in _LATENT_OPT_ATTRS:
+                value = getattr(args, attr, None)
+                if value is not None:
+                    setattr(self, attr, value)
             self.ensemble_size = job.ensemble_size
         else:
             self.step_size = job.gradient_weight
