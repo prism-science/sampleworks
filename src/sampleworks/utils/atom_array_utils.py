@@ -398,13 +398,15 @@ def map_altlocs_to_stack(
 
     Returns
     -------
-    tuple[AtomArrayStack, np.ndarray, np.ndarray]
+    tuple[AtomArrayStack, dict[str, np.ndarray]]
         Tuple containing:
 
-        - AtomArrayStack with separate structures for each altloc.
-        - Dictionary of extra annotations that are removed to avoid conflicts, currently
-          'occupancy', 'altloc_id', and 'b_factor'. Each is returned as
-          n_altloc x n_res numpy arrays
+        - AtomArrayStack with separate structures for each altloc. Note that the
+          annotations below are *absent* from it, having been deleted to let the
+          structures stack.
+        - Dictionary of the extra annotations that are removed to avoid conflicts,
+          currently 'occupancy', 'altloc_id', and 'b_factor'. Each is returned as an
+          ``(n_altloc, n_atoms)`` numpy array, indexed by the stack's atom order.
     """
     if isinstance(atom_array, AtomArrayStack):
         if len(atom_array) > 1:
