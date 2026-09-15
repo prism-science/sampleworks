@@ -457,6 +457,10 @@ def dataset_from_intensities(
         spacegroup=space_group,
     )
     dataset = dataset.set_index(["H", "K", "L"]).infer_mtz_dtypes()
+    # Inference reads the type off the column name, and only names starting with
+    # "I" come out as an intensity, so an unconventional label would land as R.
+    # The type is the interoperability contract here, so state it for this column.
+    dataset[label] = dataset[label].astype(rs.IntensityDtype())
 
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
