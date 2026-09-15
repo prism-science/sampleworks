@@ -92,6 +92,9 @@ from lunus.sf import (
     structure_factors_batch,
 )
 
+from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.unitcell import (
+    UnitCell,
+)
 from sampleworks.utils.elements import it92_coefficients, normalize_element
 
 
@@ -185,13 +188,21 @@ class LunusSetup:
     ----------
     grid_shape
         ``(Nu, Nv, Nw)`` unit-cell grid, symmetry-commensurate and FFT-friendly.
-    orth_np
-        ``(3, 3)`` orthogonalization matrix as NumPy float64. Constructor-only:
-        ``__post_init__`` derives ``orth_matrix`` and ``cell_volume`` from it and
-        it is not stored.
+    orth_np, frac_np
+        ``(3, 3)`` orthogonalization and fractionalization matrices as NumPy
+        float64. Constructor-only: ``__post_init__`` derives the tensors and the
+        cell volume from them, and neither is stored.
     orth_matrix
         ``(3, 3)`` orthogonalization matrix, ``cartesian = orth_matrix @ fractional``.
         Derived from ``orth_np``, taking the kernels' dtype and device.
+    frac_matrix
+        ``(3, 3)`` inverse of ``orth_matrix``, applied to Cartesian coordinates in
+        :func:`structure_factors`. Taken from qFit's closed-form
+        ``UnitCell.orth_to_frac`` rather than inverted here, so this path and the
+        real-space density path share one formula. The fractional coordinates it
+        produces are deliberately *not* wrapped into ``[0, 1)``: lunus's splat
+        applies its own modulo in grid-index space, and wrapping earlier would
+        put a discontinuity in the gradient at the cell boundary.
     cell_volume
         Unit-cell volume in Å³. Derived from ``orth_np``, not passed to the
         constructor.
@@ -224,6 +235,7 @@ class LunusSetup:
 
     grid_shape: tuple[int, int, int]
     orth_np: InitVar[np.ndarray]
+    frac_np: InitVar[np.ndarray]
     grid_ops: list
     element_idx: Int[torch.Tensor, " n_atoms"]
     atom_A: Float[torch.Tensor, "n_atoms 5"]
@@ -234,21 +246,27 @@ class LunusSetup:
     blur: float
     n_atoms: int
     orth_matrix: Float[torch.Tensor, "3 3"] = field(init=False)
+    frac_matrix: Float[torch.Tensor, "3 3"] = field(init=False)
     cell_volume: float = field(init=False)
 
-    def __post_init__(self, orth_np: np.ndarray) -> None:
-        """Derive the cell volume and the matrix tensor from one input."""
+    def __post_init__(self, orth_np: np.ndarray, frac_np: np.ndarray) -> None:
+        """Derive the cell volume and the matrix tensors from the NumPy inputs."""
         # |det| of the orthogonalization matrix is the cell volume by
         # construction, taken in float64 before the cast to the kernels' dtype:
         # the volume scales the structure factors, so it should not inherit
         # float32 truncation.
         orth = np.asarray(orth_np, dtype=np.float64)
         object.__setattr__(self, "cell_volume", float(abs(np.linalg.det(orth))))
-        object.__setattr__(
-            self,
-            "orth_matrix",
-            torch.as_tensor(orth, dtype=self.atom_A.dtype, device=self.atom_A.device),
-        )
+        for name, matrix in (("orth_matrix", orth), ("frac_matrix", frac_np)):
+            object.__setattr__(
+                self,
+                name,
+                torch.as_tensor(
+                    np.asarray(matrix, dtype=np.float64),
+                    dtype=self.atom_A.dtype,
+                    device=self.atom_A.device,
+                ),
+            )
 
 
 def build_setup(
@@ -343,6 +361,11 @@ def build_setup(
 
     a, b, c = unit_cell.a, unit_cell.b, unit_cell.c
     orth_np = build_orth_matrix(a, b, c, unit_cell.alpha, unit_cell.beta, unit_cell.gamma)
+    # Fractionalization comes from qFit's closed form, the same code the real-space
+    # density path uses, rather than inverting orth_np here: one formula, no
+    # divergence to discover when comparing the two methods. Its space group is
+    # irrelevant to the matrix, which depends only on the cell parameters.
+    frac_np = UnitCell(a, b, c, unit_cell.alpha, unit_cell.beta, unit_cell.gamma).orth_to_frac
 
     rotations, translations = space_group_operations(space_group)
     raw_shape = grid_shape_for_resolution(a, b, c, resolution, rate)
@@ -382,6 +405,7 @@ def build_setup(
     return LunusSetup(
         grid_shape=tuple(grid_shape),
         orth_np=orth_np,
+        frac_np=frac_np,
         grid_ops=grid_ops,
         element_idx=element_idx,
         atom_A=atom_A,
@@ -392,33 +416,6 @@ def build_setup(
         blur=blur,
         n_atoms=len(elements),
     )
-
-
-def cartesian_to_fractional(
-    coords: Float[torch.Tensor, "*batch n_atoms 3"],
-    orth_matrix: Float[torch.Tensor, "3 3"],
-) -> Float[torch.Tensor, "*batch n_atoms 3"]:
-    """Convert Cartesian coordinates (Å) to fractional, differentiably.
-
-    ``cartesian = orth_matrix @ fractional``, so this applies the inverse. The
-    result is *not* wrapped into ``[0, 1)``: lunus's splat applies its own modulo
-    when scattering onto the grid, and wrapping here would introduce
-    discontinuities in the gradient at cell boundaries.
-
-    Parameters
-    ----------
-    coords
-        Cartesian coordinates in Å.
-    orth_matrix
-        Orthogonalization matrix from :class:`LunusSetup`.
-
-    Returns
-    -------
-    torch.Tensor
-        Fractional coordinates, same shape as ``coords``.
-    """
-    inv_orth = torch.linalg.inv(orth_matrix.to(dtype=coords.dtype, device=coords.device))
-    return coords @ inv_orth.T
 
 
 def structure_factors(
@@ -484,7 +481,7 @@ def structure_factors(
             f"{setup.n_atoms}. Rebuild the setup for this atom array."
         )
 
-    frac = cartesian_to_fractional(coords, setup.orth_matrix)
+    frac = coords @ setup.frac_matrix.to(dtype=coords.dtype, device=coords.device).T
 
     return structure_factors_batch(
         frac,
