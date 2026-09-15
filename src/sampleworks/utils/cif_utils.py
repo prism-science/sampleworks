@@ -257,6 +257,22 @@ def resolve_mixed_hetatm_atom_altlocs(cif_path: Path | str) -> Path:
     return tmp_path
 
 
+def renumber_atom_site_ids(cif_file: CIFFile) -> None:
+    """Renumber ``_atom_site.id`` values across all models in place.
+
+    ``set_structure()`` copies and tiles an ``atom_id`` annotation for multi-model
+    structures, which can produce duplicate category keys. Call this function after
+    ``set_structure()`` on a single-block CIF file.
+
+    Parameters
+    ----------
+    cif_file : CIFFile
+        Single-block CIF file whose ``atom_site`` category is modified in place.
+    """
+    category = cif_file.block["atom_site"]
+    category["id"] = np.arange(1, category.row_count + 1)
+
+
 def add_category_to_cif(
     ciffile: CIFFile,
     data: dict[str, Any],
