@@ -684,6 +684,18 @@ def carry_polymer_entity_categories(
         "entity_poly_seq": _concatenate_category_rows(sequence_rows),
         "struct_asym": struct_asym,
     }
+    if "chem_comp" in reference_block:
+        modeled_components = set(output_block["atom_site"]["label_comp_id"].as_array(str))
+        chem_comp = reference_block["chem_comp"]
+        reference_components = np.asarray(chem_comp["id"].as_array(str))
+        component_mask = np.isin(reference_components, list(modeled_components))
+        missing_components = modeled_components - set(reference_components[component_mask])
+        if missing_components:
+            raise ValueError(f"Reference CIF lacks chem_comp rows for {sorted(missing_components)}")
+        categories["chem_comp"] = {
+            column: list(np.asarray(chem_comp[column].as_array(str))[component_mask])
+            for column in chem_comp
+        }
     for name, data in categories.items():
         add_category_to_cif(output, data, name, overwrite=True)
     return tuple(categories)
