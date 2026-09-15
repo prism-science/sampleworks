@@ -325,7 +325,7 @@ def test_wrapper_calls_internal_method():
         m.assert_called_once()  # Breaks on refactor
 ```
 
-Test structure: `tests/{rewards,integration,mocks,models,utils,metrics,eval}/`
+Test structure: `tests/{cli,eval,forward_models,integration,metrics,mocks,models,rewards,runs,synthetic,utils}/`, alongside `tests/resources/` for fixture files.
 
 Mark any test that requires a GPU or model checkpoint with `@pytest.mark.slow` so it is excluded from fast CI runs:
 
