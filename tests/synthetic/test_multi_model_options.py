@@ -19,8 +19,8 @@ pytest.importorskip("lunus.sf", reason="lunus[sf] not installed")
 
 from pathlib import Path
 
-from sampleworks.synthetic.generate_synthetic_sf import BatchRowForMTZ
 from sampleworks.synthetic.generate_synthetic_sf_lunus import load_configurations
+from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ
 
 
 @pytest.fixture(scope="module")

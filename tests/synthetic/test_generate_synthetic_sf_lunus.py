@@ -37,11 +37,11 @@ pytest.importorskip("lunus.sf", reason="lunus[sf] not installed")
 
 # Imported below the guard, not above it: the generator module imports lunus.sf
 # at module scope, so without lunus this has to skip rather than fail collection.
-from sampleworks.synthetic.generate_synthetic_sf import BatchRowForMTZ
 from sampleworks.synthetic.generate_synthetic_sf_lunus import (
     compute_ensemble_amplitudes,
     load_configurations,
 )
+from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ
 
 
 # Deliberately unmarked. These need neither a GPU nor model weights, and the

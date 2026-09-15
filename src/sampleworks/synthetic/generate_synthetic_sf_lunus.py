@@ -51,8 +51,9 @@ from loguru import logger
 from lunus.sf import mean_and_diffuse
 
 from sampleworks.core.forward_models.xray import lunus_sf
-from sampleworks.synthetic.generate_synthetic_sf import BatchRowForMTZ, load_batch_csv
 from sampleworks.synthetic.synthetic_utils import (
+    BatchRowForMTZ,
+    load_batch_csv,
     load_structure_for_synthetic_reward,
     resolve_parallel_jobs,
 )
@@ -455,10 +456,7 @@ def dataset_from_intensities(
         cell=unit_cell,
         spacegroup=space_group,
     )
-    for miller_column in ("H", "K", "L"):
-        dataset[miller_column] = dataset[miller_column].astype(rs.HKLIndexDtype())
-    dataset[label] = dataset[label].astype(rs.IntensityDtype())
-    dataset = dataset.set_index(["H", "K", "L"])
+    dataset = dataset.set_index(["H", "K", "L"]).infer_mtz_dtypes()
 
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -531,17 +529,10 @@ def dataset_from_amplitudes(
         spacegroup=space_group,
     )
 
-    # Every column needs an MTZ dtype before writing, the Miller indices
-    # included: plain int32 has no MTZ type mapping, and rs rejects it at
-    # write_mtz() rather than at construction. Cast before set_index, since the
-    # index levels keep whatever dtype the columns had.
-    for miller_column in ("H", "K", "L"):
-        dataset[miller_column] = dataset[miller_column].astype(rs.HKLIndexDtype())
-    dataset[f_col] = dataset[f_col].astype(rs.StructureFactorAmplitudeDtype())
-    dataset[sig_col] = dataset[sig_col].astype(rs.StandardDeviationDtype())
-    dataset[phi_col] = dataset[phi_col].astype(rs.PhaseDtype())
-
-    dataset = dataset.set_index(["H", "K", "L"])
+    # Every column needs an MTZ dtype before writing, the Miller indices included:
+    # plain int32 has no MTZ type mapping, and rs rejects it at write_mtz() rather
+    # than at construction. infer_mtz_dtypes reads them off the column names.
+    dataset = dataset.set_index(["H", "K", "L"]).infer_mtz_dtypes()
 
     if test_fraction > 0:
         dataset = rs.utils.add_rfree(
