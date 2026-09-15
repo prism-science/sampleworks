@@ -74,8 +74,8 @@ LatentOptimization(
 )
 ```
 
-- `ensemble_size` structures are sampled in parallel and **share** the latents (per-member latents
-  are a documented follow-up).
+- `ensemble_size` structures are sampled in parallel, each with its **own** `s`/`z` leaf, so members
+  can diverge under the reward instead of collapsing onto one solution.
 - `guidance_t_start` is a fraction in `[0,1]`; stored as `guidance_start = int(guidance_t_start*num_steps)`.
   Steps before it are plain frozen-latent diffusion.
 - `outer_steps` resample rounds, fresh prior noise each. **Constructor default `1`; CLI default `2`.**
@@ -145,8 +145,7 @@ rounds; an outer resample loop; an anchor to the trunk baseline; a final clean s
 
 **Deliberate deviations:** the objective is a pluggable `RewardFunctionProtocol` (v1:
 `RealSpaceRewardFunction`, density fit) rather than backbone-RMSD; the anchor is mean-squared rather
-than the reference's Frobenius norm (shape-agnostic, so `w_s`/`w_z` are comparable); latents are
-shared across the ensemble in v1.
+than the reference's Frobenius norm (shape-agnostic, so `w_s`/`w_z` are comparable).
 
 **Invariants worth stating:**
 - **Optimization is not sampling.** An optimized `(s, z)` is a point estimate; reporting it as a

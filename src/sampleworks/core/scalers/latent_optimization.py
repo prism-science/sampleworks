@@ -233,7 +233,7 @@ class LatentOptimization:
         Parameters
         ----------
         ensemble_size
-            Number of structures sampled in parallel (they share the latents).
+            Number of structures sampled in parallel, each with its own ``s``/``z`` leaf.
         num_steps
             Number of diffusion steps in one round.
         guidance_t_start
