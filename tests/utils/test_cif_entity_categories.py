@@ -7,7 +7,7 @@ import pytest
 from atomworks.io.utils.io_utils import load_any
 from biotite.structure import AtomArrayStack, stack
 from biotite.structure.io.pdbx import set_structure
-from biotite.structure.io.pdbx.cif import CIFFile
+from biotite.structure.io.pdbx.cif import CIFCategory, CIFFile
 from sampleworks.utils.cif_utils import carry_polymer_entity_categories
 
 
@@ -88,3 +88,69 @@ def test_carry_polymer_entity_categories_does_not_mutate_on_failed_match(resourc
 
     for category in ("entity", "entity_poly", "entity_poly_seq", "struct_asym"):
         assert category not in output.block
+
+
+def test_carry_polymer_entity_categories_ignores_author_numbering(resources_dir):
+    """Align using label sequence despite unrelated author numbers and insertion codes."""
+    output = _multi_model_cif(
+        resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
+    )
+    atom_site = output.block["atom_site"]
+    atom_site["auth_seq_id"] = np.full(atom_site.row_count, "500")
+    atom_site["pdbx_PDB_ins_code"] = np.full(atom_site.row_count, "A")
+
+    carry_polymer_entity_categories(output, resources_dir / "1vme" / "1vme_final.cif")
+
+    carried = output.block["entity_poly_seq"]
+    modeled_numbers = sorted(set(atom_site["label_seq_id"].as_array(str)), key=int)
+    assert carried["num"].as_array(str).tolist() == modeled_numbers
+    modeled_sequence = output.block["entity_poly"]["pdbx_seq_one_letter_code"].as_item()
+    assert len(modeled_sequence) == carried.row_count
+
+
+def test_carry_polymer_entity_categories_rejects_ambiguous_alignment(resources_dir):
+    """Reject two possible ordered mappings without mutating the output."""
+    output = _multi_model_cif(
+        resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
+    )
+    reference = CIFFile.read(str(resources_dir / "1vme" / "1vme_final.cif"))
+    atom_site = output.block["atom_site"]
+    modeled = {}
+    for number, name in zip(
+        atom_site["label_seq_id"].as_array(str),
+        atom_site["label_comp_id"].as_array(str),
+        strict=True,
+    ):
+        modeled[int(number)] = str(name)
+    residue_names = [modeled[number] for number in sorted(modeled)]
+    entity_id = reference.block["entity_poly"]["entity_id"].as_item()
+    reference.block["entity_poly_seq"] = CIFCategory(
+        {
+            "entity_id": [entity_id] * (2 * len(residue_names)),
+            "num": [str(number) for number in range(1, 2 * len(residue_names) + 1)],
+            "mon_id": residue_names * 2,
+            "hetero": ["n"] * (2 * len(residue_names)),
+        }
+    )
+
+    with pytest.raises(ValueError, match="reference entity sequence match"):
+        carry_polymer_entity_categories(output, reference)
+
+    for category in ("entity", "entity_poly", "entity_poly_seq", "struct_asym"):
+        assert category not in output.block
+
+
+def test_carry_polymer_entity_categories_normalizes_selenomethionine(resources_dir):
+    """Accept deposited MSE only when the modeled residue is canonical MET."""
+    output = _multi_model_cif(
+        resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
+    )
+    atom_site = output.block["atom_site"]
+    names = atom_site["label_comp_id"].as_array(str)
+    atom_site["label_comp_id"] = np.where(names == "MSE", "MET", names)
+
+    carry_polymer_entity_categories(output, resources_dir / "1vme" / "1vme_final.cif")
+
+    carried_names = output.block["entity_poly_seq"]["mon_id"].as_array(str)
+    assert "MSE" not in carried_names
+    assert "MET" in carried_names
