@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 from atomworks.io.utils.io_utils import load_any
+from biotite.sequence import ProteinSequence
 from biotite.structure import AtomArrayStack
 from biotite.structure.io.pdbx.cif import CIFBlock, CIFCategory, CIFFile
 from loguru import logger
@@ -300,51 +301,121 @@ def _single_block(cif_file: CIFFile) -> CIFBlock:
     return cif_file[block_names[0]]
 
 
-def _matching_entity(
-    reference_block: CIFBlock,
-    residue_numbers: list[int],
-    residue_names: list[str],
-) -> tuple[str, int]:
-    """Find one reference polymer entity containing an output residue sequence.
+def _canonical_monomer(name: str) -> str:
+    """Return the canonical name used for conservative sequence matching.
+
+    Parameters
+    ----------
+    name : str
+        Three-letter monomer name.
+
+    Returns
+    -------
+    str
+        Canonical monomer name, with selenomethionine normalized to methionine.
+    """
+    return "MET" if name == "MSE" else name
+
+
+def _unique_subsequence_indices(reference: list[str], modeled: list[str]) -> list[int] | None:
+    """Find a unique ordered embedding with the fewest deletion runs.
+
+    Parameters
+    ----------
+    reference : list[str]
+        Deposited monomer names.
+    modeled : list[str]
+        Modeled monomer names.
+
+    Returns
+    -------
+    list[int] | None
+        Reference indices for the unique optimal embedding, or ``None`` when absent or ambiguous.
+    """
+    reference = [_canonical_monomer(name) for name in reference]
+    modeled = [_canonical_monomer(name) for name in modeled]
+    states: dict[tuple[int, bool], tuple[int, tuple[int, ...] | None, int]] = {
+        (0, False): (0, (), 1)
+    }
+
+    def update(
+        target: dict[tuple[int, bool], tuple[int, tuple[int, ...] | None, int]],
+        key: tuple[int, bool],
+        cost: int,
+        path: tuple[int, ...] | None,
+        count: int,
+    ) -> None:
+        """Keep minimum-cost paths and mark equally optimal alternatives.
+
+        Parameters
+        ----------
+        target : dict
+            Dynamic-programming states for the next reference residue.
+        key : tuple[int, bool]
+            Modeled position and whether the path is deleting reference residues.
+        cost : int
+            Number of deletion runs in the candidate path.
+        path : tuple[int, ...] | None
+            Matched reference indices, or ``None`` for an ambiguous path.
+        count : int
+            Number of equally optimal paths, capped at two.
+        """
+        current = target.get(key)
+        if current is None or cost < current[0]:
+            target[key] = (cost, path, count)
+        elif cost == current[0]:
+            target[key] = (cost, None, min(2, current[2] + count))
+
+    for reference_index, reference_name in enumerate(reference):
+        next_states: dict[tuple[int, bool], tuple[int, tuple[int, ...] | None, int]] = {}
+        for (modeled_index, deleting), (cost, path, count) in states.items():
+            update(next_states, (modeled_index, True), cost + (not deleting), path, count)
+            if modeled_index < len(modeled) and reference_name == modeled[modeled_index]:
+                matched_path = None if path is None else (*path, reference_index)
+                update(next_states, (modeled_index + 1, False), cost, matched_path, count)
+        states = next_states
+
+    candidates = [value for (index, _), value in states.items() if index == len(modeled)]
+    if not candidates:
+        return None
+    minimum_cost = min(value[0] for value in candidates)
+    optimal = [value for value in candidates if value[0] == minimum_cost]
+    if sum(value[2] for value in optimal) != 1 or optimal[0][1] is None:
+        return None
+    return list(optimal[0][1])
+
+
+def _matching_entity(reference_block: CIFBlock, residue_names: list[str]) -> tuple[str, list[int]]:
+    """Find one deposited entity with a unique ordered modeled sequence match.
 
     Parameters
     ----------
     reference_block : CIFBlock
         Deposited CIF block containing polymer entity categories.
-    residue_numbers : list[int]
-        Sorted output ``label_seq_id`` values.
     residue_names : list[str]
-        Output residue names corresponding to ``residue_numbers``.
+        Output residue names in ``label_seq_id`` order.
 
     Returns
     -------
-    tuple[str, int]
-        Reference entity ID and numbering offset to apply to its sequence.
+    tuple[str, list[int]]
+        Reference entity ID and aligned row indices within its polymer sequence.
 
     Raises
     ------
     ValueError
-        If the output is empty, gapped, unmatched, or ambiguously matched.
+        If the output is empty, unmatched, or ambiguously matched.
     """
-    if not residue_numbers:
+    if not residue_names:
         raise ValueError("Output entity has no polymer residues")
-    if np.any(np.diff(residue_numbers) != 1):
-        raise ValueError("Output entity residue numbering is not contiguous")
-
-    entity_poly = reference_block["entity_poly"]
     sequence = reference_block["entity_poly_seq"]
     sequence_ids = np.asarray(sequence["entity_id"].as_array(str))
-    sequence_numbers = np.asarray(sequence["num"].as_array(int))
     sequence_names = np.asarray(sequence["mon_id"].as_array(str))
-    matches: list[tuple[str, int]] = []
-    for entity_id in entity_poly["entity_id"].as_array(str):
-        mask = sequence_ids == entity_id
-        reference_numbers = sequence_numbers[mask]
-        reference_names = sequence_names[mask]
-        for start in range(len(reference_names) - len(residue_names) + 1):
-            if list(reference_names[start : start + len(residue_names)]) == residue_names:
-                matches.append((str(entity_id), residue_numbers[0] - int(reference_numbers[start])))
-
+    matches: list[tuple[str, list[int]]] = []
+    for entity_id in reference_block["entity_poly"]["entity_id"].as_array(str):
+        reference_names = list(sequence_names[sequence_ids == entity_id])
+        indices = _unique_subsequence_indices(reference_names, residue_names)
+        if indices is not None:
+            matches.append((str(entity_id), indices))
     if len(matches) != 1:
         raise ValueError(f"Expected one reference entity sequence match, found {len(matches)}")
     return matches[0]
@@ -570,7 +641,7 @@ def carry_polymer_entity_categories(
     sequence_rows: list[dict[str, list[str]]] = []
     struct_asym = {"id": [], "entity_id": []}
     for output_id, chains, numbers, names in _output_polymer_entities(output_block):
-        reference_id, offset = _matching_entity(reference_block, numbers, names)
+        reference_id, matched_indices = _matching_entity(reference_block, names)
         entity_row = _select_category_rows(reference_block["entity"], "id", reference_id)
         entity_row["id"] = [output_id]
         entity_rows.append(entity_row)
@@ -581,13 +652,22 @@ def carry_polymer_entity_categories(
         entity_poly_row["entity_id"] = [output_id]
         if "pdbx_strand_id" in entity_poly_row:
             entity_poly_row["pdbx_strand_id"] = [",".join(sorted(chains))]
+        modeled_sequence = "".join(ProteinSequence.convert_letter_3to1(name) for name in names)
+        for column in ("pdbx_seq_one_letter_code", "pdbx_seq_one_letter_code_can"):
+            if column in entity_poly_row:
+                entity_poly_row[column] = [modeled_sequence]
         entity_poly_rows.append(entity_poly_row)
 
         sequence_row = _select_category_rows(
             reference_block["entity_poly_seq"], "entity_id", reference_id
         )
-        sequence_row["entity_id"] = [output_id] * len(sequence_row["entity_id"])
-        sequence_row["num"] = [str(int(number) + offset) for number in sequence_row["num"]]
+        sequence_row = {
+            column: [values[index] for index in matched_indices]
+            for column, values in sequence_row.items()
+        }
+        sequence_row["entity_id"] = [output_id] * len(numbers)
+        sequence_row["num"] = [str(number) for number in numbers]
+        sequence_row["mon_id"] = names
         carried_residues = dict(
             zip(map(int, sequence_row["num"]), sequence_row["mon_id"], strict=True)
         )
