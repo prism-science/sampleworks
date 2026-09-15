@@ -286,7 +286,12 @@ def get_sequences(atom_array, chain_info, valid_positions=None):
                     chain_type = info["chain_type"]
                     if chain_type.is_polymer():
                         canonical_seq = info.get("processed_entity_canonical_sequence", "")
-                        if valid_positions is not None and chain_id in valid_positions:
+                        has_seq_idx = hasattr(atom_array, "seq_idx")
+                        if has_seq_idx:
+                            # Sequence override is active, so use the full
+                            # canonical sequence without trimming.
+                            entity_seq[label_entity_id] = canonical_seq
+                        elif valid_positions is not None and chain_id in valid_positions:
                             chain_valid = valid_positions[chain_id]
                             n_valid = len(chain_valid)
                             n_seq = len(canonical_seq)
