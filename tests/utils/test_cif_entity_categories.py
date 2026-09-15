@@ -154,3 +154,26 @@ def test_carry_polymer_entity_categories_normalizes_selenomethionine(resources_d
     carried_names = output.block["entity_poly_seq"]["mon_id"].as_array(str)
     assert "MSE" not in carried_names
     assert "MET" in carried_names
+
+
+def test_carry_polymer_entity_categories_copies_deposited_chem_comp_rows(resources_dir):
+    """Carry complete deposited chemical-component rows required by modeled residues."""
+    output = _multi_model_cif(
+        resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
+    )
+    reference = CIFFile.read(str(resources_dir / "1vme" / "1vme_final.cif"))
+    component_ids = sorted(set(output.block["atom_site"]["label_comp_id"].as_array(str)))
+    reference.block["chem_comp"] = CIFCategory(
+        {
+            "id": component_ids,
+            "type": ["L-peptide linking"] * len(component_ids),
+            "name": [f"DEPOSITED {component_id}" for component_id in component_ids],
+        }
+    )
+
+    categories = carry_polymer_entity_categories(output, reference)
+
+    assert categories[-1] == "chem_comp"
+    carried = output.block["chem_comp"]
+    assert set(carried["id"].as_array(str)) == set(component_ids)
+    assert all(name.startswith("DEPOSITED ") for name in carried["name"].as_array(str))
