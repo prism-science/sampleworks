@@ -293,6 +293,42 @@ def test_write_job_metadata_records_altloc_occupancies(
     assert metadata["altloc_occupancies"] == {"A": 0.25, "B": 0.75}
 
 
+@pytest.mark.parametrize(
+    ("protein_name", "expected_protein", "expected_occupancies"),
+    [
+        ("3T94_1.0occA", "3T94", {"A": 1.0}),
+        ("pdb_00001l63_0.25occA_0.75occB", "pdb_00001l63", {"A": 0.25, "B": 0.75}),
+        ("lysozyme_1.0occA", "lysozyme_1.0occA", {"A": 1.0}),
+    ],
+)
+def test_write_job_metadata_records_rcsb_id_as_protein(
+    tmp_path: Path,
+    guidance_job_result: JobResult,
+    protein_name: str,
+    expected_protein: str,
+    expected_occupancies: dict[str, float],
+):
+    """``protein`` holds the RCSB id and ``protein_name`` the full grid-search name."""
+    args = GuidanceConfig(
+        protein=protein_name,
+        structure=Path("dummy"),
+        density=Path("dummy"),
+        model_name="boltz2",
+        guidance_type="pure_guidance",
+        log_path="dummy",
+        output_dir=str(tmp_path),
+    )
+    # get_job_result copies the full name into JobResult, whose fields are merged last.
+    guidance_job_result.protein = protein_name
+
+    _write_job_metadata(tmp_path, args, guidance_job_result)
+
+    metadata = json.loads((tmp_path / "job_metadata.json").read_text())
+    assert metadata["protein"] == expected_protein
+    assert metadata["protein_name"] == protein_name
+    assert metadata["altloc_occupancies"] == expected_occupancies
+
+
 def test_write_job_metadata_remaps_job_result_paths_to_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
