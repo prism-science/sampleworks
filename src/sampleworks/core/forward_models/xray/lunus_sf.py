@@ -41,29 +41,36 @@ an atom array and a group -- so the choice is the caller's.
 The splat, the blur and the taper
 ---------------------------------
 Three separate mechanisms, easily confused because two of them sound like
-smoothing:
+smoothing. None of them is a blur applied *to* the structure.
 
-**Splatting** puts the density on the grid. Each atom's scattering is a sum of
-Gaussians; the splat evaluates that on the voxels within a cutoff radius of the
-atom and accumulates it, and the FFT of the grid gives ``F(hkl)``. It is the
-grid-based alternative to summing over atoms in reciprocal space, not a
-smoothing step.
+**Splatting** is how density reaches the grid: it adds the density of an atom to
+the total grid density. An atom's density is the sum of Gaussians held in
+``atom_A`` and ``atom_lam``, evaluated on the voxels near the atom and
+accumulated there; the FFT of the finished grid gives ``F(hkl)``. Those
+Gaussians are the atom's own density, not a smoothing kernel, and splatting is
+the grid-based alternative to summing over atoms in reciprocal space.
 
-**Blur is anti-aliasing, and is removed exactly.** Atoms are splatted with
-``B + blur`` and the excess is divided back out in reciprocal space with
-``exp(+blur * s^2 / 4)``, so in exact arithmetic the answer is unchanged. What
-changes is sampling: a sharp Gaussian on a coarse grid is badly represented and
-a spread one is not. lunus measures R = 0.186 against exact direct summation at
-B_iso = 2 with no blur, versus 0.0004 with blur = 20 (7FPV, 0.633 A grid,
-d_min 2.0). It is not free — the un-blur amplifies whatever error is present —
-so the blur is sized to reach a sampling target and no further.
+**Blur is an anti-aliasing trick.** If B-factors are low the atomic densities are
+sharp, and a finer grid is needed to avoid errors in the structure factors —
+even when calculating only to lower resolution. If the B-factors are increased
+uniformly one can use a coarser grid, and after calculating, the structure
+factors can be corrected by removing the effect of the uniform B-factor. lunus
+splats with ``B + blur`` and multiplies by ``exp(+blur / (4 d^2))`` after the
+FFT, so in exact arithmetic the answer is unchanged; what changes is sampling.
+lunus measures R = 0.186 against exact direct summation at B_iso = 2 with no
+blur, versus 0.0004 with blur = 20 (7FPV, 0.633 A grid, d_min 2.0). The
+correction is not free — it amplifies whatever sampling error is present, and by
+more at higher resolution — so the blur is sized to reach a sampling target and
+no further.
 
 **The taper is about the cutoff, not the Gaussians.** A sum of Gaussians is
-already smooth; the hard edge comes from truncating each atom at a finite radius
-to keep the splat cheap. An abrupt cut puts a step in the density and the FFT
-rings on it, so each atom is brought smoothly to zero over ``taper_width`` at
-its cutoff radius. Truncation is also lunus's main source of disagreement with
-gemmi.
+already smooth. The edge comes from decreasing each atom's footprint by
+truncating its density at long distances, which commonly used codes all do —
+gemmi by a density threshold, and lunus the same way, at 1e-5 in
+``cutoff_radius_batch``. The truncation leaves a sharp, discontinuous edge in
+each atomic density contribution, and the FFT rings on it, so the taper smooths
+the edge, bringing the density continuously to zero over ``taper_width``.
+Truncation is also lunus's main source of disagreement with gemmi.
 """
 
 from __future__ import annotations
@@ -191,7 +198,14 @@ class LunusSetup:
     atom_A, atom_lam
         ``(n_atoms, 5)`` per-atom Gaussian kernel coefficients.
     elem_offsets
-        Per-element candidate voxel offsets for the splat.
+        Candidate voxels for the splat, one set per distinct element: integer
+        grid-index offsets from the voxel nearest the atom, covering that
+        element's largest atom radius plus half a voxel diagonal. Candidates
+        rather than contributors — an atom whose radius is smaller than its
+        element's largest, or one sitting off-centre in its voxel, tapers to
+        zero before the outermost offsets are reached. Per element rather than
+        per atom so one set is built for the cell and shared by every atom of
+        that element.
     atom_radius_ang
         ``(n_atoms,)`` cutoff radius per atom, Å.
     taper_width
