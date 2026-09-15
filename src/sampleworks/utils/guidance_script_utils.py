@@ -29,7 +29,10 @@ from sampleworks.core.scalers.step_scalers import (
     NoiseSpaceDPSScaler,
     NoScalingScaler,
 )
-from sampleworks.eval.occupancy_utils import extract_protein_and_occupancy
+from sampleworks.eval.occupancy_utils import (
+    extract_protein_and_occupancy,
+    rcsb_id_from_protein_name,
+)
 from sampleworks.utils.atom_array_utils import parse_structure
 from sampleworks.utils.cif_utils import add_category_to_cif, resolve_mixed_hetatm_atom_altlocs
 from sampleworks.utils.guidance_constants import (
@@ -684,12 +687,22 @@ def _write_job_metadata(
         Completed job result. Its fields (notably ``started_at``, ``finished_at``,
         ``runtime_seconds``, ``status``, ``exit_code``) are merged on top of the
         ``GuidanceConfig`` payload.
+
+    Notes
+    -----
+    ``args.protein`` is the grid-search protein name, which may carry occupancy tokens
+    (``3T94_1.0occA``). ``protein`` records the RCSB id parsed from it, so evaluation can match
+    protein configurations keyed by id, and ``protein_name`` keeps the full name. Names that
+    are not an RCSB id plus occupancy tokens are recorded unchanged in both keys.
     """
     metadata = args.as_dict()
     metadata.update(job_result.as_dict())
-    _, altloc_occupancies = extract_protein_and_occupancy(str(args.protein))
+    protein_name = str(args.protein)
+    _, altloc_occupancies = extract_protein_and_occupancy(protein_name)
     if altloc_occupancies:
         metadata["altloc_occupancies"] = altloc_occupancies
+    metadata["protein"] = rcsb_id_from_protein_name(protein_name) or protein_name
+    metadata["protein_name"] = protein_name
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     with open(output_dir / "job_metadata.json", "w") as fp:
