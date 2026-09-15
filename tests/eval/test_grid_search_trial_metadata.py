@@ -64,3 +64,27 @@ def test_scan_uses_path_fallback_for_empty_metadata_values(tmp_path) -> None:
     assert trials[0].model == "boltz2"
     assert trials[0].method == "MD"
     assert trials[0].ensemble_size == 8
+
+
+def test_scan_resolves_rcsb_id_from_protein_name_metadata(tmp_path) -> None:
+    """Metadata that records the full protein name as ``protein`` yields the RCSB id."""
+    trial_dir = tmp_path / "3T94_1.0occA" / "protpardelle" / "pure_guidance" / "ens8_gw0.1"
+    trial_dir.mkdir(parents=True)
+    (trial_dir / "refined.cif").write_text("data_test")
+    (trial_dir / "job_metadata.json").write_text(
+        json.dumps(
+            {
+                "protein": "3T94_1.0occA",
+                "altloc_occupancies": {"A": 1.0},
+                "ensemble_size": 8,
+                "step_size": 0.1,
+            }
+        )
+    )
+
+    trials = scan_grid_search_results(trial_dir, current_depth=4, target_depth=4)
+
+    assert len(trials) == 1
+    assert trials[0].protein == "3T94"
+    assert trials[0].protein_dir_name == "3T94_1.0occA"
+    assert trials[0].altloc_occupancies == {"A": 1.0}
