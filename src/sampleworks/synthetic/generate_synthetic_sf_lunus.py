@@ -59,8 +59,10 @@ from sampleworks.synthetic.synthetic_utils import (
 )
 from sampleworks.utils.atom_array_utils import (
     apply_selection,
+    BLANK_ALTLOC_IDS,
     keep_amino_acids,
     keep_polymer,
+    map_altlocs_to_stack,
     remove_hydrogens,
 )
 from sampleworks.utils.torch_utils import try_gpu
@@ -174,7 +176,9 @@ def load_configurations(
     ------
     ValueError
         If a multi-model file is combined with a non-default occupancy mode or
-        ``--altlocs-as-models``, or if selection and stripping leave no atoms.
+        ``--altlocs-as-models``, if selection and stripping leave no atoms, or if
+        ``--altlocs-as-models`` finds fewer than two alternate conformations,
+        since a single conformation has no variance to report.
     """
     loaded = load_any(structure_path, altloc="all", extra_fields=["occupancy", "b_factor"])
 
@@ -216,7 +220,73 @@ def load_configurations(
         return loaded[0], np.asarray(loaded.coord, dtype=np.float64)
 
     if altlocs_as_models:
-        return _expand_altlocs(loaded, structure_path, row.selection)
+        # map_altlocs_to_stack repeats the shared atoms in every model and varies
+        # the alternate conformations -- exactly the ensemble the diffuse term
+        # needs. It strips occupancy, b_factor and altloc_id off the stack, since
+        # biotite cannot hold annotations that conflict between models, and hands
+        # them back as (n_altloc, n_atoms) arrays. They go back onto the topology
+        # below, because the kernels bake B and occupancy in per atom.
+        stack, annotations = map_altlocs_to_stack(
+            loaded, selection=row.selection, return_full_array=True
+        )
+        if stack.stack_depth() < 2:
+            raise ValueError(
+                f"{structure_path.name} has fewer than two alternate conformations, so "
+                "--altlocs-as-models yields nothing to take a variance over."
+            )
+
+        b_factors = np.asarray(annotations["b_factor"], dtype=np.float64)
+        occupancies = np.asarray(annotations["occupancy"], dtype=np.float64)
+        altloc_ids = np.asarray(annotations["altloc_id"])
+
+        # B-factors are averaged across conformers. They are identical for the
+        # shared atoms, so this only affects atoms that genuinely differ, and it
+        # beats arbitrarily taking the first conformer's.
+        topology = stack[0]
+        topology.set_annotation("b_factor", b_factors.mean(axis=0).astype(np.float32))
+
+        # A slot is an alternate if ANY configuration labels it: with
+        # return_full_array=True every configuration holds the shared atoms plus
+        # its own conformer, so a non-blank altloc in any row marks a position
+        # that differs between them. filter_to_common_atoms drops slots missing
+        # from any configuration, so the rows do agree in practice; reducing over
+        # them anyway keeps this from resting on that.
+        is_alternate = (~np.isin(altloc_ids, list(BLANK_ALTLOC_IDS))).any(axis=0)
+
+        # Alternate-conformation atoms are set to full occupancy. Each
+        # configuration stands for a unit cell containing that conformer, so
+        # averaging over configurations reproduces the crystallographic
+        # F_shared + 0.5*F_A + 0.5*F_B of a 0.5/0.5 pair; passing the deposited
+        # 0.5 through as well would apply the weight twice. Atoms partially
+        # occupied for other reasons -- a half-occupied ion, say -- keep their
+        # deposited value, since only altloc atoms are reweighted.
+        per_atom_occupancy = occupancies[0].copy()
+        per_atom_occupancy[is_alternate] = 1.0
+        topology.set_annotation("occupancy", per_atom_occupancy.astype(np.float32))
+
+        # Averaged over the ALTERNATE atoms only. Averaging over every atom would
+        # be dominated by the shared backbone at 1.0 and could never show an
+        # imbalance. mean_and_diffuse then weights the configurations equally,
+        # which is right for uniform altloc occupancies and wrong for unequal
+        # ones, so say so when they disagree.
+        populations = occupancies[:, is_alternate].mean(axis=1) if is_alternate.any() else None
+        message = (
+            f"Expanded {structure_path.name} into {stack.stack_depth()} configurations "
+            f"from altlocs, {int(is_alternate.sum())} alternate atoms of {len(is_alternate)}"
+        )
+        if populations is None:
+            logger.info(message)
+        else:
+            message += f"; deposited populations {np.round(populations, 3).tolist()}"
+            if float(populations.max() - populations.min()) > 0.05:
+                logger.warning(
+                    message + " — these are unequal, but the configurations are weighted "
+                    "equally, so the diffuse term will not reflect the deposited populations."
+                )
+            else:
+                logger.info(message)
+
+        return topology, np.asarray(stack.coord, dtype=np.float64)
 
     atom_array = load_structure_for_synthetic_reward(
         structure_path,
@@ -230,95 +300,6 @@ def load_configurations(
     if atom_array is None:
         raise ValueError(f"Failed to load {structure_path}")
     return atom_array, np.asarray(atom_array.coord, dtype=np.float64)[None, ...]
-
-
-def _expand_altlocs(
-    loaded, structure_path: Path, selection: str | None
-) -> tuple[AtomArray, np.ndarray]:
-    """Turn a deposited multi-conformer model into one configuration per altloc.
-
-    Wraps :func:`map_altlocs_to_stack`, which returns a stack with the shared
-    atoms repeated in every model and the alternate conformations differing —
-    exactly the ensemble the diffuse term needs.
-
-    ``map_altlocs_to_stack`` strips ``occupancy``, ``b_factor`` and ``altloc_id``
-    off the stack -- biotite cannot hold annotations that conflict between models
-    -- and returns them as ``(n_altloc, n_atoms)`` arrays. They have to be put
-    back on the topology, since the scattering kernels are built from elements and
-    B-factors.
-
-    Two choices are made here, both because the engine bakes B and occupancy in
-    per atom rather than per configuration:
-
-    **B-factors are averaged across conformers.** They are identical for the
-    shared atoms, so this only affects atoms that genuinely differ, and it beats
-    arbitrarily taking the first conformer's.
-
-    **Alternate-conformation atoms are set to full occupancy.** Each
-    configuration stands for a unit cell containing that conformer, so averaging
-    over configurations reproduces the crystallographic
-    ``F_shared + 0.5·F_A + 0.5·F_B`` of a 0.5/0.5 pair. Passing the deposited 0.5
-    through as well would apply the weight twice. Atoms that are partially
-    occupied for other reasons -- a half-occupied ion, say -- keep their
-    deposited value, since only altloc atoms are reweighted.
-
-    Configurations are then weighted equally by ``mean_and_diffuse``, which is
-    right for uniform altloc occupancies and wrong for unequal ones; the measured
-    populations are logged, and warn when they disagree.
-
-    Raises
-    ------
-    ValueError
-        If the structure has fewer than two altlocs, since a single conformation
-        has no variance to report.
-    """
-    from sampleworks.utils.atom_array_utils import BLANK_ALTLOC_IDS, map_altlocs_to_stack
-
-    stack, annotations = map_altlocs_to_stack(loaded, selection=selection, return_full_array=True)
-    if stack.stack_depth() < 2:
-        raise ValueError(
-            f"{structure_path.name} has fewer than two alternate conformations, so "
-            "--altlocs-as-models yields nothing to take a variance over."
-        )
-
-    b_factors = np.asarray(annotations["b_factor"], dtype=np.float64)
-    occupancies = np.asarray(annotations["occupancy"], dtype=np.float64)
-    altloc_ids = np.asarray(annotations["altloc_id"])
-
-    topology = stack[0]
-    topology.set_annotation("b_factor", b_factors.mean(axis=0).astype(np.float32))
-
-    # A slot is an alternate if ANY configuration labels it: with
-    # return_full_array=True every configuration holds the shared atoms plus its
-    # own conformer, so a non-blank altloc in any row marks a position that
-    # differs between them. filter_to_common_atoms drops slots missing from any
-    # configuration, so the rows do agree in practice; reducing over them anyway
-    # keeps this from resting on that.
-    is_alternate = (~np.isin(altloc_ids, list(BLANK_ALTLOC_IDS))).any(axis=0)
-    per_atom_occupancy = occupancies[0].copy()
-    per_atom_occupancy[is_alternate] = 1.0
-    topology.set_annotation("occupancy", per_atom_occupancy.astype(np.float32))
-
-    # Averaged over the ALTERNATE atoms only. Averaging over every atom would be
-    # dominated by the shared backbone at 1.0 and could never show an imbalance.
-    populations = occupancies[:, is_alternate].mean(axis=1) if is_alternate.any() else None
-    message = (
-        f"Expanded {structure_path.name} into {stack.stack_depth()} configurations "
-        f"from altlocs, {int(is_alternate.sum())} alternate atoms of {len(is_alternate)}"
-    )
-    if populations is None:
-        logger.info(message)
-    else:
-        message += f"; deposited populations {np.round(populations, 3).tolist()}"
-        if float(populations.max() - populations.min()) > 0.05:
-            logger.warning(
-                message + " — these are unequal, but the configurations are weighted "
-                "equally, so the diffuse term will not reflect the deposited populations."
-            )
-        else:
-            logger.info(message)
-
-    return topology, np.asarray(stack.coord, dtype=np.float64)
 
 
 def compute_ensemble_amplitudes(
