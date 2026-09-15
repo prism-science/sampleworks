@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import pickle
+import re
 import traceback
 from datetime import datetime
 from importlib.resources import files
@@ -12,8 +13,9 @@ from typing import Any
 import numpy as np
 import torch
 from atomworks.io.transforms.atom_array import ensure_atom_array_stack
+from biotite.database.rcsb import fetch
 from biotite.structure import AtomArray, AtomArrayStack, stack
-from biotite.structure.io import save_structure
+from biotite.structure.io.pdbx import CIFFile, set_structure
 from loguru import logger
 
 from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.volume import XMap
@@ -31,7 +33,12 @@ from sampleworks.core.scalers.step_scalers import (
 )
 from sampleworks.eval.occupancy_utils import extract_protein_and_occupancy
 from sampleworks.utils.atom_array_utils import parse_structure
-from sampleworks.utils.cif_utils import add_category_to_cif, resolve_mixed_hetatm_atom_altlocs
+from sampleworks.utils.cif_utils import (
+    add_category_to_cif,
+    carry_polymer_entity_categories,
+    renumber_atom_site_ids,
+    resolve_mixed_hetatm_atom_altlocs,
+)
 from sampleworks.utils.guidance_constants import (
     GuidanceType,
     StructurePredictor,
@@ -76,6 +83,53 @@ except (ImportError, OSError):  # OSError can arise from a missing model_params 
 from sampleworks.utils.torch_utils import try_gpu
 
 
+_RCSB_ID_PATTERN = re.compile(r"^(pdb_[A-Za-z0-9]{8}|[0-9][A-Za-z0-9]{3})(?:_|$)")
+_RCSB_CACHE = Path("~/.sampleworks/rcsb").expanduser()
+
+
+def _resolve_rcsb_id(protein: str) -> str:
+    """Resolve a deposited structure ID from a suffixed protein name.
+
+    Parameters
+    ----------
+    protein : str
+        Legacy or extended PDB ID, optionally followed by underscore suffixes.
+
+    Returns
+    -------
+    str
+        Lowercase deposited structure ID.
+
+    Raises
+    ------
+    ValueError
+        If ``protein`` does not start with a valid deposited structure ID.
+    """
+    match = _RCSB_ID_PATTERN.match(protein)
+    if match is None:
+        raise ValueError(f"Cannot resolve an RCSB PDB ID from protein name {protein!r}")
+    return match.group(1).lower()
+
+
+def _load_reference_cif(protein: str) -> CIFFile:
+    """Fetch and parse one deposited CIF for output metadata carry.
+
+    Parameters
+    ----------
+    protein : str
+        Protein name containing a deposited structure ID.
+
+    Returns
+    -------
+    CIFFile
+        Parsed deposited CIF from the local RCSB cache.
+    """
+    rcsb_id = _resolve_rcsb_id(protein)
+    _RCSB_CACHE.mkdir(parents=True, exist_ok=True)
+    reference_path = fetch(rcsb_id, format="cif", target_path=str(_RCSB_CACHE))
+    return CIFFile.read(str(reference_path))
+
+
 def save_trajectory(
     scaler_type: str,
     trajectory,
@@ -83,12 +137,15 @@ def save_trajectory(
     output_dir,
     subdir_name,
     save_every=10,
+    reference_cif: CIFFile | None = None,
 ):
     """Dispatch trajectory serialization to the handler for the selected scaler."""
     if scaler_type == GuidanceType.PURE_GUIDANCE:
-        _save_trajectory(trajectory, atom_array, output_dir, subdir_name, save_every)
+        _save_trajectory(trajectory, atom_array, output_dir, subdir_name, save_every, reference_cif)
     elif scaler_type == GuidanceType.FK_STEERING:
-        _save_fk_steering_trajectory(trajectory, atom_array, output_dir, subdir_name, save_every)
+        _save_fk_steering_trajectory(
+            trajectory, atom_array, output_dir, subdir_name, save_every, reference_cif
+        )
     else:  # we shouldn't ever get here, since we can't have run guidance w/o this!
         raise ValueError(f"Invalid scaler type: {scaler_type}")
 
@@ -113,7 +170,46 @@ def _write_coords_into_array(
     array_copy.coord = coords
 
 
-def _save_trajectory(trajectory, atom_array, output_dir, subdir_name, save_every):
+def _write_structure_cif(
+    output_path: Path,
+    atom_array: AtomArray | AtomArrayStack,
+    reference_cif: CIFFile | None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Write a structure with unique atom IDs and available entity metadata.
+
+    Parameters
+    ----------
+    output_path : Path
+        Destination CIF path.
+    atom_array : AtomArray | AtomArrayStack
+        Single structure or multi-model ensemble to serialize.
+    reference_cif : CIFFile | None
+        Deposited CIF used to carry polymer entity categories when available.
+    metadata : dict[str, Any] | None
+        Optional Sampleworks metadata added to the output CIF.
+    """
+    cif_file = CIFFile()
+    set_structure(cif_file, atom_array)
+    renumber_atom_site_ids(cif_file)
+    if metadata is not None:
+        add_category_to_cif(cif_file, metadata, category_name="sampleworks")
+    if reference_cif is not None:
+        try:
+            carry_polymer_entity_categories(cif_file, reference_cif)
+        except ValueError as error:
+            logger.warning(f"Writing {output_path} without polymer entity categories: {error}")
+    cif_file.write(str(output_path))
+
+
+def _save_trajectory(
+    trajectory,
+    atom_array,
+    output_dir,
+    subdir_name,
+    save_every,
+    reference_cif: CIFFile | None = None,
+):
     """Save a pure-guidance coordinate trajectory as sampled multi-model CIFs."""
     output_dir = Path(output_dir / "trajectory" / subdir_name)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -133,10 +229,17 @@ def _save_trajectory(trajectory, atom_array, output_dir, subdir_name, save_every
         array_copy = atom_array.copy()
         array_copy = stack([array_copy] * ensemble_size)
         _write_coords_into_array(array_copy, coords.detach().numpy())
-        save_structure(str(output_dir / f"trajectory_{i}.cif"), array_copy)
+        _write_structure_cif(output_dir / f"trajectory_{i}.cif", array_copy, reference_cif)
 
 
-def _save_fk_steering_trajectory(trajectory, atom_array, output_dir, subdir_name, save_every):
+def _save_fk_steering_trajectory(
+    trajectory,
+    atom_array,
+    output_dir,
+    subdir_name,
+    save_every,
+    reference_cif: CIFFile | None = None,
+):
     """Save the first-particle FK-steering trajectory as sampled multi-model CIFs."""
     output_dir = Path(output_dir / "trajectory" / subdir_name)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -158,7 +261,7 @@ def _save_fk_steering_trajectory(trajectory, atom_array, output_dir, subdir_name
         # we save only the first ensemble out of n_particles, since saving
         # each particle at every step would clog trajectory saving
         _write_coords_into_array(array_copy, coords[0].detach().numpy())
-        save_structure(str(output_dir / f"trajectory_{i}.cif"), array_copy)
+        _write_structure_cif(output_dir / f"trajectory_{i}.cif", array_copy, reference_cif)
 
 
 def save_losses(losses, output_dir):
@@ -322,6 +425,7 @@ def save_everything(
     scaler_type: str,
     final_state: torch.Tensor | None = None,
     model_atom_array: AtomArray | None = None,
+    reference_cif: CIFFile | None = None,
 ) -> None:
     """Save everything: refined structure/ensemble CIF, trajectories, and losses.
 
@@ -354,12 +458,21 @@ def save_everything(
     model_atom_array : AtomArray | None
         Optional model-space atom template. When provided (mismatch runs),
         this template is used for final structure and trajectory saving.
+    reference_cif : CIFFile | None
+        Optional preloaded deposited CIF. When omitted, it is fetched from RCSB.
     """
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Saving results")
-    from biotite.structure.io.pdbx import CIFFile, set_structure
+    if reference_cif is None:
+        try:
+            reference_cif = _load_reference_cif(args.protein)
+        except Exception as error:
+            logger.warning(
+                f"Writing outputs without polymer entity categories because the deposited "
+                f"CIF for {args.protein!r} could not be loaded: {error}"
+            )
 
     base_atom_array = ensure_atom_array_stack(refined_structure["asym_unit"])[0]
 
@@ -379,11 +492,12 @@ def save_everything(
         atom_array = base_atom_array
 
     metadata = args.as_dict()
-
-    final_structure = CIFFile()
-    set_structure(final_structure, atom_array)
-    add_category_to_cif(final_structure, metadata, category_name="sampleworks")
-    final_structure.write(str(output_dir / "refined.cif"))
+    _write_structure_cif(
+        output_dir / "refined.cif",
+        atom_array,
+        reference_cif,
+        metadata,
+    )
 
     # job_metadata.json (config + JobResult) is written by run_guidance after this returns;
     # don't duplicate it here.
@@ -396,6 +510,7 @@ def save_everything(
         output_dir,
         "denoised",
         save_every=10,
+        reference_cif=reference_cif,
     )
     save_trajectory(
         scaler_type,
@@ -404,6 +519,7 @@ def save_everything(
         output_dir,
         "next_step",
         save_every=10,
+        reference_cif=reference_cif,
     )
     save_losses(losses, output_dir)
 
