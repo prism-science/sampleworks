@@ -197,7 +197,8 @@ def _write_structure_cif(
     if reference_cif is not None:
         try:
             carry_polymer_entity_categories(cif_file, reference_cif)
-        except ValueError as error:
+        except Exception as error:
+            # Entity metadata is best effort: never lose a completed run's coordinates over it.
             logger.warning(f"Writing {output_path} without polymer entity categories: {error}")
     cif_file.write(str(output_path))
 
