@@ -31,6 +31,18 @@ correlation 0.999989 and R ≈ 0.0077 against gemmi, with that taper the
 main source of the difference. Prefer to keep engine pairs consistent: a target
 generated here and scored by the SFcalculator-backed reward carries that
 difference as a floor.
+
+**Three stages per row, kept separate deliberately.**
+:func:`load_configurations` turns a file into a topology plus a stack of
+configuration coordinates; :func:`compute_ensemble_amplitudes` runs the forward
+pass and returns plain arrays, reusing the coordinate-independent setup that
+``lunus_sf.build_setup`` caches; :func:`dataset_from_amplitudes` and
+:func:`dataset_from_intensities` turn those arrays into MTZs.
+:func:`_process_single_row` is the only place the three meet, and it wraps each
+in its own ``try``/``except`` so ``batch_report.json`` can say which stage a row
+died in — a failed diffuse write still lets the amplitudes through. Keeping the
+forward pass free of ``reciprocalspaceship`` also means a caller that only wants
+arrays never touches the MTZ layer.
 """
 
 import argparse
@@ -226,9 +238,15 @@ def load_configurations(
         # biotite cannot hold annotations that conflict between models, and hands
         # them back as (n_altloc, n_atoms) arrays. They go back onto the topology
         # below, because the kernels bake B and occupancy in per atom.
-        stack, annotations = map_altlocs_to_stack(
-            loaded, selection=row.selection, return_full_array=True
-        )
+        # Select before expanding, not via map_altlocs_to_stack's own selection
+        # argument: that one takes an atomworks expression, where every other path
+        # in this module takes the pymol-like string apply_selection translates, so
+        # passing row.selection straight through raised SyntaxError on "chain A".
+        # Filtering first also makes the selection mean the same thing here as in
+        # the single- and multi-model branches -- atoms outside it are gone, rather
+        # than kept whenever they carry no altloc.
+        loaded = apply_selection(loaded, row.selection)
+        stack, annotations = map_altlocs_to_stack(loaded, selection=None, return_full_array=True)
         if stack.stack_depth() < 2:
             raise ValueError(
                 f"{structure_path.name} has fewer than two alternate conformations, so "
@@ -732,17 +750,58 @@ def process_batch(
     seed: int | None,
     device: torch.device,
     n_jobs: int = -1,
-    **row_kwargs,
+    strip_hydrogens: bool = False,
+    strip_waters: bool = False,
+    strip_ligands: bool = False,
+    solvent_cutoff: float | None = None,
+    solvent_taper_width: float = DEFAULT_SOLVENT_TAPER_WIDTH,
+    write_diffuse: bool = False,
+    altlocs_as_models: bool = False,
 ) -> dict[str, Any]:
     """Process every structure listed in a batch CSV.
-
-    Parameters mirror :func:`_process_single_row`; ``n_jobs`` is clamped to 1 on
-    CUDA by :func:`resolve_parallel_jobs` to avoid multiple CUDA contexts.
 
     Writes ``batch_report.json`` into ``output_dir``: a summary of how many rows
     succeeded, then one record per row. Rows fail independently, so a batch can
     exit having written some files and not others, and the log is the wrong
     place to find out which. Returns the same report.
+
+    Parameters
+    ----------
+    csv_path
+        Batch CSV, as read by :func:`load_batch_csv`.
+    base_dir
+        Directory the rows' ``filename`` entries are relative to.
+    output_dir
+        Where the MTZs and ``batch_report.json`` are written.
+    resolution
+        High-resolution limit (d_min) in Å.
+    occupancy_mode
+        ``'default'``, ``'uniform'`` or ``'custom'``; single-model input only.
+    test_fraction
+        Fraction of reflections flagged R-free, or 0 for no flags.
+    seed
+        Seed for the R-free selection. ``None`` gives different flags per run.
+    device
+        Torch device for the forward pass.
+    n_jobs
+        Worker count, clamped to 1 on CUDA by :func:`resolve_parallel_jobs` to
+        avoid multiple CUDA contexts.
+    strip_hydrogens, strip_waters, strip_ligands
+        Filters applied after any per-row selection.
+    solvent_cutoff
+        Density below which a voxel is solvent, e/Å³. ``None`` disables bulk
+        solvent entirely.
+    solvent_taper_width
+        Width of the solvent mask's smooth transition, e/Å³.
+    write_diffuse
+        Also write the diffuse intensities, which needs multi-model input.
+    altlocs_as_models
+        Expand alternate conformations into configurations.
+
+    Returns
+    -------
+    dict[str, Any]
+        The report written to ``batch_report.json``.
     """
     from joblib import delayed, Parallel
 
@@ -760,17 +819,27 @@ def process_batch(
             test_fraction=test_fraction,
             seed=seed,
             device=device,
-            **row_kwargs,
+            strip_hydrogens=strip_hydrogens,
+            strip_waters=strip_waters,
+            strip_ligands=strip_ligands,
+            solvent_cutoff=solvent_cutoff,
+            solvent_taper_width=solvent_taper_width,
+            write_diffuse=write_diffuse,
+            altlocs_as_models=altlocs_as_models,
         )
         for row in rows
     )
 
     succeeded = sum(1 for r in records if r["status"] == "success")
+    # Shape follows run_grid_search.py's report: a "runs" list plus a "summary"
+    # block, so anything reading one can read the other.
     report = {
-        "total": len(records),
-        "succeeded": succeeded,
-        "failed": len(records) - succeeded,
-        "rows": list(records),
+        "runs": list(records),
+        "summary": {
+            "total": len(records),
+            "successful": succeeded,
+            "failed": len(records) - succeeded,
+        },
     }
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -878,16 +947,6 @@ def main() -> None:
     device = try_gpu()
     solvent_cutoff = args.solvent_cutoff if args.simulate_solvent else None
 
-    row_kwargs = dict(
-        strip_hydrogens=args.remove_hydrogens,
-        strip_waters=args.remove_waters,
-        strip_ligands=args.remove_ligands,
-        solvent_cutoff=solvent_cutoff,
-        solvent_taper_width=args.solvent_taper_width,
-        write_diffuse=args.write_diffuse,
-        altlocs_as_models=args.altlocs_as_models,
-    )
-
     if args.batch_csv:
         process_batch(
             csv_path=args.batch_csv,
@@ -899,7 +958,13 @@ def main() -> None:
             seed=args.seed,
             device=device,
             n_jobs=args.n_jobs,
-            **row_kwargs,
+            strip_hydrogens=args.remove_hydrogens,
+            strip_waters=args.remove_waters,
+            strip_ligands=args.remove_ligands,
+            solvent_cutoff=solvent_cutoff,
+            solvent_taper_width=args.solvent_taper_width,
+            write_diffuse=args.write_diffuse,
+            altlocs_as_models=args.altlocs_as_models,
         )
     elif args.structure:
         row = BatchRowForMTZ.from_dict(
@@ -924,7 +989,13 @@ def main() -> None:
             test_fraction=args.test_fraction,
             seed=args.seed,
             device=device,
-            **row_kwargs,
+            strip_hydrogens=args.remove_hydrogens,
+            strip_waters=args.remove_waters,
+            strip_ligands=args.remove_ligands,
+            solvent_cutoff=solvent_cutoff,
+            solvent_taper_width=args.solvent_taper_width,
+            write_diffuse=args.write_diffuse,
+            altlocs_as_models=args.altlocs_as_models,
         )
     else:
         logger.error("Please specify --structure or --batch-csv")
