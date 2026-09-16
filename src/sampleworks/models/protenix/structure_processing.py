@@ -286,10 +286,15 @@ def get_sequences(atom_array, chain_info, valid_positions=None):
                     chain_type = info["chain_type"]
                     if chain_type.is_polymer():
                         canonical_seq = info.get("processed_entity_canonical_sequence", "")
-                        has_seq_idx = hasattr(atom_array, "seq_idx")
-                        if has_seq_idx:
-                            # Sequence override is active, so use the full
-                            # canonical sequence without trimming.
+                        chain_has_seq_idx = (
+                            hasattr(atom_array, "seq_idx")
+                            and np.any(np.asarray(atom_array.seq_idx)[
+                                np.asarray(atom_array.chain_id) == chain_id
+                            ] >= 0)
+                        )
+                        if chain_has_seq_idx:
+                            # Sequence override is active for this chain,
+                            # use the full canonical sequence without trimming.
                             entity_seq[label_entity_id] = canonical_seq
                         elif valid_positions is not None and chain_id in valid_positions:
                             chain_valid = valid_positions[chain_id]
@@ -354,7 +359,14 @@ def get_poly_res_names(atom_array, chain_info, valid_positions=None):
                             break
                         starts = get_residue_starts(chain_array, add_exclusive_stop=True)
                         res_names = cast(np.ndarray, chain_array.res_name)[starts[:-1]].tolist()
-                        if hasattr(chain_array, "res_id"):
+                        chain_has_seq_idx = (
+                            hasattr(chain_array, "seq_idx")
+                            and np.any(np.asarray(chain_array.seq_idx) >= 0)
+                        )
+                        if chain_has_seq_idx:
+                            seq_idx_vals = cast(np.ndarray, chain_array.seq_idx)[starts[:-1]]
+                            positions = [int(s) + 1 for s in seq_idx_vals]
+                        elif hasattr(chain_array, "res_id"):
                             res_ids = cast(np.ndarray, chain_array.res_id)[starts[:-1]].tolist()
                             min_res_id = min(res_ids) if res_ids else 1
                             positions = [r - min_res_id + 1 for r in res_ids]
