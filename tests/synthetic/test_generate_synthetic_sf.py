@@ -95,6 +95,7 @@ def _build_atom_array(
     atom_name: list[str],
     hetero: list[bool] | None = None,
     altloc_id: list[str] | None = None,
+    ins_code: list[str] | None = None,
 ) -> AtomArray:
     """Build a minimal AtomArray for residue-span validation tests.
 
@@ -118,6 +119,8 @@ def _build_atom_array(
     altloc_id : list of str, optional
         Per-atom alternate-location identifiers. If omitted, the annotation remains
         unset rather than being populated with blank identifiers.
+    ins_code : list of str, optional
+        Per-atom insertion codes. If omitted, Biotite's blank default is retained.
 
     Returns
     -------
@@ -136,6 +139,8 @@ def _build_atom_array(
         arr.hetero = np.array(hetero)
     if altloc_id is not None:
         arr.set_annotation("altloc_id", np.array(altloc_id))
+    if ins_code is not None:
+        arr.ins_code = np.array(ins_code)
     arr.set_annotation("b_factor", np.full(n, 20.0))
     arr.set_annotation("occupancy", np.ones(n))
     return arr
@@ -213,7 +218,7 @@ class TestAtomArrayToGemmi:
         (chain_id, res_id, res_name, atom_name, altloc_id) carry topology and alignment.
         res_id round-trips only because atomarray_to_gemmi writes label_seq_id (not just the
         author seqid), so atomworks' label scheme reads back the real residue numbers instead
-        of collapsing every residue to -1. ins_code is intentionally ignored (see Issue #306).
+        of collapsing every residue to -1. Insertion codes are carried in Gemmi's SeqId.
         """
         ref = stripped_atom_array
         save_cif_path = tmp_path / "saved.cif"
@@ -374,6 +379,23 @@ class TestGemmiHierarchyValidation:
         residues = list(chains[0])
         assert len(residues) == 1
         assert [atom.altloc for atom in residues[0]] == ["A", "B"]
+
+    def test_same_atom_name_with_distinct_insertion_codes_is_valid(self):
+        """Insertion codes distinguish residues with the same numeric ID."""
+        arr = _build_atom_array(
+            chain_id=["A", "A"],
+            res_id=[10, 10],
+            res_name=["ALA", "ALA"],
+            atom_name=["CA", "CA"],
+            ins_code=["A", "B"],
+        )
+
+        residues = list(atomarray_to_gemmi(arr)[0][0])
+
+        assert [(residue.seqid.num, residue.seqid.icode) for residue in residues] == [
+            (10, "A"),
+            (10, "B"),
+        ]
 
     def test_span_with_mixed_res_name_raises(self):
         """Atoms in one residue disagreeing on res_name are rejected."""

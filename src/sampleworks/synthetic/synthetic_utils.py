@@ -380,9 +380,9 @@ def _check_no_repeated_atoms(atom_array: AtomArray, altlocs: list[str]) -> None:
     gemmi (0.6.7) identifies an atom within a residue by that pair (seqid.hpp:124-141),
     so a repeat yields two indistinguishable atoms.
 
-    Keyed on the full ``(chain_id, res_id, atom_name, altloc)`` for informative error
-    message. Assumes that each ``(chain_id, res_id)`` occupies exactly one span, which
-    should have been established by ``_prepare_residue_spans``.
+    Keyed on the full ``(chain_id, res_id, ins_code, atom_name, altloc)`` for an
+    informative error message. Assumes each residue occupies exactly one span,
+    which should have been established by ``_prepare_residue_spans``.
 
     Parameters
     ----------
@@ -396,10 +396,16 @@ def _check_no_repeated_atoms(atom_array: AtomArray, altlocs: list[str]) -> None:
     ValueError
         If any ``(atom_name, altloc)`` pair repeats within a residue.
     """
+    ins_codes = (
+        atom_array.ins_code.tolist()
+        if "ins_code" in atom_array.get_annotation_categories()
+        else [""] * len(atom_array)
+    )
     _check_keys_unique(
         {
             "chain_id": atom_array.chain_id.tolist(),
             "res_id": atom_array.res_id.tolist(),
+            "ins_code": ins_codes,
             "atom_name": atom_array.atom_name.tolist(),
             "altloc": altlocs,
         },
@@ -415,9 +421,8 @@ def _prepare_residue_spans(atom_array: AtomArray) -> Iterator[tuple[int, int]]:
     the chain loop in ``atomarray_to_gemmi`` assumes contiguous chains and residues.
     This function checks both assumptions and raises an error if they are violated.
 
-    Residues are keyed on ``(chain_id, res_id)``, the only fields identifying a residue
-    that ``_build_gemmi_residue`` writes. ``ins_code`` is not among them until issue #306
-    is resolved, so a span it splits off is reported as a duplicate rather than kept.
+    Residues are keyed on ``(chain_id, res_id, ins_code)``, matching the fields
+    ``_build_gemmi_residue`` writes into Gemmi's hierarchy.
 
     Parameters
     ----------
@@ -428,7 +433,8 @@ def _prepare_residue_spans(atom_array: AtomArray) -> Iterator[tuple[int, int]]:
     -------
     Iterator of tuple of int
         One ``(start_idx, stop_idx)`` per residue, covering the atoms
-        ``atom_array[start_idx:stop_idx]`` that share the same ``(chain_id, res_id)``.
+        ``atom_array[start_idx:stop_idx]`` that share the same
+        ``(chain_id, res_id, ins_code)``.
 
     Raises
     ------
@@ -443,10 +449,15 @@ def _prepare_residue_spans(atom_array: AtomArray) -> Iterator[tuple[int, int]]:
 
     residue_span_idx = get_residue_starts(atom_array, add_exclusive_stop=True)
     span_start_idx = residue_span_idx[:-1]  # (n_residues,)
+    if "ins_code" in atom_array.get_annotation_categories():
+        span_ins_codes = atom_array.ins_code[span_start_idx].tolist()
+    else:
+        span_ins_codes = [""] * len(span_start_idx)
     _check_keys_unique(
         {
             "chain_id": chain_id[span_start_idx].tolist(),
             "res_id": atom_array.res_id[span_start_idx].tolist(),
+            "ins_code": span_ins_codes,
         },
         level="residue",
     )
@@ -491,9 +502,14 @@ def _build_gemmi_residue(
         Residue populated with the atoms ``atom_array[start_idx:stop_idx]``.
     """
     res_id = int(atom_array.res_id[start_idx])
+    ins_code = (
+        atom_array.ins_code[start_idx]
+        if "ins_code" in atom_array.get_annotation_categories()
+        else ""
+    )
     residue = gemmi.Residue()
     residue.name = atom_array.res_name[start_idx]
-    residue.seqid = gemmi.SeqId(str(res_id))  # writes auth_seq_id
+    residue.seqid = gemmi.SeqId(res_id, ins_code or " ")  # writes auth_seq_id and insertion code
     residue.label_seq = res_id  # writes label_seq_id, important for saving mmCIF
     # writes label_asym_id; nothing else assigns it, since atomarray_to_gemmi
     # deliberately skips setup_entities(). Must stay single-char -- SFcalculator's
