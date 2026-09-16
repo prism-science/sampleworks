@@ -148,6 +148,8 @@ class PureGuidance:
 
         metadata: dict = {"trajectory_denoised": trajectory_denoised}
 
+        # Mismatch outputs need the model topology, filtered input topology, and canonical CPU
+        # mapping so save_everything can restore input identities without stale coordinates.
         if reconciler.has_mismatch and processed_structure.model_atom_array is not None:
             metadata["model_atom_array"] = processed_structure.model_atom_array
             metadata["struct_atom_array"] = processed_structure.atom_array

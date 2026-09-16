@@ -1036,6 +1036,8 @@ class TestSave:
         n_struct, n_model = 5, 8
         refined = {"asym_unit": build_test_atom_array(n_atoms=n_struct)}
         model_atom_array = build_test_atom_array(n_atoms=n_model, with_occupancy=False)
+        struct_atom_array = refined["asym_unit"]
+        reconciler = AtomReconciler.from_arrays(model_atom_array, struct_atom_array)
 
         args = GuidanceConfig(
             protein="1l63",
@@ -1056,6 +1058,8 @@ class TestSave:
             scaler_type="pure_guidance",
             final_state=torch.randn(1, n_model, 3),
             model_atom_array=model_atom_array,
+            struct_atom_array=struct_atom_array,
+            reconciler=reconciler,
         )
 
         assert (tmp_path / "refined.cif").exists()

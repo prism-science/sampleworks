@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 import torch
 from atomworks.io.transforms.atom_array import ensure_atom_array_stack
-from biotite.structure import AtomArray, AtomArrayStack, stack
+from biotite.structure import AtomArray, AtomArrayStack, concatenate, stack
 from biotite.structure.io import save_structure
 from loguru import logger
 
@@ -31,6 +31,7 @@ from sampleworks.core.scalers.step_scalers import (
 )
 from sampleworks.eval.occupancy_utils import extract_protein_and_occupancy
 from sampleworks.utils.atom_array_utils import parse_structure
+from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.cif_utils import add_category_to_cif, resolve_mixed_hetatm_atom_altlocs
 from sampleworks.utils.guidance_constants import (
     GuidanceType,
@@ -83,12 +84,31 @@ def save_trajectory(
     output_dir,
     subdir_name,
     save_every=10,
+    *,
+    model_atom_array: AtomArray | None = None,
+    reconciler: AtomReconciler | None = None,
 ):
     """Dispatch trajectory serialization to the handler for the selected scaler."""
     if scaler_type == GuidanceType.PURE_GUIDANCE:
-        _save_trajectory(trajectory, atom_array, output_dir, subdir_name, save_every)
+        _save_trajectory(
+            trajectory,
+            atom_array,
+            output_dir,
+            subdir_name,
+            save_every,
+            model_atom_array=model_atom_array,
+            reconciler=reconciler,
+        )
     elif scaler_type == GuidanceType.FK_STEERING:
-        _save_fk_steering_trajectory(trajectory, atom_array, output_dir, subdir_name, save_every)
+        _save_fk_steering_trajectory(
+            trajectory,
+            atom_array,
+            output_dir,
+            subdir_name,
+            save_every,
+            model_atom_array=model_atom_array,
+            reconciler=reconciler,
+        )
     else:  # we shouldn't ever get here, since we can't have run guidance w/o this!
         raise ValueError(f"Invalid scaler type: {scaler_type}")
 
@@ -113,7 +133,126 @@ def _write_coords_into_array(
     array_copy.coord = coords
 
 
-def _save_trajectory(trajectory, atom_array, output_dir, subdir_name, save_every):
+def _prepare_output_array(
+    coords: torch.Tensor,
+    struct_atom_array: AtomArray,
+    model_atom_array: AtomArray | None,
+    reconciler: AtomReconciler | None,
+) -> AtomArrayStack:
+    """Build an output ensemble with input identities and generated coordinates.
+
+    Parameters
+    ----------
+    coords
+        Generated model-space coordinates, shape ``(ensemble, n_model, 3)``.
+    struct_atom_array
+        Filtered input atom array carrying authoritative output identities.
+    model_atom_array
+        Model-space atom array for mismatch runs.
+    reconciler
+        Canonical CPU mapping between model and filtered structure atoms.
+
+    Returns
+    -------
+    AtomArrayStack
+        Output ensemble containing mapped input atoms and supported model-only atoms.
+    """
+    if model_atom_array is None and reconciler is None:
+        output = stack([struct_atom_array.copy() for _ in range(coords.shape[0])])
+        _write_coords_into_array(output, coords.detach().cpu().numpy())
+        return output
+    if model_atom_array is None or reconciler is None:
+        raise ValueError("model_atom_array and reconciler must be provided together")
+
+    reconciler = reconciler.to("cpu")
+    coords = coords.detach().cpu()
+    # model_to_struct clones this expanded view before assigning mapped coordinates.
+    template = torch.as_tensor(struct_atom_array.coord).expand(coords.shape[0], -1, -1)
+    mapped_coords = reconciler.model_to_struct(coords, template)
+
+    model_only_mask = np.ones(reconciler.n_model, dtype=bool)
+    model_only_mask[reconciler.model_indices.numpy()] = False
+    residue_map: dict[tuple[str, int, str], int] = {}
+    for model_index, struct_index in zip(
+        reconciler.model_indices.tolist(), reconciler.struct_indices.tolist()
+    ):
+        key = (
+            str(model_atom_array.chain_id[model_index]),
+            int(model_atom_array.res_id[model_index]),
+            str(model_atom_array.ins_code[model_index]),
+        )
+        residue_map[key] = struct_index
+
+    extras_by_struct_residue: dict[tuple[str, int, str], list[int]] = {}
+    for model_index in np.flatnonzero(model_only_mask):
+        model_key = (
+            str(model_atom_array.chain_id[model_index]),
+            int(model_atom_array.res_id[model_index]),
+            str(model_atom_array.ins_code[model_index]),
+        )
+        struct_index = residue_map.get(model_key)
+        if struct_index is not None:
+            struct_key = (
+                str(struct_atom_array.chain_id[struct_index]),
+                int(struct_atom_array.res_id[struct_index]),
+                str(struct_atom_array.ins_code[struct_index]),
+            )
+            extras_by_struct_residue.setdefault(struct_key, []).append(int(model_index))
+
+    mapped_struct_indices = sorted(reconciler.struct_indices.tolist())
+    last_mapped_by_residue = {
+        (
+            str(struct_atom_array.chain_id[index]),
+            int(struct_atom_array.res_id[index]),
+            str(struct_atom_array.ins_code[index]),
+        ): index
+        for index in mapped_struct_indices
+    }
+    arrays: list[AtomArray] = []
+    coord_chunks: list[torch.Tensor] = []
+    model_categories = set(model_atom_array.get_annotation_categories())
+    atom_annotations = ("atom_name", "element", "atomic_number", "charge", "b_factor", "occupancy")
+    for struct_index in mapped_struct_indices:
+        arrays.append(struct_atom_array[struct_index : struct_index + 1])
+        coord_chunks.append(mapped_coords[:, struct_index : struct_index + 1])
+        key = (
+            str(struct_atom_array.chain_id[struct_index]),
+            int(struct_atom_array.res_id[struct_index]),
+            str(struct_atom_array.ins_code[struct_index]),
+        )
+        if last_mapped_by_residue[key] != struct_index:
+            continue
+        for model_index in extras_by_struct_residue.get(key, []):
+            extra = struct_atom_array[struct_index : struct_index + 1].copy()
+            extra_categories = set(extra.get_annotation_categories())
+            for annotation in atom_annotations:
+                if annotation in model_categories and annotation in extra_categories:
+                    values = model_atom_array.get_annotation(annotation)
+                    extra.set_annotation(annotation, values[model_index : model_index + 1])
+            if "altloc_id" in extra_categories:
+                extra.altloc_id[:] = ""
+            arrays.append(extra)
+            coord_chunks.append(coords[:, model_index : model_index + 1])
+
+    output_array = concatenate(arrays)
+    if "atom_id" in output_array.get_annotation_categories():
+        output_array.atom_id = np.arange(1, len(output_array) + 1)
+    output_coords = torch.cat(coord_chunks, dim=1)
+    output = stack([output_array.copy() for _ in range(coords.shape[0])])
+    _write_coords_into_array(output, output_coords.numpy())
+    return output
+
+
+def _save_trajectory(
+    trajectory,
+    atom_array,
+    output_dir,
+    subdir_name,
+    save_every,
+    *,
+    model_atom_array=None,
+    reconciler=None,
+):
     """Save a pure-guidance coordinate trajectory as sampled multi-model CIFs."""
     output_dir = Path(output_dir / "trajectory" / subdir_name)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -127,16 +266,22 @@ def _save_trajectory(trajectory, atom_array, output_dir, subdir_name, save_every
         )
 
     for i, coords in enumerate(trajectory):
-        ensemble_size = coords.shape[0]
         if i % save_every != 0:
             continue
-        array_copy = atom_array.copy()
-        array_copy = stack([array_copy] * ensemble_size)
-        _write_coords_into_array(array_copy, coords.detach().numpy())
-        save_structure(str(output_dir / f"trajectory_{i}.cif"), array_copy)
+        output = _prepare_output_array(coords, atom_array, model_atom_array, reconciler)
+        save_structure(str(output_dir / f"trajectory_{i}.cif"), output)
 
 
-def _save_fk_steering_trajectory(trajectory, atom_array, output_dir, subdir_name, save_every):
+def _save_fk_steering_trajectory(
+    trajectory,
+    atom_array,
+    output_dir,
+    subdir_name,
+    save_every,
+    *,
+    model_atom_array=None,
+    reconciler=None,
+):
     """Save the first-particle FK-steering trajectory as sampled multi-model CIFs."""
     output_dir = Path(output_dir / "trajectory" / subdir_name)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -150,15 +295,11 @@ def _save_fk_steering_trajectory(trajectory, atom_array, output_dir, subdir_name
         )
 
     for i, coords in enumerate(trajectory):
-        ensemble_size = coords.shape[1]  # first dim is the particle dim
         if i % save_every != 0:
             continue
-        array_copy = atom_array.copy()
-        array_copy = stack([array_copy] * ensemble_size)
-        # we save only the first ensemble out of n_particles, since saving
-        # each particle at every step would clog trajectory saving
-        _write_coords_into_array(array_copy, coords[0].detach().numpy())
-        save_structure(str(output_dir / f"trajectory_{i}.cif"), array_copy)
+        # We save only the first particle since every particle at every step would clog storage.
+        output = _prepare_output_array(coords[0], atom_array, model_atom_array, reconciler)
+        save_structure(str(output_dir / f"trajectory_{i}.cif"), output)
 
 
 def save_losses(losses, output_dir):
@@ -322,6 +463,8 @@ def save_everything(
     scaler_type: str,
     final_state: torch.Tensor | None = None,
     model_atom_array: AtomArray | None = None,
+    struct_atom_array: AtomArray | None = None,
+    reconciler: AtomReconciler | None = None,
 ) -> None:
     """Save everything: refined structure/ensemble CIF, trajectories, and losses.
 
@@ -352,8 +495,11 @@ def save_everything(
         Final coordinates with shape ``(ensemble, atoms, 3)``.  If ``None``,
         the `refined_structure`'s existing coordinates are saved as-is.
     model_atom_array : AtomArray | None
-        Optional model-space atom template. When provided (mismatch runs),
-        this template is used for final structure and trajectory saving.
+        Model-space atom topology for mismatch runs.
+    struct_atom_array : AtomArray | None
+        Filtered input topology carrying authoritative output identities.
+    reconciler : AtomReconciler | None
+        Canonical mapping between model and filtered input atom spaces.
     """
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -362,19 +508,15 @@ def save_everything(
     from biotite.structure.io.pdbx import CIFFile, set_structure
 
     base_atom_array = ensure_atom_array_stack(refined_structure["asym_unit"])[0]
-
-    # Use model's internal atom accounting template for mismatch runs when available
-    # Wrappers must guarantee model atom arrays have valid coords and occupancy.
-    atom_array_for_saving: AtomArray = (
-        model_atom_array if model_atom_array is not None else base_atom_array
-    )
+    atom_array_for_saving = struct_atom_array if struct_atom_array is not None else base_atom_array
 
     if final_state is not None:
-        ensemble_size = final_state.shape[0]
-
-        ensemble_array = stack([atom_array_for_saving.copy() for _ in range(ensemble_size)])
-        _write_coords_into_array(ensemble_array, final_state.detach().cpu().numpy())
-        atom_array = ensemble_array
+        atom_array = _prepare_output_array(
+            final_state,
+            atom_array_for_saving,
+            model_atom_array,
+            reconciler,
+        )
     else:
         atom_array = base_atom_array
 
@@ -396,6 +538,8 @@ def save_everything(
         output_dir,
         "denoised",
         save_every=10,
+        model_atom_array=model_atom_array,
+        reconciler=reconciler,
     )
     save_trajectory(
         scaler_type,
@@ -404,6 +548,8 @@ def save_everything(
         output_dir,
         "next_step",
         save_every=10,
+        model_atom_array=model_atom_array,
+        reconciler=reconciler,
     )
     save_losses(losses, output_dir)
 
@@ -644,6 +790,8 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
         raise TypeError("Unknown guidance type!")
 
     model_atom_array = result.metadata.get("model_atom_array") if result.metadata else None
+    struct_atom_array = result.metadata.get("struct_atom_array") if result.metadata else None
+    reconciler = result.metadata.get("reconciler") if result.metadata else None
 
     save_everything(
         args,
@@ -654,6 +802,8 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
         guidance_type,
         final_state=torch.as_tensor(result.final_state),
         model_atom_array=model_atom_array,
+        struct_atom_array=struct_atom_array,
+        reconciler=reconciler,
     )
 
     if hasattr(model_wrapper, "_chiral_grad_stats") and model_wrapper._chiral_grad_stats:
