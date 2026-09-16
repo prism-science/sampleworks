@@ -860,14 +860,20 @@ class TestSamplerStep:
 class TestTrajectoryScalers:
     """End-to-end trajectory scalers across mismatch case catalog."""
 
-    def _run_scaler(self, case: MismatchCase, scaler_type: str, reward) -> Any:
+    def _run_scaler(
+        self,
+        case: MismatchCase,
+        scaler_type: str,
+        reward,
+        device: str = "cpu",
+    ) -> Any:
         """Execute a trajectory scaler run for one case and return GuidanceOutput."""
-        wrapper = MismatchCaseWrapper(case)
+        wrapper = MismatchCaseWrapper(case, device=torch.device(device))
         structure = {
             "asym_unit": case.struct_atom_array.copy(),
             "metadata": {"id": case.id},
         }
-        config = EDMSamplerConfig(augmentation=False, align_to_input=True, device="cpu")
+        config = EDMSamplerConfig(augmentation=False, align_to_input=True, device=device)
         sampler = AF3EDMSampler(config)
         step_scaler = DataSpaceDPSScaler(step_size=0.01)
 
@@ -910,20 +916,52 @@ class TestTrajectoryScalers:
         assert result.final_state.shape[-2] == mismatch_case.n_model
 
     @pytest.mark.parametrize("scaler_type", ["pure_guidance", "fk_steering"])
-    def test_model_atom_array_in_metadata(
+    def test_reconciliation_metadata(
         self,
         mismatch_case: MismatchCase,
         scaler_type: str,
         mock_gradient_reward,
     ):
-        """Metadata carries model atom template iff reconciler reports a mismatch."""
+        """Metadata carries the canonical reconciliation inputs only for mismatches."""
         result = self._run_scaler(mismatch_case, scaler_type, mock_gradient_reward)
         metadata = result.metadata or {}
 
         if mismatch_case.expected_has_mismatch:
-            assert metadata.get("model_atom_array") is not None
+            model_atom_array = metadata.get("model_atom_array")
+            struct_atom_array = metadata.get("struct_atom_array")
+            reconciler = metadata.get("reconciler")
+            assert model_atom_array is not None
+            assert struct_atom_array is not None
+            assert isinstance(reconciler, AtomReconciler)
+            assert len(model_atom_array) == reconciler.n_model
+            assert len(struct_atom_array) == reconciler.n_struct
+            assert reconciler.model_indices.device.type == "cpu"
+            assert reconciler.struct_indices.device.type == "cpu"
         else:
             assert metadata.get("model_atom_array") is None
+            assert metadata.get("struct_atom_array") is None
+            assert metadata.get("reconciler") is None
+
+    @pytest.mark.gpu
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    @pytest.mark.parametrize("scaler_type", ["pure_guidance", "fk_steering"])
+    def test_reconciliation_metadata_remains_on_cpu_during_cuda_sampling(
+        self,
+        mismatch_case_catalog: dict[str, MismatchCase],
+        scaler_type: str,
+        mock_gradient_reward,
+    ):
+        """Metadata retains the canonical CPU reconciler during CUDA sampling."""
+        case = mismatch_case_catalog["from_2yl0"]
+
+        result = self._run_scaler(case, scaler_type, mock_gradient_reward, device="cuda")
+
+        metadata = result.metadata or {}
+        reconciler = metadata.get("reconciler")
+        assert isinstance(reconciler, AtomReconciler)
+        assert result.final_state.device.type == "cuda"
+        assert reconciler.model_indices.device.type == "cpu"
+        assert reconciler.struct_indices.device.type == "cpu"
 
     @pytest.mark.parametrize("scaler_type", ["pure_guidance", "fk_steering"])
     def test_trajectory_shapes_consistent(
@@ -998,6 +1036,8 @@ class TestSave:
         n_struct, n_model = 5, 8
         refined = {"asym_unit": build_test_atom_array(n_atoms=n_struct)}
         model_atom_array = build_test_atom_array(n_atoms=n_model, with_occupancy=False)
+        struct_atom_array = refined["asym_unit"]
+        reconciler = AtomReconciler.from_arrays(model_atom_array, struct_atom_array)
 
         args = GuidanceConfig(
             protein="1l63",
@@ -1018,6 +1058,8 @@ class TestSave:
             scaler_type="pure_guidance",
             final_state=torch.randn(1, n_model, 3),
             model_atom_array=model_atom_array,
+            struct_atom_array=struct_atom_array,
+            reconciler=reconciler,
         )
 
         assert (tmp_path / "refined.cif").exists()
