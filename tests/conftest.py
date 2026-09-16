@@ -24,7 +24,6 @@ from atomworks.io.utils.io_utils import load_any
 from biotite.structure import AtomArray, AtomArrayStack, stack
 from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
 from sampleworks.core.samplers.protocol import StepParams
-from sampleworks.eval.structure_utils import SampleworksProcessedStructure
 from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.guidance_constants import (
     Rewards,
@@ -39,6 +38,7 @@ from sampleworks.utils.imports import (
     PROTPARDELLE_AVAILABLE,
     RF3_AVAILABLE,
 )
+from sampleworks.utils.structure_utils import SampleworksProcessedStructure
 from sampleworks.utils.torch_utils import try_gpu
 
 from tests.mocks import MockFlowModelWrapper, MockStepScaler

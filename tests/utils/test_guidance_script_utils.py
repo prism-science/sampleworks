@@ -114,7 +114,7 @@ def test_get_reward_function_keeps_original_structure_file(
         lambda path: Path(path),
     )
     monkeypatch.setattr(
-        "sampleworks.utils.guidance_script_utils.parse",
+        "sampleworks.utils.guidance_script_utils.parse_structure",
         lambda *args, **kwargs: {
             "asym_unit": build_test_atom_array(n_atoms=3, with_occupancy=True)
         },
@@ -143,6 +143,84 @@ def test_get_reward_function_keeps_original_structure_file(
     )
 
     assert structure_file.exists(), "original structure file must not be deleted"
+
+
+def test_get_reward_function_removes_temporary_file_after_parse_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A temporary altloc-fixed CIF must be removed when parsing raises."""
+    temporary_file = tmp_path / "fixed.cif"
+    temporary_file.touch()
+
+    def fail_parse(*args, **kwargs):
+        raise ValueError("invalid structure")
+
+    monkeypatch.setattr(
+        "sampleworks.utils.guidance_script_utils.resolve_mixed_hetatm_atom_altlocs",
+        lambda path: temporary_file,
+    )
+    monkeypatch.setattr("sampleworks.utils.guidance_script_utils.parse_structure", fail_parse)
+
+    with pytest.raises(ValueError, match="invalid structure"):
+        get_reward_function_and_structure(
+            density="dummy_density.mrc",
+            device=torch.device("cpu"),
+            em=False,
+            loss_order=2,
+            resolution=2.0,
+            structure_path=tmp_path / "input.cif",
+        )
+
+    assert not temporary_file.exists()
+
+
+def test_get_reward_function_ignores_temporary_file_cleanup_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A failed temporary-file unlink must not turn a parsed structure into an error."""
+    temporary_file = tmp_path / "fixed.cif"
+    temporary_file.touch()
+    unlink_attempts = []
+
+    def fail_unlink(path, *args, **kwargs):
+        unlink_attempts.append(path)
+        raise PermissionError("read-only filesystem")
+
+    monkeypatch.setattr(
+        "sampleworks.utils.guidance_script_utils.resolve_mixed_hetatm_atom_altlocs",
+        lambda path: temporary_file,
+    )
+    monkeypatch.setattr(
+        "sampleworks.utils.guidance_script_utils.parse_structure",
+        lambda *args, **kwargs: {
+            "asym_unit": build_test_atom_array(n_atoms=3, with_occupancy=True)
+        },
+    )
+    monkeypatch.setattr(
+        "sampleworks.utils.guidance_script_utils.XMap",
+        MagicMock(fromfile=MagicMock(return_value=MagicMock())),
+    )
+    monkeypatch.setattr(
+        "sampleworks.utils.guidance_script_utils.setup_scattering_params",
+        MagicMock(return_value=MagicMock()),
+    )
+    monkeypatch.setattr(
+        "sampleworks.utils.guidance_script_utils.RealSpaceRewardFunction",
+        MagicMock(return_value=MagicMock()),
+    )
+    monkeypatch.setattr(Path, "unlink", fail_unlink)
+
+    _, structure = get_reward_function_and_structure(
+        density="dummy_density.mrc",
+        device=torch.device("cpu"),
+        em=False,
+        loss_order=2,
+        resolution=2.0,
+        structure_path=tmp_path / "input.cif",
+    )
+
+    assert len(structure["asym_unit"]) == 3
+    assert unlink_attempts == [temporary_file]
 
 
 def test_write_job_metadata_with_job_result_appends_timing_and_status(

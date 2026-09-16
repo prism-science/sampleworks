@@ -8,6 +8,7 @@ from typing import ClassVar
 
 import torch
 from loguru import logger
+
 from sampleworks.core.forward_models.xray.real_space_density import XMap_torch
 from sampleworks.synthetic.synthetic_utils import (
     load_structure_for_synthetic_reward,

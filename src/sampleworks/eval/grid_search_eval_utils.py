@@ -7,6 +7,7 @@ import argparse
 import json
 import re
 import sys
+import warnings
 from importlib.resources import files
 from pathlib import Path
 
@@ -191,7 +192,7 @@ def resolve_cif_path(row: pd.Series, cif_root: Path | None) -> Path:
 
 # TODO: this either (both) needs tests or (and) there needs to be a clearer "API"
 #  for how the folder names are generated.
-#  https://github.com/diff-use/sampleworks/issues/121
+#  https://github.com/prism-science/sampleworks/issues/121
 def parse_trial_dir(trial_dir: Path) -> dict[str, int | float | None]:
     """Parse trial directory name to extract parameters.
 
@@ -257,7 +258,7 @@ def scan_grid_search_results(
             )
         return trials
 
-    # FIXME https://github.com/diff-use/sampleworks/issues/121
+    # FIXME https://github.com/prism-science/sampleworks/issues/121
     # Check if we found a refined.cif file in the current directory
     refined_cif = current_directory / target_filename
     if current_depth == target_depth and refined_cif.exists():
@@ -365,9 +366,11 @@ def translate_selection(selection: str) -> str:
         # assume this is already atomworks/pandas style and ignore.
         return selection
 
-    DeprecationWarning(
+    warnings.warn(
         "DEPRECATED: translate_selection converts from some pymol-like selection strings to "
-        "AtomWorks selection strings, but is not guaranteed to be correct for all cases."
+        "AtomWorks selection strings, but is not guaranteed to be correct for all cases.",
+        DeprecationWarning,
+        stacklevel=2,
     )
 
     pattern = re.compile(r"chain ([A-Z]) and resi (\d+)-(\d+)")

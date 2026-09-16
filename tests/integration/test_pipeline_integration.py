@@ -24,13 +24,13 @@ from sampleworks.core.scalers.step_scalers import (
     NoiseSpaceDPSScaler,
     NoScalingScaler,
 )
-from sampleworks.eval.structure_utils import process_structure_to_trajectory_input
 from sampleworks.utils.guidance_constants import (
     StepScalers,
     StructurePredictor,
     TrajectorySamplers,
     TrajectoryScalers,
 )
+from sampleworks.utils.structure_utils import process_structure_to_trajectory_input
 from torch import Tensor
 
 from tests.conftest import (
@@ -46,8 +46,15 @@ from tests.conftest import (
     STEP_SCALER_REGISTRY,
     STRUCTURES,
 )
-from tests.mocks import MockFlowModelWrapper, MockStepScaler
+from tests.mocks import (
+    MismatchCase,
+    MismatchCaseWrapper,
+    MockFlowModelWrapper,
+    MockPreparableRewardFunction,
+    MockStepScaler,
+)
 from tests.mocks.rewards import MockGradientRewardFunction
+from tests.utils.atom_array_builders import build_test_atom_array
 
 
 def create_step_context_with_reward(
@@ -584,6 +591,67 @@ class TestTrajectoryScalerMatrixMock:
         assert isinstance(result, GuidanceOutput)
         assert result.final_state is not None
         assert torch.isfinite(torch.as_tensor(result.final_state)).all()
+
+    @pytest.mark.parametrize(
+        "trajectory_scaler_type", get_all_trajectory_scalers(), ids=lambda s: s.value
+    )
+    def test_preparable_reward_is_prepared_with_model_topology_before_first_call(
+        self,
+        trajectory_scaler_type: TrajectoryScalers,
+        device: torch.device,
+    ):
+        """Two-phase rewards are prepared with model-topology reward inputs before any evaluation.
+
+        The model and the structure deliberately have different atom counts. A reward
+        prepared against the input structure would bind the wrong atom ordering, which
+        is how the structure-factor reward silently scores the wrong thing. The inputs
+        handed to ``prepare`` carry the model atom array as their topology.
+        """
+
+        struct_atom_array = build_test_atom_array(
+            chain_ids=["A"] * 5,
+            res_ids=[1, 2, 3, 4, 5],
+            atom_names=["N", "CA", "C", "O", "CB"],
+        )
+        case = MismatchCase(
+            id="model_drops_one_atom",
+            description="Model represents four of the structure's five atoms.",
+            model_atom_array=struct_atom_array[:4].copy(),
+            struct_atom_array=struct_atom_array,
+            expected_n_common=4,
+            expected_has_mismatch=True,
+        )
+        wrapper = MismatchCaseWrapper(case, device=device)
+        structure = {"asym_unit": struct_atom_array, "metadata": {"id": "mismatch"}}
+
+        reward = MockPreparableRewardFunction()
+        sampler = AF3EDMSampler(
+            EDMSamplerConfig(device=device, augmentation=False, align_to_input=False)
+        )
+        trajectory_scaler = create_trajectory_scaler_from_type(
+            trajectory_scaler_type,
+            ensemble_size=1,
+            num_steps=3,
+        )
+
+        trajectory_scaler.sample(
+            structure=structure,
+            model=wrapper,
+            sampler=sampler,
+            # A real step scaler, so the reward is actually evaluated and the
+            # before-first-call assertion below has something to be true about.
+            step_scaler=DataSpaceDPSScaler(step_size=0.1),
+            reward=reward,
+            num_particles=1,
+        )
+
+        assert reward.prepared_atom_counts == [case.n_model]
+        (prepared,) = reward.prepared_inputs
+        assert prepared.atom_array is not None
+        assert prepared.atom_array.array_length() == case.n_model
+        assert list(prepared.atom_array.atom_name) == list(case.model_atom_array.atom_name)
+        assert reward.calls > 0
+        assert reward.calls_before_prepare == 0
 
 
 class TestPartialDiffusion:

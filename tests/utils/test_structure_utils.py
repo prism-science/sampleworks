@@ -7,18 +7,18 @@ import numpy as np
 import pytest
 from biotite.structure import AtomArray, AtomArrayStack
 from sampleworks.eval.eval_dataclasses import ProteinConfig
-from sampleworks.eval.structure_utils import (
+from sampleworks.utils.atom_array_utils import (
+    apply_selection,
+    map_altlocs_to_stack,
+    parse_selection_string,
+)
+from sampleworks.utils.structure_utils import (
     _closest_canonical_amino_acid,
     canonicalize_mixed_altloc_residues,
     extract_selection_coordinates,
     get_asym_unit_from_structure,
     get_reference_atomarraystack,
     get_reference_structure_coords,
-)
-from sampleworks.utils.atom_array_utils import (
-    apply_selection,
-    map_altlocs_to_stack,
-    parse_selection_string,
 )
 
 

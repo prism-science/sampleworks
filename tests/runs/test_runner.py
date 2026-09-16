@@ -13,6 +13,7 @@ from sampleworks.runs.schema import Job
 def test_argv_for_rf3_partial_matches_bash(monkeypatch: pytest.MonkeyPatch) -> None:
     """RF3 partial builds the canonical argv and auto-assigns all GPUs."""
     monkeypatch.setenv("HOME", "/home/test")
+    monkeypatch.setenv("SAMPLEWORKS_FORCE_PIXI", "1")
     monkeypatch.delenv("DATA_DIR", raising=False)
     monkeypatch.delenv("RESULTS_DIR", raising=False)
     monkeypatch.setattr(runner, "_detect_available_gpus", lambda: [str(i) for i in range(8)])

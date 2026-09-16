@@ -49,7 +49,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-RUN curl -fsSL https://pixi.sh/install.sh | bash
+# Pinned, because everything else about this build is: the base image is a
+# digest, the checkpoints are a digest, and CI's setup-pixi is v0.73.0. An
+# unpinned `curl | bash` made the build tool the one component that could change
+# under us between two builds of the same commit, which is a bad property to
+# have while chasing a build that installs nothing (see the guard below). Keep
+# in step with `pixi-version` in .github/workflows/ci.yml.
+ARG PIXI_VERSION=v0.73.0
+RUN curl -fsSL https://pixi.sh/install.sh | PIXI_VERSION="${PIXI_VERSION}" bash
 
 WORKDIR /app
 
@@ -128,38 +135,59 @@ RUN --mount=type=bind,from=checkpoints,target=/ck \
 # Docker layers duplicates shared conda packages (numpy, CUDA libs, etc.) and can
 # add tens of GB to the image.
 #
-# The `rm -rf` and the assertion below are both load-bearing. Published images
-# have shipped with all five environments as empty shells: the directories and
-# pixi's own bookkeeping in conda-meta present, but no package records, no bin/,
-# no lib/. `pixi install --frozen` then reports "The <env> environment has been
-# installed" against them and exits 0, so the breakage is invisible at build
-# time and only surfaces when a scientist finds /app/.pixi/envs/protenix has no
-# python. `SAMPLEWORKS_REQUIRE_PREBUILT_PIXI=1` makes the runner refuse to fall
-# back, so the image promises environments it does not carry.
-#
-# Clearing the prefix first forces a genuine install even when a stale or stub
-# prefix arrives from a cached layer, the base image, or the registry
-# buildcache. The per-environment check then makes an empty env fail the build
-# instead of shipping: a directory that exists but has no interpreter is exactly
-# the state that got published, and `pixi install` alone does not catch it.
+# Published images have shipped all five environments as empty shells:
+# conda-meta/pixi exists, but there are no package records, bin/, or lib/.
+# `pixi install --frozen` reports success against that state without running a
+# package transaction. `pixi reinstall` is the supported command that bypasses
+# that up-to-date decision and materializes every package again. It also creates
+# a missing prefix, so clearing prefixes first covers both stale layers and the
+# empty-prefix failure mode seen on diffuse-sh-builder.
 #
 # `/root/.cache/pixi` is deliberately not cached across builds — it carries
 # pixi's own "is this environment current" state, which is the thing that can
 # disagree with a prefix restored from a different build. The rattler and uv
 # caches stay: they hold downloaded packages and wheels, are what actually make
 # rebuilds fast, and were verified not to affect what lands in the layer.
-RUN --mount=type=cache,target=/root/.cache/rattler \
-    --mount=type=cache,target=/root/.cache/uv \
+#
+# The cache mounts have project-specific ids so they cannot alias mounts from
+# unrelated Dockerfiles when a builder retains state. `sharing=locked` prevents
+# concurrent steps on the same builder from mutating a package cache together.
+# Bump the suffix only to recover from a demonstrably corrupt persistent cache.
+#
+# The guard prints diagnostics before it exits. The empty-environment install
+# has not been reproducible outside this builder: the same manifest, lock and
+# pixi version install all five environments correctly on linux/amd64 with both
+# a cold and a warm rattler cache. So when it happens here, the build log is the
+# only place the cause can come from, and "pixi said installed, nothing is
+# there" is not enough to act on.
+RUN --mount=type=cache,id=sampleworks-rattler-2,target=/root/.cache/rattler,sharing=locked \
+    --mount=type=cache,id=sampleworks-uv-2,target=/root/.cache/uv,sharing=locked \
+    pixi --version && \
+    pixi info --no-config && \
     rm -rf /app/.pixi/envs && \
-    pixi install -e boltz --frozen && \
-    pixi install -e protenix --frozen && \
-    pixi install -e rf3 --frozen && \
-    pixi install -e protpardelle --frozen && \
-    pixi install -e analysis --frozen && \
     for env in boltz protenix rf3 protpardelle analysis; do \
-        test -x "/app/.pixi/envs/${env}/bin/python" || { \
+        echo "=== reinstalling ${env} ==="; \
+        pixi reinstall -e "${env}" --frozen --no-config || { \
+            echo "FATAL: pixi failed while reinstalling environment '${env}'."; \
+            exit 1; \
+        }; \
+        python="/app/.pixi/envs/${env}/bin/python"; \
+        test -x "${python}" || { \
             echo "FATAL: pixi environment '${env}' has no interpreter at /app/.pixi/envs/${env}/bin/python."; \
-            echo "       pixi reported success but installed nothing — refusing to ship an empty environment."; \
+            echo "       pixi reinstall reported success but materialized no packages."; \
+            echo "--- what pixi left behind ---"; \
+            ls -la "/app/.pixi/envs/${env}" 2>&1 | head -20; \
+            echo "--- prefix bookkeeping (conda-meta) ---"; \
+            ls -A "/app/.pixi/envs/${env}/conda-meta" 2>&1 | head -10; \
+            head -c 400 "/app/.pixi/envs/${env}/conda-meta/pixi" 2>&1; echo; \
+            echo "--- environments pixi thinks exist ---"; \
+            ls -A /app/.pixi/envs 2>&1 | head; \
+            echo "--- where pixi is installing to ---"; \
+            pixi info --no-config 2>&1 | grep -iE "cache dir|environments|manifest|version" | head; \
+            exit 1; \
+        }; \
+        "${python}" --version || { \
+            echo "FATAL: environment '${env}' has an unusable Python interpreter."; \
             exit 1; \
         }; \
     done

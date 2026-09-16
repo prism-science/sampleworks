@@ -11,7 +11,6 @@ from typing import Any
 
 import numpy as np
 import torch
-from atomworks import parse
 from atomworks.io.transforms.atom_array import ensure_atom_array_stack
 from biotite.structure import AtomArray, AtomArrayStack, stack
 from biotite.structure.io import save_structure
@@ -32,6 +31,7 @@ from sampleworks.core.scalers.step_scalers import (
     NoScalingScaler,
 )
 from sampleworks.eval.occupancy_utils import extract_protein_and_occupancy
+from sampleworks.utils.atom_array_utils import parse_structure
 from sampleworks.utils.cif_utils import add_category_to_cif, resolve_mixed_hetatm_atom_altlocs
 from sampleworks.utils.guidance_constants import (
     GuidanceType,
@@ -280,18 +280,19 @@ def get_reward_function_and_structure(
 ) -> tuple[RealSpaceRewardFunction, dict[str, Any]]:
     """Load structure and density inputs and build the real-space reward function."""
     logger.debug(f"Loading structure from {structure_path}")
-    safe_structure_path = resolve_mixed_hetatm_atom_altlocs(Path(structure_path))
-    structure = parse(
-        safe_structure_path,
-        hydrogen_policy="remove",
-        add_missing_atoms=False,
-        ccd_mirror_path=None,
-    )
-
-    # make sure to cast paths to strings, since Path(x) != str(x) we don't want to
-    # accidentally delete the originals.
-    if str(safe_structure_path) != str(structure_path):
-        safe_structure_path.unlink()  # delete the temporary file if it was created
+    structure_path = Path(structure_path)
+    safe_structure_path = resolve_mixed_hetatm_atom_altlocs(structure_path)
+    try:
+        structure = parse_structure(safe_structure_path)
+    finally:
+        # resolve_mixed_hetatm_atom_altlocs always returns a Path (pinned by
+        # test_always_returns_path), so comparing Paths cannot mistake the
+        # original for the temporary copy.
+        if safe_structure_path != structure_path:
+            try:
+                safe_structure_path.unlink()
+            except OSError as error:
+                logger.warning(f"Failed to remove temporary CIF: {safe_structure_path}: {error}")
 
     logger.debug(f"Loading density map from {density}")
     xmap = XMap.fromfile(density, resolution=resolution)
@@ -494,7 +495,8 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
     is_boltz = "Boltz" in wrapper_class_name
 
     # Annotate structure with model-specific configuration (including recycling_steps)
-    # See https://github.com/diff-use/sampleworks/issues/192 for a plan to organize this better.
+    # See https://github.com/prism-science/sampleworks/issues/192 for a plan to organize this
+    # better.
     recycling_steps = getattr(args, "recycling_steps", None)
     if recycling_steps is not None and recycling_steps <= 0:
         raise ValueError("recycling_steps must be > 0")

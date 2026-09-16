@@ -11,7 +11,7 @@ from pandas import DataFrame
 from sampleworks.eval.grid_search_eval_utils import parse_eval_args, setup_evaluation_parameters
 
 
-# TODO make more general: https://github.com/diff-use/sampleworks/issues/93
+# TODO make more general: https://github.com/prism-science/sampleworks/issues/93
 def main(args: argparse.Namespace) -> None:
     """
     Run tortoize on all trial CIF files and output residue/protein-level CSV stats.

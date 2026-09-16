@@ -7,14 +7,16 @@ ALTLOC_SELECTIONS_CSV = "${ALTLOC_ANALYSIS_DIR}/altloc_selections.csv"
 ALTLOC_CLASSIFICATIONS_CSV = "${ALTLOC_ANALYSIS_DIR}/altloc_region_classifications.csv"
 CIF_ROOT = "${ALTLOC_INPUTS_DIR}"
 DOMAIN_SHIFT_MIN_SPAN = "50"
-LOOP_LDDT_THRESHOLD = "0.75"
+LOOP_SCORE_METRIC = "lddt"
+LOOP_SCORE_THRESHOLD = "0.75"
 
 [shared_args]
 input-csv = "${ALTLOC_SELECTIONS_CSV}"
 cif-root = "${CIF_ROOT}"
 output-file = "${ALTLOC_CLASSIFICATIONS_CSV}"
 domain-shift-min-span = "${DOMAIN_SHIFT_MIN_SPAN}"
-loop-lddt-threshold = "${LOOP_LDDT_THRESHOLD}"
+loop-score-metric = "${LOOP_SCORE_METRIC}"
+loop-score-threshold = "${LOOP_SCORE_THRESHOLD}"
 
 [[jobs]]
 name = "classify_altloc_regions"

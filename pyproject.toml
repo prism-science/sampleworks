@@ -16,12 +16,28 @@ analysis = [
   "scikit-learn",
   "seaborn"
 ]
-dev = ["pytest", "pytest-cov", "mypy", "prek", "ty==0.0.39", "ruff", "pytest-loguru", "python-semantic-release"]
 test = ["pytest", "pytest-cov", "pytest-loguru"]
 
+[tool.pixi.feature.dev]
+platforms = ["linux-64", "osx-arm64"]
+
+[tool.pixi.feature.dev.pypi-dependencies]
+pytest = "*"
+pytest-cov = "*"
+mypy = "*"
+prek = "*"
+ty = "==0.0.39"
+ruff = "*"
+pytest-loguru = "*"
+python-semantic-release = "*"
+
+
 [tool.pixi.feature.boltz]
-pypi-dependencies = {"boltz" = "*", "cuequivariance-torch" = "*", "cuequivariance-ops-torch-cu12" = "*", "rdkit" = ">=2025.3.6"}
+pypi-dependencies = {"boltz" = "==2.2.1", "cuequivariance-torch" = "*", "cuequivariance-ops-torch-cu12" = "*", "rdkit" = ">=2025.3.6"}
 platforms = ["linux-64"]
+
+[tool.pixi.feature.boltz.pypi-options.dependency-overrides]
+click = "==8.1.7"
 
 [tool.pixi.feature.boltz-osx]
 pypi-dependencies = {"boltz" = "*", "cuequivariance-torch" = "*", "rdkit" = ">=2025.3.6", "joblib" = "*", "sfcalculator-torch" = ">=0.3.2"}
@@ -115,10 +131,10 @@ requires-python = ">= 3.11, <3.14"
 version = "0.18.1"
 
 [project.urls]
-Changelog = "https://github.com/diff-use/sampleworks/blob/main/CHANGELOG.md"
+Changelog = "https://github.com/prism-science/sampleworks/blob/main/CHANGELOG.md"
 Homepage = "https://diffuse.science/posts/sampleworks/"
-Issues = "https://github.com/diff-use/sampleworks/issues"
-Repository = "https://github.com/diff-use/sampleworks"
+Issues = "https://github.com/prism-science/sampleworks/issues"
+Repository = "https://github.com/prism-science/sampleworks"
 
 [project.scripts]
 sampleworks-analysis = "sampleworks.runs.analysis_cli:main"

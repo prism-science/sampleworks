@@ -82,18 +82,18 @@ def test_main_end_to_end_produces_csv(rscc_fixture_factory, rscc_script):
 @pytest.mark.slow
 def test_trial_parse_failure_emits_error_rows(rscc_fixture_factory, rscc_script, monkeypatch):
     """
-    Trial level ``parse`` failure results in one NaN-RSCC row per valid selection.
+    Trial-level structure parsing failure results in one NaN-RSCC row per valid selection.
     """
     fx = rscc_fixture_factory(n_groups=1, trials_per_group=1)
 
-    real_parse = rscc_script.parse
+    real_parse_structure = rscc_script.parse_structure
 
-    def flaky_parse(path, ccd_mirror_path=None):
+    def flaky_parse_structure(path):
         if "refined" in str(path):
             raise RuntimeError("simulated trial parse failure")
-        return real_parse(path, ccd_mirror_path=ccd_mirror_path)
+        return real_parse_structure(path)
 
-    monkeypatch.setattr(rscc_script, "parse", flaky_parse)
+    monkeypatch.setattr(rscc_script, "parse_structure", flaky_parse_structure)
 
     rscc_script.main(fx)
 

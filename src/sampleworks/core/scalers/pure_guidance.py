@@ -6,11 +6,11 @@ import torch
 from loguru import logger
 from tqdm import tqdm
 
-from sampleworks.core.rewards.protocol import RewardFunctionProtocol
+from sampleworks.core.rewards.protocol import prepare_reward_if_needed, RewardFunctionProtocol
 from sampleworks.core.samplers.protocol import TrajectorySampler
 from sampleworks.core.scalers.protocol import GuidanceOutput, StepScalerProtocol
-from sampleworks.eval.structure_utils import process_structure_to_trajectory_input
 from sampleworks.models.protocol import FlowModelWrapper
+from sampleworks.utils.structure_utils import process_structure_to_trajectory_input
 
 
 class PureGuidance:
@@ -89,6 +89,11 @@ class PureGuidance:
 
         reconciler = processed_structure.reconciler.to(coords.device)
         reward_inputs = processed_structure.to_reward_inputs(device=coords.device)
+        # Two-phase rewards are bound to the same inputs every step hands to `reward`: model
+        # atom order, the structure's B-factors on the common atoms, and the reconciled
+        # reference coordinates. `processed_structure` (a frozen dataclass) and its atom
+        # arrays are never written to.
+        prepare_reward_if_needed(reward, reward_inputs, device=coords.device)
 
         trajectory_denoised: list[torch.Tensor] = []
         trajectory_next_step: list[torch.Tensor] = []

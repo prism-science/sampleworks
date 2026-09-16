@@ -36,7 +36,6 @@ from atomworks.enums import ChainType
 from atomworks.io.parser import parse
 from protpardelle.common import residue_constants
 from protpardelle.data.sequence import seq_to_aatype
-from sampleworks.eval.structure_utils import get_asym_unit_from_structure
 from sampleworks.models.protocol import GenerativeModelInput, StructureModelWrapper
 from sampleworks.models.protpardelle.wrapper import (
     _atom37_indices_from_atom_array,
@@ -49,6 +48,7 @@ from sampleworks.models.protpardelle.wrapper import (
     ProtpardelleConditioning,
     ProtpardelleConfig,
 )
+from sampleworks.utils.structure_utils import get_asym_unit_from_structure
 
 
 SEQ_A = "ACDEFGHIKL"

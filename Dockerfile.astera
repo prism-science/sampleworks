@@ -5,18 +5,20 @@
 # private image adds Astera-only tooling (EXT, rsync, editor conveniences) and is
 # pushed to Harbor. It intentionally does not duplicate the public build.
 #
-# Build locally:
+# Build locally (ASTERA_REGISTRY = the internal registry host, same value as
+# the CI repository secret):
 #   docker build --platform linux/amd64 \
 #     -f Dockerfile.astera \
 #     --build-arg PIXI_WITH_CHECKPOINTS_IMAGE=diffuseproject/pixi-with-checkpoints:local \
-#     -t harbor.astera.sh/library/pixi-with-checkpoints:local \
+#     -t "${ASTERA_REGISTRY}/library/pixi-with-checkpoints:local" \
 #     .
 
 ARG PIXI_WITH_CHECKPOINTS_IMAGE
 
 FROM ${PIXI_WITH_CHECKPOINTS_IMAGE} AS astera
 
-ARG EXT_VERSION=v0.1.8
+ARG EXT_VERSION=v0.2.0
+ARG DYNAMIC_PDB_VERSION=v0.1.4
 
 ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/home/dev \
@@ -26,7 +28,35 @@ ENV DEBIAN_FRONTEND=noninteractive \
     SHELL=/bin/bash \
     SAMPLEWORKS_PIXI_PROJECT_DIR=/app \
     SAMPLEWORKS_REQUIRE_PREBUILT_PIXI=1 \
-    SAMPLEWORKS_SKIP_ENV_PREPARE=1
+    SAMPLEWORKS_SKIP_ENV_PREPARE=1 \
+    EXT_REPLAY_BASE_IMAGE=${PIXI_WITH_CHECKPOINTS_IMAGE} \
+    PIXI_CACHE_DIR=/var/cache/pixi
+
+# Keep pixi's cache off the NFS-backed home volume.
+#
+# ACTL mounts $HOME from an nfs-shared PVC whose export squashes every write to
+# nobody (65534), while the workspace container runs as root. pixi puts uv's git
+# cache under its own cache dir, so a `git+https://` dependency gets cloned into
+# a tree root does not own, and git refuses to touch it:
+#
+#   fatal: detected dubious ownership in repository at
+#   '/home/dev/.cache/rattler/cache/uv-cache/git-v0/db/<hash>'
+#
+# which surfaces as an unrelated-looking "failed to solve the pypi requirements"
+# and blocks any environment with a git dependency (protpardelle, today).
+#
+# `git config --global --add safe.directory` is not a usable fix here: this
+# image ships git 2.34.1, where only an exact path or the bare `*` is honoured —
+# prefix globs are silently ignored (verified). The cache paths are
+# content-hashed, so exact entries are whack-a-mole, and `*` would disable the
+# ownership check on genuinely shared volumes like /mnt/diffuse-shared too.
+#
+# pixi already redirects its repodata and pypi-mapping caches off network
+# filesystems on its own; it just does not do the same for the uv cache. Setting
+# the cache root to container-local disk covers all of them. The trade-off is
+# that the download cache no longer survives a pod restart — environments
+# themselves live in the synced checkout and are unaffected.
+RUN mkdir -p /var/cache/pixi
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         bash \
@@ -54,7 +84,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && install -m 0755 /app/run_experiments.sh /usr/local/bin/run_experiments.sh \
     && install -m 0755 /app/run_all_models.sh /usr/local/bin/run_all_models.sh \
     && for cmd in \
-        bash column csh curl dig emacs git htop nano ncdu ping rsync tini tmux vim wget zsh; do \
+        bash column csh curl dig emacs git htop nano ncdu ping rsync timeout tini tmux vim wget zsh; do \
           command -v "${cmd}" >/dev/null 2>&1 || exit 1; \
         done
 
@@ -64,6 +94,7 @@ RUN install -m 0644 \
         /usr/local/share/sampleworks/astera/sampleworks-ext-shell.sh \
         /etc/profile.d/sampleworks-ext-shell.sh \
     && EXT_VERSION="${EXT_VERSION}" bash /usr/local/share/sampleworks/astera/install-ext.sh \
+    && curl -fsSL https://dynamicpdb.com/install.sh | bash -s -- --version "${DYNAMIC_PDB_VERSION}" --dir /usr/local/bin \
     && bash /usr/local/share/sampleworks/astera/install-ext-shell-hooks.sh
 
 # SBGrid lives on shared storage, mounted read-only at /programs for every

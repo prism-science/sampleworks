@@ -17,12 +17,12 @@ from sampleworks.core.samplers.protocol import StepParams
 from sampleworks.core.scalers.fk_steering import FKSteering
 from sampleworks.core.scalers.pure_guidance import PureGuidance
 from sampleworks.core.scalers.step_scalers import DataSpaceDPSScaler, NoiseSpaceDPSScaler
-from sampleworks.eval.structure_utils import process_structure_to_trajectory_input
 from sampleworks.utils.atom_array_utils import make_normalized_atom_id
 from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.frame_transforms import apply_forward_transform
 from sampleworks.utils.guidance_script_arguments import GuidanceConfig
 from sampleworks.utils.guidance_script_utils import save_everything
+from sampleworks.utils.structure_utils import process_structure_to_trajectory_input
 
 from tests.mocks import MismatchCase, MismatchCaseWrapper
 from tests.utils.atom_array_builders import build_test_atom_array
@@ -700,6 +700,54 @@ class TestPreprocessingPipeline:
             reward_inputs.b_factors[0, reconciler.model_indices],
             expected_common_b_factors,
         )
+
+    def test_to_atom_array_has_model_topology_and_reconciled_values(
+        self, mismatch_case: MismatchCase
+    ):
+        """The array a reward's ``prepare()`` rebuilds combines both sides of the mismatch.
+
+        Topology comes from the model atom array, coordinates and B-factors from the reward
+        inputs (the structure's values on common atoms, see ``test_b_factor_override``), and
+        occupancy from neither. The model atom array itself is read, never written.
+        """
+        struct_atom_array = mismatch_case.struct_atom_array.copy()
+        struct_atom_array.set_annotation(
+            "b_factor", np.linspace(5.0, 35.0, mismatch_case.n_struct, dtype=np.float32)
+        )
+        case = MismatchCase(
+            id=mismatch_case.id,
+            description=mismatch_case.description,
+            model_atom_array=mismatch_case.model_atom_array.copy(),
+            struct_atom_array=struct_atom_array,
+            expected_n_common=mismatch_case.expected_n_common,
+            expected_has_mismatch=mismatch_case.expected_has_mismatch,
+        )
+        structure = {"asym_unit": struct_atom_array.copy(), "metadata": {"id": case.id}}
+
+        processed, _ = _preprocess(MismatchCaseWrapper(case), structure)
+        reward_inputs = processed.to_reward_inputs(device="cpu")
+        assert reward_inputs.atom_array is processed.reward_atom_array
+        template_b_factors = processed.reward_atom_array.b_factor.copy()
+        template_coords = processed.reward_atom_array.coord.copy()
+        assert not np.allclose(template_b_factors, reward_inputs.b_factors[0].numpy()), (
+            "setup failed to make the template and the reward inputs disagree"
+        )
+
+        prepared = reward_inputs.to_atom_array()
+
+        assert prepared.array_length() == mismatch_case.n_model
+        for category in ["atom_name", "res_id", "chain_id", "element"]:
+            np.testing.assert_array_equal(
+                prepared.get_annotation(category),
+                mismatch_case.model_atom_array.get_annotation(category),
+                err_msg=f"annotation {category!r} should come from the model atom array",
+            )
+        np.testing.assert_allclose(prepared.coord, reward_inputs.input_coords[0].numpy())
+        np.testing.assert_allclose(prepared.b_factor, reward_inputs.b_factors[0].numpy())
+        np.testing.assert_allclose(prepared.occupancy, np.ones(mismatch_case.n_model))
+        # The model atom array is left as it was: nothing is written back into it.
+        np.testing.assert_array_equal(processed.reward_atom_array.b_factor, template_b_factors)
+        np.testing.assert_array_equal(processed.reward_atom_array.coord, template_coords)
 
 
 class TestSamplerStep:

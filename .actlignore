@@ -13,3 +13,6 @@ release_data/
 *.pt
 *.tar.gz
 *.tgz
+*.tar
+output/
+.jj/

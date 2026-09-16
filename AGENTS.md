@@ -44,10 +44,12 @@ All interfaces use `typing.Protocol` for structural subtyping. This is a deliber
 class MyProtocol(Protocol):
     def method(self, x: Tensor) -> Tensor: ...
 
+
 # Any class with matching signature works
 class MyImpl:
     def method(self, x: Tensor) -> Tensor:
         return x * 2
+
 
 assert isinstance(MyImpl(), MyProtocol)  # True if @runtime_checkable decorates MyProtocol
 ```
@@ -315,9 +317,10 @@ def test_step_denoises_toward_clean_structure(wrapper, features, noisy_coords, c
     output_rmsd = compute_rmsd(output, clean_coords)
     assert output_rmsd < initial_rmsd
 
+
 # BAD: Tests implementation details
 def test_wrapper_calls_internal_method():
-    with mock.patch.object(wrapper, '_internal_compute') as m:
+    with mock.patch.object(wrapper, "_internal_compute") as m:
         wrapper.step(...)
         m.assert_called_once()  # Breaks on refactor
 ```
@@ -329,9 +332,9 @@ Mark any test that requires a GPU or model checkpoint with `@pytest.mark.slow` s
 ```python
 import pytest
 
+
 @pytest.mark.slow
-def test_boltz_full_inference(boltz_wrapper, features):
-    ...
+def test_boltz_full_inference(boltz_wrapper, features): ...
 ```
 
 ## Implementation Patterns
@@ -344,6 +347,7 @@ Frozen dataclasses with functional updates:
 @dataclass(frozen=True)
 class State:
     value: Tensor
+
     def with_value(self, new_value: Tensor) -> "State":
         return State(new_value)
 ```
@@ -366,6 +370,7 @@ Use jaxtyping for array shapes:
 from jaxtyping import Float
 from torch import Tensor
 
+
 def process(coords: Float[Tensor, "batch atoms 3"]) -> Float[Tensor, "batch atoms 3"]: ...
 ```
 
@@ -385,6 +390,7 @@ A `FlowModelWrapper` needs three methods: `featurize()`, `step()`, and `initiali
 
 ```python
 # models/my_model/wrapper.py
+
 
 class MyModelWrapper:
     """Wrapper for MyModel generative model."""
@@ -448,7 +454,7 @@ if reconciler.has_mismatch:
     aligned_coords, transform = reconciler.align(model_coords, reference_coords)
 ```
 
-Build reward inputs from the model atom array (not the input structure) when a mismatch exists. See `eval/structure_utils.py::SampleworksProcessedStructure.to_reward_inputs()` for the canonical pattern.
+Build reward inputs from the model atom array (not the input structure) when a mismatch exists. See `utils/structure_utils.py::SampleworksProcessedStructure.to_reward_inputs()` for the canonical pattern. Two-phase rewards (`PreparableRewardFunctionProtocol`) are prepared with those same `RewardInputs`, never with an atom array; `RewardInputs.to_atom_array()` rebuilds a reference `AtomArray` (model topology, reconciled coordinates and B-factors) for forward models that need one. Do not write reconciled values back into the model atom array.
 
 ## Avoiding Technical Debt
 

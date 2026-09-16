@@ -1,6 +1,6 @@
 # Sampleworks
 
-> This repository is under active development. Please always use the latest version. If you encounter any problems, please [create an issue on GitHub](https://github.com/diff-use/sampleworks/issues) and include: the PDB ID, the CIF file you used, your density map(s), and log information.
+> This repository is under active development. Please always use the latest version. If you encounter any problems, please [create an issue on GitHub](https://github.com/prism-science/sampleworks/issues) and include: the PDB ID, the CIF file you used, your density map(s), and log information.
 
 > We would welcome contributions from the community. We are most interested in:
  - new ModelWrappers for additional structure prediction models (especially smaller models which may be more steerable)
@@ -16,12 +16,14 @@ Currently, each structure prediction model has a different implementation, requi
 
 ## Citation
 If you use **sampleworks**, please cite:
- 
+
 Chrispens, K., Collins, M., Mai, D., Wankowicz, S. A., Fraser, J. S., & van den Bedem, H. (2026). sampleworks: A Modular Platform for Experimentally Guided Biomolecular Ensemble Generation. https://doi.org/10.82153/jkxj-tw08
 
 ## Installation
 
 **Requirements**: Linux x86-64, CUDA 12, Python ≥ 3.11, < 3.14
+
+> **Note**: macOS (arm64) is supported for local development. The environments that pull CUDA builds are `linux-64` only; `pixi install -a` installs the rest, which is enough to develop and test most of the codebase.
 
 ### 1. Install Pixi
 
@@ -32,14 +34,17 @@ curl -fsSL https://pixi.sh/install.sh | sh
 ### 2. Clone and install
 
 ```bash
-git clone git@github.com:diff-use/sampleworks.git
+git clone git@github.com:prism-science/sampleworks.git
 cd sampleworks
-pixi install -a   # install all environments
 ```
 
-> **Note**: `pixi install -a` resolves all environments. This (currently) requires CUDA 12 and will fail on machines without it.
+Sampleworks is split across several Pixi environments: one per generative model, plus environments for analysis and development. For a complete list, run `pixi workspace environment list`. To install all that are compatible with your machine, run:
 
-Each generative model has its own Pixi environment. Install only what you need:
+```bash
+pixi install -a
+```
+
+Alternatively, install only what you need:
 
 ```bash
 pixi install -e boltz      # Boltz-1 / Boltz-2
@@ -167,10 +172,10 @@ setting equivalent local paths for `DATA_DIR`, `PROTEINS_CSV`, `RESULTS_DIR`,
 `MSA_CACHE_DIR`, and model checkpoints.
 
 Start an 8-GPU ACTL machine named `sampleworks` with the private Astera
-`pixi-with-checkpoints:sampleworks` image and the shared data volume mounted:
+`sampleworks` image alias and the shared data volume mounted:
 
 ```bash
-actl pod up sampleworks --profile 8x --image harbor.astera.sh/library/pixi-with-checkpoints:sampleworks --storage shared --pvc-size 200Gi --mount diffuse-shared --yes
+actl pod up sampleworks --profile 8x --image sampleworks --storage shared --pvc-size 200Gi --mount diffuse-shared --yes
 ```
 
 Keep that terminal open; it maintains sync and SSH. From another terminal:
@@ -290,17 +295,16 @@ or output roots differ from the defaults.
 Sampleworks now has a two-layer image split:
 
 1. `Dockerfile` builds the regular public `pixi-with-checkpoints` image.
-2. `Dockerfile.astera` builds the private Astera overlay with EXT plus small
-   workspace conveniences, using the public `pixi-with-checkpoints` image as its
-   base.
+2. `Dockerfile.astera` builds the private Astera overlay with EXT, Dynamic PDB
+   CLI, and small workspace conveniences, using the public
+   `pixi-with-checkpoints` image as its base.
 
 Image names:
 
 | Purpose | Image |
 |---|---|
 | Public Sampleworks runtime | `diffuseproject/pixi-with-checkpoints` |
-| Astera/ACTL runtime | `harbor.astera.sh/library/pixi-with-checkpoints` |
-| ACTL scientist tag | `harbor.astera.sh/library/pixi-with-checkpoints:sampleworks` |
+| Astera/ACTL runtime | `sampleworks` alias; run `actl pod images` for the resolved, digest-pinned ref |
 
 CI publishes these tags:
 
@@ -310,8 +314,8 @@ CI publishes these tags:
 | Astera/Harbor | `latest` and `sampleworks` on `main`, `sha-<short-sha>`, release semver tags |
 
 The Astera image is always built from the exact public `sha-<short-sha>` image
-produced earlier in the same workflow run, then adds EXT and small workspace
-tools on top.
+produced earlier in the same workflow run, then adds EXT, Dynamic PDB CLI, and
+small workspace tools on top.
 
 CI configuration variables:
 
@@ -319,9 +323,16 @@ CI configuration variables:
 |---|---|
 | `SAMPLEWORKS_PUBLIC_REGISTRY` | Public registry host; defaults to `docker.io` |
 | `SAMPLEWORKS_PUBLIC_IMAGE` | Public image path; defaults to `diffuseproject/pixi-with-checkpoints` |
-| `SAMPLEWORKS_CHECKPOINTS_SOURCE_IMAGE` | Optional private/source checkpoint image that CI mirrors to Docker Hub; defaults to the current digest-pinned Harbor image |
 | `SAMPLEWORKS_CHECKPOINTS_DOCKERHUB_IMAGE` | Optional public Docker Hub checkpoint mirror destination tag; defaults to `docker.io/diffuseproject/sampleworks-checkpoints:latest` |
 | `SAMPLEWORKS_CUDA_BASE_IMAGE` | Optional digest-pinned CUDA base override |
+| `SAMPLEWORKS_CHECKPOINTS_SOURCE_PATH` | **Required.** Digest-pinned path of the private checkpoint image CI mirrors to Docker Hub, without the registry host (e.g. `library/foo@sha256:...`) |
+
+One CI secret, `ASTERA_REGISTRY`, holds the internal registry host. It is a
+secret rather than a variable because this repo is public, which makes its
+Actions logs public, and only secrets are masked there. Log masking is
+substring-based, so keeping the secret to the bare host masks it inside every
+longer image ref while leaving paths and digests readable when a build fails.
+The CI jobs fail fast when it is unset.
 
 Build the public image locally:
 
@@ -332,13 +343,15 @@ docker build --platform linux/amd64 \
   .
 ```
 
-Build the Astera overlay locally after a public image is available:
+Build the Astera overlay locally after a public image is available. Set
+`ASTERA_REGISTRY` to the internal registry host (same value as the CI
+repository secret):
 
 ```bash
 docker build --platform linux/amd64 \
   -f Dockerfile.astera \
   --build-arg PIXI_WITH_CHECKPOINTS_IMAGE=diffuseproject/pixi-with-checkpoints:local \
-  -t harbor.astera.sh/library/pixi-with-checkpoints:local \
+  -t "${ASTERA_REGISTRY}/library/pixi-with-checkpoints:local" \
   .
 ```
 

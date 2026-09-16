@@ -6,5 +6,8 @@ from tests.mocks.model_wrappers import (
     MockConditioning as MockConditioning,
     MockFlowModelWrapper as MockFlowModelWrapper,
 )
-from tests.mocks.rewards import MockGradientRewardFunction as MockGradientRewardFunction
+from tests.mocks.rewards import (
+    MockGradientRewardFunction as MockGradientRewardFunction,
+    MockPreparableRewardFunction as MockPreparableRewardFunction,
+)
 from tests.mocks.scalers import MockStepScaler as MockStepScaler

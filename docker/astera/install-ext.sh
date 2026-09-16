@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-EXT_VERSION="${EXT_VERSION:-v0.1.8}"
+EXT_VERSION="${EXT_VERSION:-v0.2.0}"
 EXT_INSTALL_DIR="${EXT_INSTALL_DIR:-/usr/local/bin}"
 
 curl -fsSL https://extshell.org/install.sh | bash -s -- --version "${EXT_VERSION}" --dir "${EXT_INSTALL_DIR}"

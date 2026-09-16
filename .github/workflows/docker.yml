@@ -17,13 +17,23 @@ env:
   # public registry path.
   PUBLIC_REGISTRY: ${{ vars.SAMPLEWORKS_PUBLIC_REGISTRY || 'docker.io' }}
   PUBLIC_IMAGE_NAME: ${{ vars.SAMPLEWORKS_PUBLIC_IMAGE || 'diffuseproject/pixi-with-checkpoints' }}
-  CHECKPOINTS_SOURCE_IMAGE: ${{ vars.SAMPLEWORKS_CHECKPOINTS_SOURCE_IMAGE || 'harbor.astera.sh/library/sampleworks-checkpoints@sha256:ff1dd2b42c3afd593e034cf81df1bf1862c27ae491f46cc10e105629f1102781' }}
   CHECKPOINTS_DOCKERHUB_IMAGE: ${{ vars.SAMPLEWORKS_CHECKPOINTS_DOCKERHUB_IMAGE || 'docker.io/diffuseproject/sampleworks-checkpoints:latest' }}
   CUDA_BASE_IMAGE: ${{ vars.SAMPLEWORKS_CUDA_BASE_IMAGE || 'nvidia/cuda:12.4.1-devel-ubuntu22.04@sha256:da6791294b0b04d7e65d87b7451d6f2390b4d36225ab0701ee7dfec5769829f5' }}
 
-  ASTERA_REGISTRY: harbor.astera.sh
+  # Only the registry HOST is secret (repo secret ASTERA_REGISTRY); image paths
+  # and digests stay plain variables. This repo is public, so its Actions logs
+  # are public and only secrets are masked. Masking is substring-based, so
+  # keeping the secret to the bare host masks it inside every longer image ref
+  # while leaving digests readable when a build fails. It is set per job because
+  # workflow-level env cannot read the secrets context.
+  CHECKPOINTS_SOURCE_PATH: ${{ vars.SAMPLEWORKS_CHECKPOINTS_SOURCE_PATH }}
   ASTERA_IMAGE_NAME: library/pixi-with-checkpoints
-  SKOPEO_IMAGE: quay.io/skopeo/stable@sha256:c7d3c512612f52805023cd38351081dad7e2729fc13d14b701e47c7c8bdd6615
+  # Pin to an `-immutable` tag's digest. quay rebuilds the moving tags
+  # (`latest`, `v1.22`, ...) and garbage-collects their old digests, which
+  # is how the previous pin vanished ("manifest unknown") on 2026-08-24 and
+  # failed every main build until this change. The `-immutable` tags are
+  # published once and kept.
+  SKOPEO_IMAGE: quay.io/skopeo/stable:v1.22.2-immutable@sha256:4a16d57b37617a04b3d643079a477a2848efe892dffcdf0ce56df4262b65f810
 
   DOCKER_METADATA_SHORT_SHA_LENGTH: 7
 
@@ -33,6 +43,9 @@ jobs:
     runs-on: diffuse-sh-builder
     permissions:
       contents: read
+    env:
+      ASTERA_REGISTRY: ${{ secrets.ASTERA_REGISTRY }}
+      CHECKPOINTS_SOURCE_IMAGE: ${{ secrets.ASTERA_REGISTRY }}/${{ vars.SAMPLEWORKS_CHECKPOINTS_SOURCE_PATH }}
     outputs:
       checkpoints_digest: ${{ steps.verify_checkpoints.outputs.checkpoints_digest }}
 
@@ -44,12 +57,26 @@ jobs:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          if [ -z "${CHECKPOINTS_SOURCE_IMAGE}" ] || [ -z "${CHECKPOINTS_DOCKERHUB_IMAGE}" ]; then
-            echo "Checkpoint source and Docker Hub destination image refs must be set."
+          # Check the parts, not the composed ref: an unset ASTERA_REGISTRY
+          # still yields a non-empty "/library/...@sha256:..." that would pass
+          # both the emptiness and the digest-pinned checks below.
+          if [ -z "${ASTERA_REGISTRY}" ] || [ -z "${CHECKPOINTS_SOURCE_PATH}" ]; then
+            echo "ASTERA_REGISTRY secret and SAMPLEWORKS_CHECKPOINTS_SOURCE_PATH variable must be set."
             exit 1
           fi
-          if [ "${CHECKPOINTS_SOURCE_IMAGE}" = "${CHECKPOINTS_SOURCE_IMAGE%@*}" ]; then
-            echo "CHECKPOINTS_SOURCE_IMAGE must be digest-pinned."
+          # skopeo receives HARBOR_USERNAME/PASSWORD as --src-creds for this
+          # host, so a public registry here would leak them to a third party.
+          case "${ASTERA_REGISTRY}" in
+            docker.io|index.docker.io|registry-1.docker.io|"${PUBLIC_REGISTRY}")
+              echo "ASTERA_REGISTRY must be the internal registry, not a public one."
+              exit 1 ;;
+          esac
+          if [ -z "${CHECKPOINTS_DOCKERHUB_IMAGE}" ]; then
+            echo "Docker Hub destination image ref must be set."
+            exit 1
+          fi
+          if [ "${CHECKPOINTS_SOURCE_PATH}" = "${CHECKPOINTS_SOURCE_PATH%@*}" ]; then
+            echo "SAMPLEWORKS_CHECKPOINTS_SOURCE_PATH must be digest-pinned."
             exit 1
           fi
           if [ -z "${HARBOR_USERNAME}" ] || [ -z "${HARBOR_PASSWORD}" ]; then
@@ -181,6 +208,8 @@ jobs:
     needs: public
     permissions:
       contents: read
+    env:
+      ASTERA_REGISTRY: ${{ secrets.ASTERA_REGISTRY }}
 
     steps:
       - name: Checkout code
@@ -190,6 +219,21 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+
+      - name: Validate Astera registry configured
+        run: |
+          # The Harbor credentials are sent to whatever host this names, so an
+          # empty value (login-action then defaults to Docker Hub) or a public
+          # registry would hand them to a third party. Fail fast on both.
+          if [ -z "${ASTERA_REGISTRY}" ]; then
+            echo "ASTERA_REGISTRY repository secret must be set."
+            exit 1
+          fi
+          case "${ASTERA_REGISTRY}" in
+            docker.io|index.docker.io|registry-1.docker.io|"${PUBLIC_REGISTRY}")
+              echo "ASTERA_REGISTRY must be the internal registry, not a public one."
+              exit 1 ;;
+          esac
 
       - name: Login to Harbor
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4

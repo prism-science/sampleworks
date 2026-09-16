@@ -5,17 +5,18 @@ and classifies each contiguous altloc span into one of four bins:
 
 1. ``side_chain_only`` : altloc atoms exist in the residue, but none of its
    backbone atoms have altlocs.
-2. ``small_loop`` : a contiguous backbone altloc span whose mean per-residue
-   backbone lDDT score (defined below) between altlocs is above
-   ``--loop-lddt-threshold`` (default 0.75).
-3. ``large_loop`` : a contiguous backbone-altloc span whose mean per-residue
-   backbone lDDT score between altlocs is below ``--loop-lddt-threshold``.
+2. ``small_loop`` : a contiguous backbone-altloc span whose loop score is above the threshold.
+3. ``large_loop`` : a contiguous backbone-altloc span whose loop score is below the threshold.
 4. ``domain_shift`` : a single contiguous backbone-altloc span longer than
-   ``--domain-shift-min-span`` residues (default 50). Classified before the
-   loop lDDT test.
+   ``--domain-shift-min-span`` residues (default 50). Classified before loop
+   scoring.
 
-Score definition (important, slightly different from canonical lDDT):
+Loop scores are calculated for every combination of altloc pairs when more than
+two altlocs are present. The selected scoring strategy defines how per-residue
+scores are reduced into a pair score, how pair scores are reduced into the final
+loop score, and how that loop score is thresholded.
 
+LDDT SCORER:
     For a given pair of altlocs, the score is the **equal-weighted arithmetic
     mean** of per residue backbone lDDT scores across the span:
 
@@ -32,19 +33,32 @@ Score definition (important, slightly different from canonical lDDT):
     has the same neighbor count. The 0.75 default is calibrated for this specific
     calculation.
 
-Altloc pairing: when > 2 altlocs are present, the score above is
-computed for every combination of altloc pairs and the span is
-classified by the *minimum* score over pair combinations.
+RMSD SCORER:
+    For a given pair of altlocs, the score is the maximum of per residue
+    RMSD scores across the span:
 
-Use ``find_altloc_selections.py --min-span 1`` to ensure single-residue side only
+        score = max(score_k)
+
+    Each ``score_k`` is the standard all-atom RMSD from
+    :class:`sampleworks.metrics.rmsd.AllAtomRMSD`.
+
+`Altloc pairing`: when > 2 altlocs are present, the scores above are
+computed for every combination of altloc pairs and the span is classified by the
+*worst* pair score, as defined by the selected scorer (the minimum for lDDT, the
+maximum for RMSD).
+
+Use ``find_altloc_selections.py --min-span 1`` to ensure single-residue side chain only
 selections.
 """
 
 import argparse
 import json
+import operator
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -52,6 +66,7 @@ from biotite.structure import AtomArray, AtomArrayStack
 from loguru import logger
 from sampleworks.eval.grid_search_eval_utils import resolve_cif_path
 from sampleworks.metrics.lddt import AllAtomLDDT
+from sampleworks.metrics.rmsd import AllAtomRMSD
 from sampleworks.utils.atom_array_utils import (
     ATOMWORKS_COMPARISON_OPS,
     BACKBONE_ATOM_TYPES,
@@ -62,6 +77,7 @@ from sampleworks.utils.atom_array_utils import (
     load_structure_with_altlocs,
     parse_selection_string,
 )
+from sampleworks.utils.structure_utils import selection_to_residues
 
 
 _ATOMWORKS_CHAIN_RE = re.compile(r"chain_id\s*==\s*['\"]([^'\"]+)['\"]")
@@ -75,10 +91,11 @@ OUTPUT_COLUMNS = [
     "end_res",
     "span_length",
     "classification",
-    "worst_pair_mean_backbone_lddt",
+    "score",
+    "score_metric",
     "n_backbone_altloc_residues",
     "n_altlocs",
-    "pair_lddts",
+    "pair_scores",
 ]
 
 
@@ -109,40 +126,131 @@ def _chain_from_selection(selection: str) -> str | None:
     return chain_id
 
 
-def _mean_residue_lddt_for_pair(
-    gt_array: AtomArray | AtomArrayStack | None,
-    pred_array: AtomArray | AtomArrayStack | None,
+@dataclass(frozen=True)
+class SpanScorer:
+    """Metric specific behavior for classification.
+
+    Attributes
+    ----------
+    metric_name : str
+        Short identifier for the metric (e.g. ``"lddt"``, ``"rmsd"``). Recorded in
+        the ``score_metric`` output column and used in log messages.
+    metric_callable : Callable[..., dict[str, Any]]
+        Callable invoked with the ``predicted_atom_array_stack``,
+        ``ground_truth_atom_array_stack``, and ``selection`` keyword arguments,
+        returning the metric's result dictionary.
+    residue_scores_key : str
+        Key under which ``metric_callable``'s result holds the per-residue score
+        mapping, itself keyed by ``f"{chain}{res_id}"``.
+    pair_score_reducer : Callable[[list[float]], float]
+        Reduces the per-residue scores of one altloc pair to a single pair score
+        (mean for lDDT, max for RMSD).
+    worse_pair_score : Callable[[list[float]], float]
+        Reduces the per-pair scores of a span to the single worst score
+        (min for lDDT, max for RMSD).
+    is_small_loop_score : Callable[[float, float], bool]
+        Given ``(score, threshold)``, returns True when the span is a
+        ``small_loop`` (score above threshold for lDDT, below it for RMSD).
+    default_threshold : float
+        Threshold used when ``--loop-score-threshold`` is omitted.
+    """
+
+    metric_name: str
+    metric_callable: Callable[..., dict[str, Any]]
+    residue_scores_key: str
+    pair_score_reducer: Callable[[list[float]], float]
+    worse_pair_score: Callable[[list[float]], float]
+    is_small_loop_score: Callable[[float, float], bool]
+    default_threshold: float
+
+
+def _score_pair_with_scorer(
+    scorer: SpanScorer,
+    gt_array: AtomArrayStack | AtomArray | None,
+    pred_array: AtomArrayStack | AtomArray | None,
     chain: str,
     residues: list[int],
 ) -> float:
-    """Equal weighted arithmetic mean of per residue lDDT across the span."""
+    """Calculate a scorer's pair score over a residue span.
+
+    Parameters
+    ----------
+    scorer : SpanScorer
+        Metric strategy supplying the compute callable and pair reducer.
+    gt_array : AtomArrayStack | AtomArray | None
+        Ground-truth altloc conformer of the pair.
+    pred_array : AtomArrayStack | AtomArray | None
+        Predicted altloc conformer of the pair.
+    chain : str
+        Chain ID the span belongs to.
+    residues : list[int]
+        Residue IDs of the span, scored over backbone atoms only.
+
+    Returns
+    -------
+    float
+        The reduced pair score, or ``nan`` when either array is missing, the span
+        is empty, the metric raised, or per-residue scores could not be recovered.
+        Callers treat ``nan`` as "this pair could not be scored" and skip it.
+    """
     if gt_array is None or pred_array is None or not residues:
         return float("nan")
 
     res_clause = " or ".join(f"res_id == {r}" for r in residues)
     selection = f"chain_id == '{chain}' and ({res_clause}) and atom_name in ['C','CA','N','O']"
     try:
-        result = AllAtomLDDT().compute(
+        result = scorer.metric_callable(
             predicted_atom_array_stack=pred_array,
             ground_truth_atom_array_stack=gt_array,
             selection=selection,
         )
     except Exception as e:
-        logger.warning(f"lDDT compute failed for chain {chain} residues {residues}: {e}")
+        logger.warning(
+            f"{scorer.metric_name} computation failed for chain {chain} residues {residues}: {e}"
+        )
         return float("nan")
 
-    residue_scores = result.get("residue_lddt_scores", {})
+    residue_scores = result.get(scorer.residue_scores_key, {})
+    if not isinstance(residue_scores, dict):
+        logger.warning(
+            f"{scorer.metric_name} result did not contain a residue score dictionary "
+            f"under key '{scorer.residue_scores_key}'"
+        )
+        return float("nan")
+
     keys = [f"{chain}{r}" for r in residues]
     missing = [k for k in keys if k not in residue_scores]
     if missing:
         logger.warning(
-            f"lDDT result missing residues {missing} for chain {chain}. This means the result"
-            f"averaged only over the {len(keys) - len(missing)} residues it returned"
+            f"{scorer.metric_name} result missing residues {missing} for chain {chain}. "
+            f"This means the result was reduced only over the "
+            f"{len(keys) - len(missing)} residues it returned"
         )
-    flat = [residue_scores[k][0] for k in keys if k in residue_scores]
-    if not flat:
-        return float("nan")
-    return float(np.mean(flat))
+
+    flat = [float(residue_scores[k][0]) for k in keys if k in residue_scores]
+    return float(scorer.pair_score_reducer(flat)) if flat else float("nan")
+
+
+LOOP_SCORERS = {
+    "lddt": SpanScorer(
+        metric_name="lddt",
+        metric_callable=AllAtomLDDT().compute,
+        residue_scores_key="residue_lddt_scores",
+        pair_score_reducer=np.mean,
+        worse_pair_score=min,
+        is_small_loop_score=operator.gt,
+        default_threshold=0.75,
+    ),
+    "rmsd": SpanScorer(
+        metric_name="rmsd",
+        metric_callable=AllAtomRMSD(superimpose=False).compute,
+        residue_scores_key="residue_rmsd_scores",
+        pair_score_reducer=max,
+        worse_pair_score=max,
+        is_small_loop_score=operator.lt,
+        default_threshold=1.0,
+    ),
+}
 
 
 def _classify_selection(
@@ -156,26 +264,29 @@ def _classify_selection(
     structure_altloc_mask: np.ndarray,
     structure_backbone_mask: np.ndarray,
     domain_shift_min_span: int,
-    loop_lddt_threshold: float,
+    scorer: SpanScorer,
+    loop_score_threshold: float,
 ) -> tuple[dict, set[tuple[str, int]]] | None:
     """Classify one contiguous altloc selection into a conformational type.
 
     1. If the span has no backbone altlocs anywhere, it is classified as ``side_chain_only``.
     2. Else if the longest contiguous backbone altloc run exceeds
        ``domain_shift_min_span``, it is classified as ``domain_shift``.
-    3. Else compute the per residue backbone lDDT for every altloc pair over
-       the backbone altloc residues in the span and take the minimum
-       pair mean. Compare against ``loop_lddt_threshold``, if it is above is is classified as
-       ``small_loop``. If it is below, it is classified as ``large_loop``.
+    3. Else compute the per residue metric for every altloc pair over the backbone
+       altloc residues in the span, reduce each pair to a single score with
+       ``scorer.pair_score_reducer``, and take the worst of those with
+       ``scorer.worse_pair_score``. ``scorer.is_small_loop_score`` compares that
+       score against ``loop_score_threshold`` to classify the span as
+       ``small_loop`` or ``large_loop``.
 
     Returns ``(row_dict, covered_altloc_residues)`` on success or ``None`` if the
     selection could not be applied.
 
     ``row_dict`` has the keys:
     ``protein``, ``selection``, ``chain``, ``start_res``, ``end_res``,
-    ``span_length``, ``classification``, ``worst_pair_mean_backbone_lddt``,
-    ``n_backbone_altloc_residues``, ``n_altlocs``, and ``pair_lddts`` (a
-    JSON encoded ``{pair_label: mean_lddt}`` map so the dict can be loaded
+    ``span_length``, ``classification``, ``score``, ``score_metric``,
+    ``n_backbone_altloc_residues``, ``n_altlocs``, and ``pair_scores`` (a
+    JSON encoded ``{pair_label: score}`` map so the dict can be loaded
     through the CSV intact via ``json.loads``).
 
     ``covered_altloc_residues`` is the set of ``(chain_id, res_id)`` pairs in the
@@ -241,8 +352,9 @@ def _classify_selection(
         "n_backbone_altloc_residues": n_backbone,
         "n_altlocs": len(altloc_ids),
         # JSON encoded so the pair calculation can be loaded back through the CSV
-        "pair_lddts": json.dumps({}),
-        "worst_pair_mean_backbone_lddt": float("nan"),
+        "pair_scores": json.dumps({}),
+        "score_metric": scorer.metric_name,
+        "score": float("nan"),
         "classification": "",
     }
 
@@ -256,28 +368,31 @@ def _classify_selection(
         row["classification"] = "domain_shift"
         return row, covered_altloc_residues
 
-    # Loop classification via pairwise lDDT across all altloc pairs
-    pair_lddts: dict[str, float] = {}
+    # Loop classification via pairwise strategy scores across all altloc pairs
+    pair_scores: dict[str, float] = {}
     for i in range(len(altloc_ids)):
         for j in range(i + 1, len(altloc_ids)):
             pair = pair_arrays.get((altloc_ids[i], altloc_ids[j]))
             gt, pred = pair if pair is not None else (None, None)
-            pair_lddts[f"{altloc_ids[i]}-{altloc_ids[j]}"] = _mean_residue_lddt_for_pair(
-                gt, pred, chain, backbone_altloc_res_ids
+            pair_scores[f"{altloc_ids[i]}-{altloc_ids[j]}"] = _score_pair_with_scorer(
+                scorer, gt, pred, chain, backbone_altloc_res_ids
             )
-    row["pair_lddts"] = json.dumps(pair_lddts)
+    row["pair_scores"] = json.dumps(pair_scores)
 
-    finite_vals = [v for v in pair_lddts.values() if np.isfinite(v)]
+    finite_vals = [v for v in pair_scores.values() if np.isfinite(v)]
     if not finite_vals:
         raise RuntimeError(
-            f"[{protein}] could not compute lDDT for any altloc pair in span "
-            f"'{selection_str}' (backbone-altloc residues: {backbone_altloc_res_ids}). "
+            f"[{protein}] could not compute {scorer.metric_name} for any altloc pair "
+            f"in span '{selection_str}' "
+            f"(backbone-altloc residues: {backbone_altloc_res_ids}). "
             "Refusing to emit an indeterminate classification."
         )
 
-    worst = float(min(finite_vals))
-    row["worst_pair_mean_backbone_lddt"] = worst
-    row["classification"] = "small_loop" if worst > loop_lddt_threshold else "large_loop"
+    worst = float(scorer.worse_pair_score(finite_vals))
+    row["score"] = worst
+    row["classification"] = (
+        "small_loop" if scorer.is_small_loop_score(worst, loop_score_threshold) else "large_loop"
+    )
     return row, covered_altloc_residues
 
 
@@ -285,7 +400,8 @@ def _process_structure(
     input_row: pd.Series,
     cif_root: Path | None,
     domain_shift_min_span: int,
-    loop_lddt_threshold: float,
+    scoring_strategy: SpanScorer,
+    loop_score_threshold: float,
 ) -> list[dict]:
     protein = str(input_row["protein"])
     cif_path = resolve_cif_path(input_row, cif_root)
@@ -312,27 +428,43 @@ def _process_structure(
     structure_altloc_mask = ~np.isin(atom_array.altloc_id, list(BLANK_ALTLOC_IDS))
     structure_backbone_mask = np.isin(atom_array.atom_name, BACKBONE_ATOM_TYPES)
 
+    # (chain, res_id) pairs that carry any altloc. Used to skip the redundant combined
+    # selection below and to check coverage after classification
+    all_altloc_res_ids: set[tuple[str, int]] = {
+        (str(c), int(r))
+        for c, r in zip(
+            atom_array.chain_id[structure_altloc_mask],
+            atom_array.res_id[structure_altloc_mask],
+        )
+    }
+
     rows: list[dict] = []
     classified_res_ids: set[tuple[str, int]] = set()
     for selection_str in [s.strip() for s in selection_field.split(";") if s.strip()]:
-        # find_altloc_selections.py appends a combined all altloc selection
-        # (atomworks-style with " or " clauses) at the end of each row. That one is
-        # a union over every span we already processed individually, so skip it.
-        # NOTE: This will need to be addressed when we
-        # migrate to atomworks-style selections for everything
-        if " or " in selection_str:
+        # find_altloc_selections.py may append a combined selection unioning every altloc
+        # span (atomworks-style "res_id == .. or .."). Skip only that redundant total union
+        # to avoid double-counting. True discontinuous "or" selections are still
+        # classified
+        covered_res_ids = selection_to_residues(atom_array, selection_str)
+        if covered_res_ids and covered_res_ids == all_altloc_res_ids:
             continue
-        out = _classify_selection(
-            atom_array=atom_array,
-            pair_arrays=pair_arrays,
-            altloc_ids=altloc_info.altloc_ids,
-            selection_str=selection_str,
-            protein=protein,
-            structure_altloc_mask=structure_altloc_mask,
-            structure_backbone_mask=structure_backbone_mask,
-            domain_shift_min_span=domain_shift_min_span,
-            loop_lddt_threshold=loop_lddt_threshold,
-        )
+        try:
+            out = _classify_selection(
+                atom_array=atom_array,
+                pair_arrays=pair_arrays,
+                altloc_ids=altloc_info.altloc_ids,
+                selection_str=selection_str,
+                protein=protein,
+                structure_altloc_mask=structure_altloc_mask,
+                structure_backbone_mask=structure_backbone_mask,
+                domain_shift_min_span=domain_shift_min_span,
+                scorer=scoring_strategy,
+                loop_score_threshold=loop_score_threshold,
+            )
+        except RuntimeError as e:
+            # An indeterminate span must not discard the rows already classified in this batch.
+            logger.error(f"[{protein}] skipping selection '{selection_str}': {e}")
+            continue
         if out is None:
             continue
         classified_row, covered = out
@@ -341,13 +473,6 @@ def _process_structure(
 
     # residues across all classified spans should equal total unique
     # (chain, res_id) pairs that carry any altloc in the structure.
-    all_altloc_res_ids: set[tuple[str, int]] = {
-        (str(c), int(r))
-        for c, r in zip(
-            atom_array.chain_id[structure_altloc_mask],
-            atom_array.res_id[structure_altloc_mask],
-        )
-    }
     if classified_res_ids != all_altloc_res_ids:
         missing = all_altloc_res_ids - classified_res_ids
         extra = classified_res_ids - all_altloc_res_ids
@@ -362,6 +487,14 @@ def _process_structure(
 
 
 def main(args: argparse.Namespace) -> None:
+    """Run altloc region classification."""
+    scoring_strategy = LOOP_SCORERS[args.loop_score_metric]
+    loop_score_threshold = (
+        args.loop_score_threshold
+        if args.loop_score_threshold is not None
+        else scoring_strategy.default_threshold
+    )
+
     input_df = pd.read_csv(args.input_csv)
     required = {"protein", "selection"}
     missing = required - set(input_df.columns)
@@ -375,7 +508,8 @@ def main(args: argparse.Namespace) -> None:
                 input_row=row,
                 cif_root=args.cif_root,
                 domain_shift_min_span=args.domain_shift_min_span,
-                loop_lddt_threshold=args.loop_lddt_threshold,
+                scoring_strategy=scoring_strategy,
+                loop_score_threshold=loop_score_threshold,
             )
         )
 
@@ -409,6 +543,20 @@ if __name__ == "__main__":
     )
     parser.add_argument("--output-file", type=Path, required=True)
     parser.add_argument("--domain-shift-min-span", type=int, default=50)
-    parser.add_argument("--loop-lddt-threshold", type=float, default=0.75)
+    parser.add_argument(
+        "--loop-score-metric",
+        choices=sorted(LOOP_SCORERS),
+        default="lddt",
+        help="Residue-level metric strategy used for small_loop / large_loop classification.",
+    )
+    parser.add_argument(
+        "--loop-score-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Threshold for the selected loop scoring strategy. Defaults to the scorer specific "
+            "threshold when omitted."
+        ),
+    )
     args = parser.parse_args()
     main(args)

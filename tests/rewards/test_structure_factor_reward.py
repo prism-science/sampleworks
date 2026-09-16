@@ -26,6 +26,7 @@ import reciprocalspaceship as rs
 import torch
 from biotite.structure import AtomArray
 from reciprocalspaceship.utils import add_rfree
+from sampleworks.core.rewards.protocol import RewardInputs
 from sampleworks.core.rewards.structure_factor import (
     _MIN_RETAINED_REFLECTION_FRACTION,
     _MIN_RETAINED_REFLECTIONS,
@@ -46,9 +47,14 @@ def make_prepared_reward(mtz_path, atom_array, device: torch.device, **kwargs):
     ``gpu``. ``kwargs`` pass straight to the constructor (e.g. ``bulk_solvent``,
     ``normalize_amplitude``, ``exclude_free_reflections``, ``expcolumns``). The single fixed
     config lives in the ``reward_function_1vme_sf`` fixture; these tests need varied configs.
+
+    ``prepare()`` takes reward inputs, so the SFcalculator topology is ``atom_array`` wrapped as
+    single-conformer ``RewardInputs`` (the coordinates and B-factors are the array's own).
     """
     rf = StructureFactorRewardFunction(mtz_path, **kwargs)
-    rf.prepare(atom_array, device=device)
+    rf.prepare(
+        RewardInputs.from_atom_array(atom_array, ensemble_size=1, device=device), device=device
+    )
     return rf
 
 

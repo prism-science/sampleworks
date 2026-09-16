@@ -26,12 +26,12 @@ from biotite.structure import AtomArrayStack, rmsd as biotite_rmsd
 from joblib import delayed, Parallel
 from loguru import logger
 from sampleworks.eval.grid_search_eval_utils import resolve_cif_path
-from sampleworks.eval.structure_utils import selection_to_residues
 from sampleworks.utils.atom_array_utils import (
     build_pairwise_altloc_arrays,
     detect_altlocs,
     load_structure_with_altlocs,
 )
+from sampleworks.utils.structure_utils import selection_to_residues
 
 
 def _find_max_rmsd_window(

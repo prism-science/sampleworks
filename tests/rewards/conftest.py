@@ -183,6 +183,7 @@ def reward_function_1vme_sf(
     device: torch.device,
 ) -> "StructureFactorRewardFunction":
     """Structure factor reward (|Fprotein| only) prepared using the 1vme structure's topology."""
+    from sampleworks.core.rewards.protocol import RewardInputs
     from sampleworks.core.rewards.structure_factor import StructureFactorRewardFunction
 
     # normalize_amplitude=True scores normalized E-values (|Ec| vs sfc.Eo), which are
@@ -192,5 +193,8 @@ def reward_function_1vme_sf(
         expcolumns=["Fprotein", "SIGFprotein"],
         normalize_amplitude=True,
     )
-    reward_function.prepare(structure_1vme_sf, device=device)
+    reward_function.prepare(
+        RewardInputs.from_atom_array(structure_1vme_sf, ensemble_size=1, device=device),
+        device=device,
+    )
     return reward_function

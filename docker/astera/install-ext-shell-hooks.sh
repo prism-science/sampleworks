@@ -2,7 +2,7 @@
 set -euo pipefail
 
 profile_script="/etc/profile.d/sampleworks-ext-shell.sh"
-profile_comment="# Sampleworks: enter ext when ACTL sets EXT_SHELL=1."
+profile_comment="# Sampleworks: enter ext by default; EXT_SHELL=0 opts out."
 profile_line="[ -r ${profile_script} ] && . ${profile_script}"
 
 touch /root/.bashrc /home/dev/.bashrc

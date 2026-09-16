@@ -6,6 +6,7 @@ from typing import Any, cast, Literal, overload
 
 import einx
 import numpy as np
+from atomworks import parse
 from atomworks.io.transforms.atom_array import ensure_atom_array_stack
 from atomworks.io.utils.io_utils import load_any
 from biotite.structure import AtomArray, AtomArrayStack, filter_amino_acids, filter_polymer, stack
@@ -36,7 +37,7 @@ class AltlocInfo:
 
 
 # TODO: migrate this to atomworks's selection algebra that is added to AtomArray/Stack
-#   https://github.com/diff-use/sampleworks/issues/56
+#   https://github.com/prism-science/sampleworks/issues/56
 def parse_selection_string(selection: str) -> tuple[str | None, int | None, int | None]:
     """Parse a selection string like 'chain A and resi 326-339'.
 
@@ -130,6 +131,29 @@ def get_mask_from_old_selection_string(
     if mask.sum() == 0:
         raise ValueError(f"Selection '{selection}' matched no atoms")
     return mask
+
+
+def parse_structure(path: str | Path) -> dict[str, Any]:
+    """Parse a structure with the options used by Sampleworks production kwargs in
+    guidance.
+
+    Parameters
+    ----------
+    path : str | Path
+        Path to a PDB or mmCIF structure file.
+
+    Returns
+    -------
+    dict[str, Any]
+        Parsed Atomworks structure and metadata, including ``"asym_unit"`` and
+        ``"chain_info"``.
+    """
+    return parse(
+        Path(path),
+        hydrogen_policy="remove",
+        add_missing_atoms=False,
+        ccd_mirror_path=None,
+    )
 
 
 def load_structure_with_altlocs(path: Path) -> AtomArray:

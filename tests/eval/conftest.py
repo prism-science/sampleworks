@@ -108,9 +108,9 @@ def synthetic_base_map(tmp_path_factory: pytest.TempPathFactory) -> Path:
         Resolution,
         XMap,
     )
-    from sampleworks.eval.structure_utils import get_asym_unit_from_structure
     from sampleworks.utils.atom_array_utils import remove_atoms_with_any_nan_coords
     from sampleworks.utils.density_utils import compute_density_from_atomarray
+    from sampleworks.utils.structure_utils import get_asym_unit_from_structure
 
     atom_array = remove_atoms_with_any_nan_coords(
         get_asym_unit_from_structure(parse(_REAL_CIF, ccd_mirror_path=None))

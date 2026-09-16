@@ -12,18 +12,18 @@ import torch.nn.functional as F
 from loguru import logger
 from tqdm import tqdm
 
-from sampleworks.core.rewards.protocol import RewardFunctionProtocol
+from sampleworks.core.rewards.protocol import prepare_reward_if_needed, RewardFunctionProtocol
 from sampleworks.core.samplers.protocol import (
     SamplerStepOutput,
     StepParams,
     TrajectorySampler,
 )
 from sampleworks.core.scalers.protocol import GuidanceOutput, StepScalerProtocol
-from sampleworks.eval.structure_utils import (
+from sampleworks.models.protocol import FlowModelWrapper, GenerativeModelInput
+from sampleworks.utils.structure_utils import (
     process_structure_to_trajectory_input,
     SampleworksProcessedStructure,
 )
-from sampleworks.models.protocol import FlowModelWrapper, GenerativeModelInput
 
 
 class FKSteering:
@@ -114,6 +114,11 @@ class FKSteering:
 
         reconciler = processed.reconciler.to(coords.device)
         reward_inputs = processed.to_reward_inputs(device=coords.device)
+        # Two-phase rewards are bound to the same inputs every step hands to `reward`: model
+        # atom order, the structure's B-factors on the common atoms, and the reconciled
+        # reference coordinates. `processed` (a frozen dataclass) and its atom arrays are
+        # never written to.
+        prepare_reward_if_needed(reward, reward_inputs, device=coords.device)
 
         schedule = sampler.compute_schedule(self.num_steps)
         loss_history: list[torch.Tensor] = []

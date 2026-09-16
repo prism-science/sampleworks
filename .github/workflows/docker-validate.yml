@@ -1,0 +1,71 @@
+name: Validate Dockerfile
+
+# Fast, push-free Dockerfile validation for pull requests. The heavy
+# build-and-push (checkpoints + all pixi envs) only runs on main/tags in
+# docker.yml; this catches Dockerfile breakage — a bad COPY path, a dropped env
+# in the install list, a broken pixi bootstrap — before it reaches main.
+#
+# It builds the Dockerfile's `source-check` stage, which stops after the base
+# image and source COPY: no checkpoint pull, no `pixi install -e <env>`, no
+# push. That keeps it cheap while still exercising the parts of the Dockerfile
+# that change most often.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'Dockerfile.astera'
+      - 'docker-entrypoint.sh'
+      - 'pyproject.toml'
+      - 'pixi.lock'
+      - 'run_grid_search.py'
+      - 'run_experiments'
+      - 'run_experiments.sh'
+      - 'run_all_models.sh'
+      - '.github/workflows/docker-validate.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'Dockerfile.astera'
+      - 'docker-entrypoint.sh'
+      - 'pyproject.toml'
+      - 'pixi.lock'
+      - 'run_grid_search.py'
+      - 'run_experiments'
+      - 'run_experiments.sh'
+      - 'run_all_models.sh'
+      - '.github/workflows/docker-validate.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: docker-validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-check:
+    name: Dockerfile source-check (no push)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build source-check stage
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: source-check
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

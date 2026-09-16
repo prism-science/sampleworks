@@ -33,10 +33,10 @@ from jaxtyping import Float
 from loguru import logger
 from torch import Tensor
 
-from sampleworks.eval.structure_utils import get_asym_unit_from_structure
 from sampleworks.models.protocol import GenerativeModelInput
 from sampleworks.utils.framework_utils import match_batch
 from sampleworks.utils.msa import MSAManager
+from sampleworks.utils.structure_utils import get_asym_unit_from_structure
 
 
 def _decode_boltz_atom_name(raw_name: np.ndarray | str | bytes) -> str:

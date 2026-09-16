@@ -29,9 +29,9 @@ from protpardelle.core.models import load_model, Protpardelle
 from protpardelle.data.sequence import seq_to_aatype
 from torch import Tensor
 
-from sampleworks.eval.structure_utils import get_asym_unit_from_structure
 from sampleworks.models.protocol import GenerativeModelInput
 from sampleworks.utils.framework_utils import match_batch
+from sampleworks.utils.structure_utils import get_asym_unit_from_structure, get_valid_atom_mask
 
 
 # Number of atom37 slots in the all-atom (atom37) representation. Matches
@@ -520,14 +520,32 @@ class ProtpardelleWrapper:
         # shape ``batch x N x 3``) onto the model's ``batch x L x 37 x 3`` atom37
         # layout. The mapping is derived from the input structure's atom names.
         atom_array = get_asym_unit_from_structure(structure, atom_array_index=0)
+
         # Restrict to protein chains so ligand / non-polymer atoms from mixed
         # inputs never enter the atom37 mapping, which assumes a protein-only
         # layout aligned with the sequence-derived ``seq_mask`` / ``aatype``.
         protein_chain_ids = _protein_chain_ids(structure)
         atom_array = atom_array[np.isin(atom_array.chain_id, protein_chain_ids)]
+
+        # Compute atom37 indices from the full protein-chain atoms BEFORE filtering to
+        # valid atoms. This ensures residue ordinals match the padded sequence even if
+        # entire residues are missing. Then filter both atoms and indices to remove
+        # zero-occupancy or NaN-coordinate atoms.
         atom37_residue_index, atom37_atom_index = _atom37_indices_from_atom_array(
             atom_array, device=self.device
         )
+
+        # Filter to only valid atoms (occupancy > 0, non-NaN coordinates) when available.
+        # Structures from real files have occupancy; mock test structures may not.
+        if getattr(atom_array, "occupancy", None) is not None:
+            valid_atom_mask = get_valid_atom_mask(atom_array)
+            atom_array = atom_array[valid_atom_mask]
+            # Also filter the indices to match the filtered atoms.
+            valid_mask_tensor = torch.as_tensor(
+                valid_atom_mask, dtype=torch.bool, device=self.device
+            )
+            atom37_residue_index = atom37_residue_index[valid_mask_tensor]
+            atom37_atom_index = atom37_atom_index[valid_mask_tensor]
 
         # the atom_mask created here is used in two ways. First it is used to generate
         # the initial noisy coordinates (see initialize_from_prior() below) simply for the

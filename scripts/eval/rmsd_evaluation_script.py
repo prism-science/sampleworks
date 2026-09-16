@@ -26,9 +26,9 @@ from sampleworks.eval.grid_search_eval_utils import (
     setup_evaluation_parameters,
     translate_selection,
 )
-from sampleworks.eval.structure_utils import get_reference_atomarraystack
 from sampleworks.metrics.rmsd import AllAtomRMSD
 from sampleworks.utils.atom_array_utils import map_altlocs_to_stack
+from sampleworks.utils.structure_utils import get_reference_atomarraystack
 
 
 def compute_cross_segment_rmsds(

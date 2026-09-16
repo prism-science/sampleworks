@@ -2,7 +2,9 @@
 
 import math
 import traceback
-from collections.abc import Iterator
+from collections import Counter
+from collections.abc import Hashable, Iterator, Mapping, Sequence
+from itertools import pairwise
 from pathlib import Path
 
 import gemmi
@@ -10,7 +12,7 @@ import numpy as np
 import reciprocalspaceship as rs
 import torch
 from atomworks.io.transforms.atom_array import remove_waters
-from biotite.structure import AtomArray
+from biotite.structure import AtomArray, get_residue_starts
 from loguru import logger
 from reciprocalspaceship.dtypes.base import MTZDtype
 
@@ -24,6 +26,10 @@ from sampleworks.utils.atom_array_utils import (
     load_structure_with_altlocs,
     remove_hydrogens,
 )
+
+
+# How many explicit duplicates to show in an error message when converting atomarray to gemmi.
+MAX_REPORTED_DUPLICATES = 3
 
 
 def resolve_parallel_jobs(device: torch.device | str, n_jobs: int) -> int:
@@ -303,35 +309,145 @@ def _resolve_altlocs_for_gemmi(atom_array: AtomArray) -> list[str]:
     Returns
     -------
     list of str
-        Per-atom altloc labels.
+        Validated per-atom altloc labels in gemmi convention.
+
+    Raises
+    ------
+    ValueError
+        If the resolved labels create duplicate ``(atom_name, altloc)`` pairs within
+        a residue.
     """
     if "altloc_id" not in atom_array.get_annotation_categories():
-        return ["\x00"] * len(atom_array)
-    return ["\x00" if a in BLANK_ALTLOC_IDS else a for a in atom_array.altloc_id]
+        altlocs = ["\x00"] * len(atom_array)
+    else:
+        altlocs = ["\x00" if a in BLANK_ALTLOC_IDS else a for a in atom_array.altloc_id]
+    _check_no_repeated_atoms(atom_array, altlocs)
+    return altlocs
 
 
-def _residue_group_bounds(atom_array: AtomArray) -> Iterator[tuple[int, int]]:
-    """Yield the atom-index spans, one per residue.
+def _check_keys_unique(fields: Mapping[str, Sequence[Hashable]], *, level: str) -> None:
+    """Require the key gemmi uses to identify one hierarchy level to be unique.
+
+    Parameters
+    ----------
+    fields : Mapping of str to Sequence of Hashable
+        The fields making up the key, as field name -> that field's value for every entry,
+        in the order gemmi spells the key. All value sequences must be the same length.
+        The field names are reported in the error message, so a reader can map a reported
+        key positionally.
+    level : str
+        Singular noun for what is identified (``"chain"``, ``"residue"``, ``"atom"``). Used
+        in the error message.
+
+    Raises
+    ------
+    ValueError
+        If any key appears more than once.
+    """
+    field_names = f"({', '.join(fields)})"
+    values = zip(*fields.values())
+    # Counter keeps first-occurrence order for error message
+    repeats = [f"{key!r} x{count}" for key, count in Counter(values).items() if count > 1]
+    if repeats:
+        shown = ", ".join(repeats[:MAX_REPORTED_DUPLICATES])
+        if len(repeats) > MAX_REPORTED_DUPLICATES:
+            shown += f", ... and {len(repeats) - MAX_REPORTED_DUPLICATES} more"
+        raise ValueError(
+            f"gemmi identifies each {level} by {field_names}, so duplicates would be "
+            f"indistinguishable: {shown}."
+        )
+
+
+def _check_no_repeated_atoms(atom_array: AtomArray, altlocs: list[str]) -> None:
+    """Require each ``(atom_name, altloc)`` pair to be unique within its residue.
+
+    gemmi (0.6.7) identifies an atom within a residue by that pair (seqid.hpp:124-141),
+    so a repeat yields two indistinguishable atoms.
+
+    Keyed on the full ``(chain_id, res_id, atom_name, altloc)`` for informative error
+    message. Assumes that each ``(chain_id, res_id)`` occupies exactly one span, which
+    should have been established by ``_prepare_residue_spans``.
 
     Parameters
     ----------
     atom_array : AtomArray
-        Structure whose atoms are grouped into residues. Atoms of a residue are
-        assumed contiguous (true for arrays loaded in file order).
+        Structure to check.
+    altlocs : list of str
+        Per-atom altloc labels in gemmi convention.
 
-    Yields
+    Raises
     ------
-    tuple of int
+    ValueError
+        If any ``(atom_name, altloc)`` pair repeats within a residue.
+    """
+    _check_keys_unique(
+        {
+            "chain_id": atom_array.chain_id.tolist(),
+            "res_id": atom_array.res_id.tolist(),
+            "atom_name": atom_array.atom_name.tolist(),
+            "altloc": altlocs,
+        },
+        level="atom",
+    )
+
+
+def _prepare_residue_spans(atom_array: AtomArray) -> Iterator[tuple[int, int]]:
+    """Validate an atom array's residue spans and return the spans for building gemmi
+    Structure hierarchically.
+
+    ``_build_gemmi_residue`` reads per-residue fields from each span's first atom, and
+    the chain loop in ``atomarray_to_gemmi`` assumes contiguous chains and residues.
+    This function checks both assumptions and raises an error if they are violated.
+
+    Residues are keyed on ``(chain_id, res_id)``, the only fields identifying a residue
+    that ``_build_gemmi_residue`` writes. ``ins_code`` is not among them until issue #306
+    is resolved, so a span it splits off is reported as a duplicate rather than kept.
+
+    Parameters
+    ----------
+    atom_array : AtomArray
+        Structure to validate for conversion to gemmi. Must be non-empty.
+
+    Returns
+    -------
+    Iterator of tuple of int
         One ``(start_idx, stop_idx)`` per residue, covering the atoms
         ``atom_array[start_idx:stop_idx]`` that share the same ``(chain_id, res_id)``.
+
+    Raises
+    ------
+    ValueError
+         If ``atom_array`` is malformed by having duplicate residues or chains, or a
+         residue's atoms disagree on ``hetero``.
     """
-    if len(atom_array) == 0:
-        return
-    chain_id, res_id = atom_array.chain_id, atom_array.res_id
-    # boundary shows where a new residue begins (i.e., chain or res_id changed).
-    boundary = (chain_id[1:] != chain_id[:-1]) | (res_id[1:] != res_id[:-1])
-    start_indices = [0, *(np.flatnonzero(boundary) + 1).tolist(), len(atom_array)]
-    yield from zip(start_indices[:-1], start_indices[1:])
+    chain_id = atom_array.chain_id
+    # prepend True because atom 0 always starts a chain
+    chain_start_idx = np.flatnonzero(np.concatenate([[True], chain_id[1:] != chain_id[:-1]]))
+    _check_keys_unique({"chain_id": chain_id[chain_start_idx].tolist()}, level="chain")
+
+    residue_span_idx = get_residue_starts(atom_array, add_exclusive_stop=True)
+    span_start_idx = residue_span_idx[:-1]  # (n_residues,)
+    _check_keys_unique(
+        {
+            "chain_id": chain_id[span_start_idx].tolist(),
+            "res_id": atom_array.res_id[span_start_idx].tolist(),
+        },
+        level="residue",
+    )
+    # hetero is the only field _build_gemmi_residue reads that does not split a span
+    hetero = atom_array.hetero
+    changed = np.flatnonzero(hetero[1:] != hetero[:-1]) + 1  # atoms differing from the previous
+    stray = changed[~np.isin(changed, span_start_idx)]  # a change inside a span, not at its start
+    if len(stray):
+        idx = int(stray[0])
+        raise ValueError(
+            f"Atoms of residue (chain {chain_id[idx]!r}, res_id {atom_array.res_id[idx]}) "
+            f"disagree on hetero: atom {idx - 1} has {hetero[idx - 1]!r} but atom {idx} has "
+            f"{hetero[idx]!r}. atomarray_to_gemmi reads hetero from each residue's first "
+            "atom, so the differing value would be silently dropped."
+        )
+
+    return pairwise(residue_span_idx.tolist())
 
 
 def _build_gemmi_residue(
@@ -345,7 +461,8 @@ def _build_gemmi_residue(
         Structure supplying per-atom annotations.
     start_idx : int
         Inclusive atom index of the residue's first atom; per-residue fields
-        (name, seqid, subchain) are read from this atom.
+        (name, seqid, subchain, het_flag) are read from this atom, which assumes the
+        span agrees on them -- ``_prepare_residue_spans`` enforces that upstream.
     stop_idx : int
         Exclusive atom index marking the end of the residue's atom span.
     altlocs : list of str
@@ -362,8 +479,9 @@ def _build_gemmi_residue(
     residue.name = atom_array.res_name[start_idx]
     residue.seqid = gemmi.SeqId(str(res_id))  # writes auth_seq_id
     residue.label_seq = res_id  # writes label_seq_id, important for saving mmCIF
-    # if the subchain id is not set, gemmi's setup_entities() will set it to multi-char,
-    # which is rejected by SFcalculator's PDB-header step.
+    # writes label_asym_id; nothing else assigns it, since atomarray_to_gemmi
+    # deliberately skips setup_entities(). Must stay single-char -- SFcalculator's
+    # PDB-header step rejects the multi-char subchain ids setup_entities() invents.
     residue.subchain = atom_array.chain_id[start_idx]
     # biotite's bool `hetero` -> gemmi's single-char het_flag ('H' HETATM / 'A' ATOM)
     residue.het_flag = "H" if bool(atom_array.hetero[start_idx]) else "A"
@@ -392,6 +510,12 @@ def atomarray_to_gemmi(
     the atom array has no ``altloc_id`` annotation (e.g. arrays reconstructed by
     a model wrapper), all altlocs default to blank.
 
+    No entities are assigned, so a cif written from the result has no entity block
+    and ``_atom_site.label_entity_id`` is ``.``. Sequences are then inferred from
+    ``_atom_site`` on reload, which is what model wrappers need; the cost is that
+    ``chain_info`` loses ``rcsb_entity`` (only Protenix reads it, and it falls back
+    to the chain id).
+
     Parameters
     ----------
     atom_array
@@ -411,13 +535,14 @@ def atomarray_to_gemmi(
     if len(atom_array) == 0:
         raise ValueError("Cannot convert an empty AtomArray to a gemmi.Structure.")
 
+    residue_spans = _prepare_residue_spans(atom_array)
     altlocs = _resolve_altlocs_for_gemmi(atom_array)
 
-    # Group atoms into residues up front, then walk residues into chains. Contiguous
-    # grouping guarantees the hierarchy is well-formed by construction.
+    # Group atoms into residues up front, then walk residues into chains. Validated,
+    # contiguous grouping guarantees the hierarchy is well-formed by construction.
     model = gemmi.Model("1")  # numeric name -> valid mmCIF pdbx_PDB_model_num
     current_chain: gemmi.Chain | None = None
-    for start_idx, stop_idx in _residue_group_bounds(atom_array):
+    for start_idx, stop_idx in residue_spans:
         chain_id = atom_array.chain_id[start_idx]
         if current_chain is None or chain_id != current_chain.name:
             if current_chain is not None:
@@ -429,7 +554,11 @@ def atomarray_to_gemmi(
 
     structure = gemmi.Structure()
     structure.add_model(model)
-    structure.setup_entities()  # SFcalculator/PDBParser expects entities assigned
+    # No setup_entities(): it fabricates entities with an empty full_sequence, so the
+    # written cif carries _entity/_entity_poly but no _entity_poly_seq. Atomworks reads
+    # this partial block which leads to KeyError when model wrapper accessing fields like
+    # `processed_entity_canonical_sequence`. When there are no entities, gemmi writes no
+    # entity block and atomworks infers the sequence from _atom_site instead.
     if unit_cell is not None:
         structure.cell = unit_cell
     if space_group is not None:

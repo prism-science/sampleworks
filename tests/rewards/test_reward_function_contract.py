@@ -6,6 +6,10 @@ satisfy (see `sampleworks.core.rewards.protocol`). They were extracted from
 so that new reward functions inherit the shared contract by adding a single bundle entry
 to `_REWARD_BUNDLES`.
 
+`TestRewardCorrelation` is where the package's sign convention is enforced: rewards are
+minimized, so moving away from the target must not lower the value (see
+`RewardFunctionProtocol`). A term written as a score to maximize fails here.
+
 Only *reward-agnostic* checks live here:
 - Absolute loss thresholds ARE shared, but the value is per-reward (see `_LOSS_THRESHOLDS`):
   RealSpace's loss is MSE on normalized density (sigma units), so a wrong/random model

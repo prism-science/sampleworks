@@ -31,19 +31,15 @@ import pandas as pd
 import torch
 
 # Import local modules for density calculation
-from atomworks.io.parser import parse
 from joblib import delayed, Parallel
 from loguru import logger
 from sampleworks.eval.constants import DEFAULT_SELECTION_PADDING
 from sampleworks.eval.eval_dataclasses import ProteinConfig, Trial
 from sampleworks.eval.grid_search_eval_utils import parse_eval_args, setup_evaluation_parameters
 from sampleworks.eval.metrics import rscc
-from sampleworks.eval.structure_utils import (
-    get_asym_unit_from_structure,
-    get_reference_structure_coords,
-)
 from sampleworks.utils.atom_array_utils import (
     filter_to_common_atoms,
+    parse_structure,
     remove_atoms_with_any_nan_coords,
 )
 from sampleworks.utils.density_utils import (
@@ -55,6 +51,10 @@ from sampleworks.utils.frame_transforms import (
     weighted_rigid_align_differentiable,
 )
 from sampleworks.utils.framework_utils import match_batch
+from sampleworks.utils.structure_utils import (
+    get_asym_unit_from_structure,
+    get_reference_structure_coords,
+)
 
 
 OccKey = tuple[tuple[str, float], ...]
@@ -133,8 +133,8 @@ def process_group(
             raise ValueError(
                 f"Could not find reference structure for occupancy {trials[0].altloc_occupancies}"
             )
-        # parse() returns only the first altloc.
-        ref_structure = parse(ref_path, ccd_mirror_path=None)
+        # parse_structure() returns only the first altloc.
+        ref_structure = parse_structure(ref_path)
         ref_atom_array = get_asym_unit_from_structure(ref_structure)
         ref_atom_array = remove_atoms_with_any_nan_coords(ref_atom_array)
     except (FileNotFoundError, OSError, ValueError, RuntimeError, AttributeError, TypeError) as e:
@@ -157,7 +157,7 @@ def process_group(
     # parse refined, align, and compute density once per trial.
     for trial in trials:
         try:
-            structure = parse(trial.refined_cif_path, ccd_mirror_path=None)
+            structure = parse_structure(trial.refined_cif_path)
             atom_array = get_asym_unit_from_structure(structure)
             if not hasattr(atom_array, "coord") or atom_array.coord is None:
                 raise AttributeError("AtomArray | AtomArrayStack is missing coordinates")

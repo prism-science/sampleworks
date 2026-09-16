@@ -17,7 +17,7 @@ from SFC_Torch.io import PDBParser
 
 
 if TYPE_CHECKING:
-    from biotite.structure import AtomArray
+    from sampleworks.core.rewards.protocol import RewardInputs
 
 
 # Loss callable: maps (|Fcalc|, |Fobs|) over the masked reflections to a scalar.
@@ -294,8 +294,8 @@ class StructureFactorRewardFunction:
         # `List[str]` and swallows any failure into a misleading "columns not in the mtz" error.
         self.expcolumns = list(_resolve_expcolumns(expcolumns, self._mtz_dataset))
 
-    def prepare(self, atom_array: AtomArray, *, device: torch.device | str = "cpu") -> None:
-        """Build the SFcalculator from the model atom array, on ``device``.
+    def prepare(self, reward_inputs: RewardInputs, *, device: torch.device | str = "cpu") -> None:
+        """Build the SFcalculator from the reward inputs, on ``device``.
 
         Constructing the ``SFcalculator`` consumes the MTZ dataset parsed at
         ``__init__`` (no second file read) and populates the observed structure
@@ -303,10 +303,14 @@ class StructureFactorRewardFunction:
         bins, the outlier mask ``sfc.Outlier``, the R-free flags ``sfc.free_flag``,
         and the normalized ``|Eo|`` in ``sfc.Eo``.
 
-        Must be called once before the first ``__call__``, with the same atom
-        array that the sampled coordinates correspond to (model atom space:
-        ``model_atom_array or atom_array``). The atom ordering of ``atom_array``
+        Must be called once before the first ``__call__``, with the inputs built
+        for the sampled coordinates (model atom space); they are the same inputs
+        ``__call__`` is fed. The atom ordering of ``reward_inputs.atom_array``
         defines the column order of the coordinate tensor passed to ``__call__``.
+        The gemmi structure comes from :meth:`RewardInputs.to_atom_array`: the
+        model topology with the reconciled reference coordinates and B-factors,
+        not the model template's placeholders. That matters here because
+        ``inspect_data`` estimates the solvent fraction from the atom positions.
 
         This is also where the torch device is set, so pass the device the sampled
         coordinates will live on: every tensor built here (the SFcalculator internals and
@@ -320,11 +324,12 @@ class StructureFactorRewardFunction:
 
         Parameters
         ----------
-        atom_array
-            Biotite AtomArray for the atoms the model operates on. Needs
-            ``chain_id``, ``res_id``, ``res_name``, ``atom_name``, ``element``
-            annotations (its ``b_factor``/``occupancy`` are baked as defaults but
-            overridden each ``__call__``). A missing ``altloc_id`` is defaulted to
+        reward_inputs
+            Inputs for the atoms the model operates on, as returned by
+            ``SampleworksProcessedStructure.to_reward_inputs``. Their ``atom_array``
+            needs ``chain_id``, ``res_id``, ``res_name``, ``atom_name``, ``element``
+            annotations; the B-factors and occupancies are baked as defaults but
+            overridden each ``__call__``. A missing ``altloc_id`` is defaulted to
             blank inside ``atomarray_to_gemmi``.
         device
             Torch device to build on. Defaults to CPU rather than auto-selecting a GPU:
@@ -338,10 +343,12 @@ class StructureFactorRewardFunction:
             ``normalize_amplitude`` is False the same condition only logs a warning,
             since it also implies no reflection was flagged as an outlier.
         ValueError
-            If no reflection survives the mask; see :meth:`_build_reflection_mask`.
+            If ``reward_inputs`` carry no atom array to take the topology from, or
+            if no reflection survives the mask; see :meth:`_build_reflection_mask`.
         """
         self.device = torch.device(device)
 
+        atom_array = reward_inputs.to_atom_array()
         gemmi_structure = atomarray_to_gemmi(
             atom_array,
             unit_cell=self.unit_cell,
@@ -518,8 +525,8 @@ class StructureFactorRewardFunction:
         """
         if self.sfc is None or self._reflection_mask is None:
             raise RuntimeError(
-                "StructureFactorRewardFunction.prepare() must be called with the model "
-                "atom array before the reward is evaluated."
+                "StructureFactorRewardFunction.prepare() must be called with the reward "
+                "inputs before the reward is evaluated."
             )
 
         # The topology (atom count included) is fixed by prepare(); a mismatch would otherwise
@@ -533,8 +540,8 @@ class StructureFactorRewardFunction:
             if n_atoms != n_topology_atoms:
                 raise ValueError(
                     f"{name} has {n_atoms} atoms but the SFcalculator topology built by "
-                    f"prepare() has {n_topology_atoms}. Call prepare() with the same atom array "
-                    "the sampled coordinates correspond to (model atom space)."
+                    f"prepare() has {n_topology_atoms}. Call prepare() with the reward inputs "
+                    "built for the sampled coordinates (model atom space)."
                 )
 
         # SFcalculator has no per-conformer (batch) occupancy/B axis, so these must be shared

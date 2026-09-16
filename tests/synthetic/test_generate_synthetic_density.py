@@ -1,7 +1,7 @@
 """Tests for synthetic density batch-row argument handling."""
 
 import pytest
-from sampleworks.eval.generate_synthetic_density import BatchRow
+from sampleworks.synthetic.generate_synthetic_density import BatchRow
 
 
 def test_batch_row_accepts_occupancy_values_column() -> None:
