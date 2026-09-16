@@ -92,7 +92,8 @@ def resolve_sequence_arg(
     if root is not None and not path.is_absolute():
         path = Path(root).expanduser() / path
 
-    if path.is_file():
+    _FASTA_EXTENSIONS = {".fasta", ".fa", ".faa", ".fas"}
+    if path.is_file() and path.suffix.lower() in _FASTA_EXTENSIONS:
         sequence_lines: list[str] = []
         record_count = 0
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -206,11 +207,23 @@ def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> 
         if obs_i != -1 and full_i != -1:
             rid_to_seq_idx[int(unique_rids[obs_i])] = full_i
 
+    # Every observed residue must map to the override sequence.  Unmapped
+    # residues (seq_idx == -1) would corrupt downstream tensor indexing in
+    # model wrappers (Protpardelle, RF3) that use seq_idx as array indices.
+    unmapped = [int(r) for r in unique_rids if int(r) not in rid_to_seq_idx]
+    if unmapped:
+        raise ValueError(
+            f"Sequence override failed: {len(unmapped)} observed residue(s) could not be "
+            f"aligned to the override sequence (first 10 unmapped: {unmapped[:10]}). The override "
+            f"sequence must be at least as long as, and compatible with, the observed "
+            f"structure sequence."
+        )
+
     # Annotate atoms with seq_idx: aligned position for the protein chain,
     # -1 elsewhere (make_normalized_atom_id falls back to dense rank for -1).
     seq_idx = np.full(len(res_ids), -1, dtype=np.int64)
     seq_idx[chain_mask] = np.array(
-        [rid_to_seq_idx.get(int(r), -1) for r in chain_res_ids], dtype=np.int64
+        [rid_to_seq_idx[int(r)] for r in chain_res_ids], dtype=np.int64
     )
     updated_arr = arr.copy()
     updated_arr.set_annotation("seq_idx", seq_idx)

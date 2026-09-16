@@ -118,17 +118,16 @@ def _add_placeholder_atoms_for_override(
     Returns
     -------
     AtomArray or AtomArrayStack
-        The original array with placeholder atoms appended (or unchanged if
-        no override is active).
+        The array with placeholder atoms appended (or unchanged if no override
+        is active).  For ``AtomArrayStack`` inputs, only frame 0 is used;
+        the result is a single-frame stack.
     """
     arr = atom_array[0] if isinstance(atom_array, AtomArrayStack) else atom_array
     if "seq_idx" not in arr.get_annotation_categories():
         return atom_array
 
     protein_chains = [
-        (cid, info)
-        for cid, info in chain_info.items()
-        if info["chain_type"].is_protein()
+        (cid, info) for cid, info in chain_info.items() if info["chain_type"].is_protein()
     ]
     if not protein_chains:
         return atom_array
@@ -139,7 +138,8 @@ def _add_placeholder_atoms_for_override(
         if not seq:
             continue
         chain_mask = np.asarray(arr.chain_id) == chain_id
-        present = set(int(s) for s in arr.seq_idx[chain_mask] if s >= 0)
+        chain_seq_idx = arr.seq_idx[chain_mask]
+        present = set(int(s) for s in chain_seq_idx)
         missing = sorted(set(range(len(seq))) - present)
         if not missing:
             continue
@@ -150,7 +150,7 @@ def _add_placeholder_atoms_for_override(
         observed_res_ids = set(int(r) for r in arr.res_id[chain_mask])
 
         ref_idx = np.where(chain_mask)[0][0]
-        ref_atom = arr[ref_idx:ref_idx + 1]
+        ref_atom = arr[ref_idx : ref_idx + 1]
         anno_cats = ref_atom.get_annotation_categories()
 
         for seq_idx_val in missing:
@@ -175,8 +175,7 @@ def _add_placeholder_atoms_for_override(
             if "hetero" in anno_cats:
                 placeholder.hetero[:] = False
             if "is_backbone_atom" in anno_cats:
-                setattr(placeholder, "is_backbone_atom",
-                        np.array([True], dtype=bool))
+                setattr(placeholder, "is_backbone_atom", np.array([True], dtype=bool))
             placeholders.append(placeholder)
 
     if not placeholders:
