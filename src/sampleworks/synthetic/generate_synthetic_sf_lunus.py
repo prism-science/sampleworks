@@ -36,8 +36,8 @@ difference as a floor.
 :func:`load_configurations` turns a file into a topology plus a stack of
 configuration coordinates; :func:`compute_ensemble_amplitudes` runs the forward
 pass and returns plain arrays, reusing the coordinate-independent setup that
-``lunus_sf.build_setup`` caches; :func:`dataset_from_amplitudes` and
-:func:`dataset_from_intensities` turn those arrays into MTZs.
+``lunus_sf.build_setup`` caches; :func:`dataset_from_bragg_amplitudes` and
+:func:`dataset_from_diffuse_intensities` turn those arrays into MTZs.
 :func:`_process_single_row` is the only place the three meet, and it wraps each
 in its own ``try``/``except`` so ``batch_report.json`` can say which stage a row
 died in — a failed diffuse write still lets the amplitudes through. Keeping the
@@ -436,7 +436,7 @@ def compute_ensemble_amplitudes(
     return hkl_np, mean_f.cpu().numpy(), diffuse.cpu().numpy()
 
 
-def dataset_from_intensities(
+def dataset_from_diffuse_intensities(
     hkl: np.ndarray,
     intensities: np.ndarray,
     unit_cell: gemmi.UnitCell,
@@ -446,6 +446,12 @@ def dataset_from_intensities(
     output_path: Path | None = None,
 ) -> rs.DataSet:
     """Write diffuse intensities as an MTZ.
+
+    The second central moment of the ensemble, ``<|F|²> − |<F>|²``, and *not* the
+    square of what :func:`dataset_from_bragg_amplitudes` writes: that would be
+    ``|<F>|²``, the Bragg intensity. Neither observable can be recovered from the
+    other, since the variance needs the whole ensemble and is exactly what the
+    mean discards. Two different measurements, hence two writers.
 
     The column is named ``ID`` and carries the MTZ intensity type ``J``, which is
     what ``lunus/sf/xtraj.py`` writes for ``diffuse=<name>.mtz``. Matching it
@@ -497,7 +503,7 @@ def dataset_from_intensities(
     return dataset
 
 
-def dataset_from_amplitudes(
+def dataset_from_bragg_amplitudes(
     hkl: np.ndarray,
     structure_factors: np.ndarray,
     unit_cell: gemmi.UnitCell,
@@ -511,6 +517,10 @@ def dataset_from_amplitudes(
     output_path: Path | None = None,
 ) -> rs.DataSet:
     """Build an MTZ-ready dataset from Miller indices and complex amplitudes.
+
+    The first moment of the ensemble, ``<F>``, written as ``|<F>|`` plus its phase.
+    See :func:`dataset_from_diffuse_intensities` for why the second moment needs a
+    separate writer rather than being derived from these amplitudes.
 
     The engine-agnostic half of ``generate_synthetic_sf.process_amplitudes_to_dataset``,
     taking plain arrays rather than an ``SFcalculator``. Emits the same column
@@ -699,7 +709,9 @@ def _process_single_row(
         )
         diffuse_path = output_dir / (f"{structure_path.stem}_{resolution:.2f}A_diffuse.mtz")
         try:
-            dataset_from_intensities(hkl, diffuse, unit_cell, space_group, output_path=diffuse_path)
+            dataset_from_diffuse_intensities(
+                hkl, diffuse, unit_cell, space_group, output_path=diffuse_path
+            )
             record["diffuse_output_path"] = str(diffuse_path)
         except Exception as e:
             logger.error(
@@ -715,7 +727,7 @@ def _process_single_row(
     label = "total" if solvent_cutoff is not None else "protein"
     output_path = output_dir / (row.mtzfile or f"{structure_path.stem}_{resolution:.2f}A.mtz")
     try:
-        dataset_from_amplitudes(
+        dataset_from_bragg_amplitudes(
             hkl,
             mean_f,
             unit_cell,
