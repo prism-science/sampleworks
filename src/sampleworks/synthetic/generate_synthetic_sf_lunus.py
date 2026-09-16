@@ -352,6 +352,10 @@ def compute_ensemble_amplitudes(
 
     solvent = None
     if solvent_cutoff is not None:
+        # Deliberately inline, unlike this module's other lunus imports: lunus.sf
+        # maps its exports to submodules and imports them on first access (PEP
+        # 562), so this is what loads solvent_torch. At module scope it would load
+        # on every run rather than only when a cutoff is asked for.
         from lunus.sf import SolventModel
 
         solvent = SolventModel(cutoff=solvent_cutoff, taper_width=solvent_taper_width)
