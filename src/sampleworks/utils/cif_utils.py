@@ -544,12 +544,13 @@ def _output_polymer_entities(
     Returns
     -------
     list[tuple[str, set[str], list[int], list[str]]]
-        Entity ID, label chain IDs, residue numbers, and residue names.
+        Entity ID, label chain IDs, residue numbers, and residue names. Entities without
+        polymer residues (ligands, waters) are omitted.
 
     Raises
     ------
     ValueError
-        If an entity has no polymer residues or conflicting residue names.
+        If no entity has polymer residues, or an entity has conflicting residue names.
     """
     atom_site = output_block["atom_site"]
     entity_ids = atom_site["label_entity_id"].as_array(str)
@@ -576,9 +577,42 @@ def _output_polymer_entities(
             residues[number] = str(residue_name)
         numbers = sorted(residues)
         if not numbers:
-            raise ValueError(f"Output entity {entity_id} has no polymer residues")
+            # Ligands and waters have no entity_poly* rows to carry; the polymer entities
+            # alongside them still do.
+            continue
         entities.append((str(entity_id), chains, numbers, [residues[number] for number in numbers]))
+    if not entities:
+        raise ValueError("Output has no polymer entities")
     return entities
+
+
+def _one_letter_sequence(residue_names: list[str]) -> str:
+    """Convert three-letter residue names to a one-letter sequence.
+
+    Parameters
+    ----------
+    residue_names : list[str]
+        Three-letter residue names in sequence order.
+
+    Returns
+    -------
+    str
+        One-letter sequence.
+
+    Raises
+    ------
+    ValueError
+        If any name has no one-letter representation, for example a nucleotide or a
+        modified residue. ``ProteinSequence`` raises ``KeyError`` for those, which would
+        otherwise escape the callers that degrade on ``ValueError``.
+    """
+    letters: list[str] = []
+    for name in residue_names:
+        try:
+            letters.append(ProteinSequence.convert_letter_3to1(name))
+        except KeyError:
+            raise ValueError(f"Residue {name} has no one-letter representation") from None
+    return "".join(letters)
 
 
 def _concatenate_category_rows(rows: list[dict[str, list[str]]]) -> dict[str, list[str]]:
@@ -652,7 +686,7 @@ def carry_polymer_entity_categories(
         entity_poly_row["entity_id"] = [output_id]
         if "pdbx_strand_id" in entity_poly_row:
             entity_poly_row["pdbx_strand_id"] = [",".join(sorted(chains))]
-        modeled_sequence = "".join(ProteinSequence.convert_letter_3to1(name) for name in names)
+        modeled_sequence = _one_letter_sequence(names)
         for column in ("pdbx_seq_one_letter_code", "pdbx_seq_one_letter_code_can"):
             if column in entity_poly_row:
                 entity_poly_row[column] = [modeled_sequence]
