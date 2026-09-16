@@ -2,7 +2,6 @@
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 import sampleworks.utils.guidance_script_utils as guidance_script_utils
@@ -12,7 +11,7 @@ from sampleworks.utils.guidance_script_utils import (
     _three_state_resolver,
     _write_job_metadata,
     get_model_and_device,
-    get_reward_function_and_structure,
+    load_guidance_structure,
     save_everything,
 )
 
@@ -95,7 +94,7 @@ def test_save_everything_uses_model_atom_array_for_mismatch(tmp_path: Path):
     assert (tmp_path / "refined.cif").exists()
 
 
-def test_get_reward_function_keeps_original_structure_file(
+def test_load_guidance_structure_keeps_original_structure_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """The input structure file must survive when altloc resolution leaves it unchanged.
@@ -119,33 +118,15 @@ def test_get_reward_function_keeps_original_structure_file(
             "asym_unit": build_test_atom_array(n_atoms=3, with_occupancy=True)
         },
     )
-    monkeypatch.setattr(
-        "sampleworks.utils.guidance_script_utils.XMap",
-        MagicMock(fromfile=MagicMock(return_value=MagicMock())),
-    )
-    monkeypatch.setattr(
-        "sampleworks.utils.guidance_script_utils.setup_scattering_params",
-        MagicMock(return_value=MagicMock()),
-    )
-    monkeypatch.setattr(
-        "sampleworks.utils.guidance_script_utils.RealSpaceRewardFunction",
-        MagicMock(return_value=MagicMock()),
-    )
 
     # Pass the path as a string to exercise the str-vs-Path comparison.
-    get_reward_function_and_structure(
-        density="dummy_density.mrc",
-        device=torch.device("cpu"),
-        em=False,
-        loss_order=2,
-        resolution=2.0,
-        structure_path=str(structure_file),
-    )
+    structure = load_guidance_structure(str(structure_file))
 
     assert structure_file.exists(), "original structure file must not be deleted"
+    assert "asym_unit" in structure
 
 
-def test_get_reward_function_removes_temporary_file_after_parse_failure(
+def test_load_guidance_structure_removes_temporary_file_after_parse_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """A temporary altloc-fixed CIF must be removed when parsing raises."""
@@ -162,19 +143,12 @@ def test_get_reward_function_removes_temporary_file_after_parse_failure(
     monkeypatch.setattr("sampleworks.utils.guidance_script_utils.parse_structure", fail_parse)
 
     with pytest.raises(ValueError, match="invalid structure"):
-        get_reward_function_and_structure(
-            density="dummy_density.mrc",
-            device=torch.device("cpu"),
-            em=False,
-            loss_order=2,
-            resolution=2.0,
-            structure_path=tmp_path / "input.cif",
-        )
+        load_guidance_structure(tmp_path / "input.cif")
 
     assert not temporary_file.exists()
 
 
-def test_get_reward_function_ignores_temporary_file_cleanup_error(
+def test_load_guidance_structure_ignores_temporary_file_cleanup_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """A failed temporary-file unlink must not turn a parsed structure into an error."""
@@ -196,28 +170,9 @@ def test_get_reward_function_ignores_temporary_file_cleanup_error(
             "asym_unit": build_test_atom_array(n_atoms=3, with_occupancy=True)
         },
     )
-    monkeypatch.setattr(
-        "sampleworks.utils.guidance_script_utils.XMap",
-        MagicMock(fromfile=MagicMock(return_value=MagicMock())),
-    )
-    monkeypatch.setattr(
-        "sampleworks.utils.guidance_script_utils.setup_scattering_params",
-        MagicMock(return_value=MagicMock()),
-    )
-    monkeypatch.setattr(
-        "sampleworks.utils.guidance_script_utils.RealSpaceRewardFunction",
-        MagicMock(return_value=MagicMock()),
-    )
     monkeypatch.setattr(Path, "unlink", fail_unlink)
 
-    _, structure = get_reward_function_and_structure(
-        density="dummy_density.mrc",
-        device=torch.device("cpu"),
-        em=False,
-        loss_order=2,
-        resolution=2.0,
-        structure_path=tmp_path / "input.cif",
-    )
+    structure = load_guidance_structure(tmp_path / "input.cif")
 
     assert len(structure["asym_unit"]) == 3
     assert unlink_attempts == [temporary_file]
