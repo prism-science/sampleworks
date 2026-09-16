@@ -22,6 +22,29 @@ from sampleworks.utils.frame_transforms import (
 )
 
 
+def _normalize_methionine_chalcogen_names(atom_array: AtomArray) -> AtomArray:
+    """Return an array with equivalent MET/MSE chalcogen names normalized.
+
+    Parameters
+    ----------
+    atom_array
+        Atom array whose methionine chalcogen atom names may need normalization.
+
+    Returns
+    -------
+    AtomArray
+        The original array when no MSE selenium is present, otherwise a copy
+        where MSE ``SE`` atom names are normalized to the MET name ``SD``.
+    """
+    mse_selenium = (atom_array.res_name == "MSE") & (atom_array.atom_name == "SE")
+    if not np.any(mse_selenium):
+        return atom_array
+
+    normalized = atom_array.copy()
+    normalized.atom_name[mse_selenium] = "SD"
+    return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class AtomReconciler:
     """Bidirectional adapter between model and structure atom spaces.
@@ -51,6 +74,8 @@ class AtomReconciler:
         Total atoms in the structure representation.
     n_common : int
         Atoms shared between both representations.
+    mapped_struct_mask : Tensor, shape ``(n_struct,)``
+        Boolean mask selecting structure atoms backed by model coordinates.
     """
 
     has_mismatch: bool
@@ -59,6 +84,19 @@ class AtomReconciler:
     n_model: int
     n_struct: int
     n_common: int
+
+    @property
+    def mapped_struct_mask(self) -> torch.Tensor:
+        """Return the structure atoms backed by mapped model coordinates.
+
+        Returns
+        -------
+        Tensor
+            Boolean mask with shape ``(n_struct,)`` on the index tensor device.
+        """
+        mask = torch.zeros(self.n_struct, dtype=torch.bool, device=self.struct_indices.device)
+        mask[self.struct_indices] = True
+        return mask
 
     @classmethod
     def from_arrays(
@@ -82,9 +120,11 @@ class AtomReconciler:
         -------
         AtomReconciler
         """
+        model_array_for_matching = _normalize_methionine_chalcogen_names(model_array)
+        struct_array_for_matching = _normalize_methionine_chalcogen_names(struct_array)
         _, (m_idx, s_idx) = filter_to_common_atoms(
-            model_array,
-            struct_array,
+            model_array_for_matching,
+            struct_array_for_matching,
             normalize_ids=True,
             return_indices=True,
         )
@@ -93,8 +133,13 @@ class AtomReconciler:
         n_struct = len(struct_array)
         full_coverage = n_model == n_struct == len(m_idx)
         same_indexing = np.array_equal(m_idx, s_idx)
+        identity_annotations = ("chain_id", "res_id", "res_name", "atom_name", "element")
+        same_identity = all(
+            np.array_equal(model_array.get_annotation(name), struct_array.get_annotation(name))
+            for name in identity_annotations
+        )
 
-        if full_coverage and same_indexing:
+        if full_coverage and same_indexing and same_identity:
             return cls.identity(n_model)
 
         return cls(
@@ -262,4 +307,41 @@ class AtomReconciler:
 
         result = model_template.clone()
         result[..., self.model_indices, :] = struct_coords[..., self.struct_indices, :]
+        return result
+
+    def model_to_struct(
+        self,
+        model_coords: Float[torch.Tensor, "*batch n_model 3"],
+        struct_template: Float[torch.Tensor, "*batch n_struct 3"],
+    ) -> torch.Tensor:
+        """Map model atom coordinates to structure space.
+
+        Copies mapped atoms from ``model_coords`` into a clone of
+        ``struct_template``. Differentiable through ``model_coords``. Use
+        :attr:`mapped_struct_mask` to exclude unmapped template coordinates.
+
+        Parameters
+        ----------
+        model_coords
+            Coordinates in model space, shape ``(*batch, n_model, 3)``.
+        struct_template
+            Template in structure space, shape ``(*batch, n_struct, 3)``.
+
+        Returns
+        -------
+        Tensor
+            Structure-space coordinates, shape ``(*batch, n_struct, 3)``.
+        """
+        if model_coords.shape[-2] != self.n_model:
+            raise ValueError(
+                f"Expected model_coords with {self.n_model} atoms, got {model_coords.shape[-2]}"
+            )
+        if struct_template.shape[-2] != self.n_struct:
+            raise ValueError(
+                f"Expected struct_template with {self.n_struct} atoms, "
+                f"got {struct_template.shape[-2]}"
+            )
+
+        result = struct_template.clone()
+        result[..., self.struct_indices, :] = model_coords[..., self.model_indices, :]
         return result
