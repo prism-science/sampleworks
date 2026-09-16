@@ -367,16 +367,38 @@ def compute_ensemble_amplitudes(
     if solvent is not None:
         # SolventModel warns only when the mask is degenerate (all solvent or
         # none). A mask can clear that bar and still be wrong, so report what it
-        # measured: `cutoff` is an absolute density in e/A^3 and means nothing
-        # until checked against the structure it was applied to.
+        # measured. `cutoff` is an absolute density in e/A^3;
+        # lunus.sf.calibrate_cutoff derives one for a target occupancy.
         #
-        # Occupancy should look like a protein crystal's, roughly 0.4-0.7.
         # shell_voxels is a COUNT of voxels inside the taper (strictly between
-        # solvent and protein), not a thickness -- report it as a fraction of
-        # the grid, since what matters is that the taper is resolved at all. Too
-        # few and the mask is a hard threshold sampled on a grid, which for a
-        # variance observable like diffuse adds frame-to-frame noise that
-        # depends on grid alignment rather than on the structure.
+        # solvent and protein), not a thickness, so it is reported as a fraction
+        # of the grid too.
+        #
+        # One worked example to compare against, measured 2026-09-15 on 1VME at
+        # 2.0 A with cutoff 0.20 and taper 0.10: the full asymmetric unit gives
+        # occupancy 0.534 and a shell of 13.4% of the grid, chain A alone 0.770
+        # and 7.0%. Chain A reads higher because the other chain's volume is left
+        # in the cell and the mask calls it solvent. Nothing here is calibrated
+        # beyond this structure.
+        #
+        # Pushing that same run shows what the numbers do when the parameters are
+        # wrong, which is the useful part when reading them elsewhere
+        # (occupancy / shell of grid):
+        #
+        #   cutoff 0.02, taper 0.10   0.026 / 33.8%   nearly nothing called
+        #                                             solvent: cutoff too low
+        #   cutoff 0.20, taper 0.10   0.534 / 13.4%   the defaults
+        #   cutoff 1.00, taper 0.10   1.000 /  0.0%   whole cell called solvent,
+        #                                             shell gone: cutoff too high
+        #   cutoff 0.20, taper 0.001  0.603 /  0.1%   taper unresolved on the
+        #                                             grid: a hard threshold
+        #   cutoff 0.20, taper 0.50   0.144 / 60.3%   ramp covers most of the
+        #                                             cell: taper too wide
+        #
+        # So occupancy at either rail, or a shell fraction near zero, means the
+        # mask is not doing what it looks like it is doing. Whether 0.534 and
+        # 13.4% are the right targets for another structure is a separate
+        # question, and calibrate_cutoff is the tool for it.
         #
         # Populated only when check_occupancy is on, SolventModel's default.
         if solvent.last_occupancy is None:
@@ -386,9 +408,11 @@ def compute_ensemble_amplitudes(
             shell_fraction = solvent.last_shell_voxels / n_voxels
             logger.info(
                 f"Solvent mask: occupancy {solvent.last_occupancy:.3f}, "
-                f"taper shell {solvent.last_shell_voxels} voxels "
-                f"({shell_fraction:.1%} of the {n_voxels} in the grid) "
-                f"(cutoff {solvent.cutoff}, taper {solvent.taper_width} e/A^3)"
+                f"taper shell {solvent.last_shell_voxels} voxels = "
+                f"{shell_fraction:.1%} of the {n_voxels} in the grid "
+                f"(cutoff {solvent.cutoff}, taper {solvent.taper_width} e/A^3). "
+                "1VME at 2.0 A with cutoff 0.20 measures occupancy 0.534 and a "
+                "13.4% shell for its full asymmetric unit."
             )
 
     return hkl_np, mean_f.cpu().numpy(), diffuse.cpu().numpy()
