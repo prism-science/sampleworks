@@ -160,6 +160,7 @@ def _process_single_row(
     strip_ligands: bool = False,
     save_structure: bool = True,
     scattering_table: str | None = None,
+    b_factor: float | None = None,
 ) -> None:
     """Process a single structure row.
 
@@ -193,6 +194,8 @@ def _process_single_row(
         If True, save the processed structure to a CIF file in the input directory. Default is True.
     scattering_table
         ``"wk1995"``, ``"it1992"`` or ``"electron"``; ``None`` takes the mode's default.
+    b_factor
+        Optional isotropic B-factor assigned to every retained atom.
     """
     structure_path = base_dir / row.filename
     atom_array = load_structure_for_synthetic_reward(
@@ -203,6 +206,7 @@ def _process_single_row(
         strip_waters=strip_waters,
         strip_ligands=strip_ligands,
         selection=row.selection,
+        b_factor=b_factor,
     )
     if atom_array is None:
         return
@@ -267,6 +271,7 @@ def process_batch(
     strip_ligands: bool = False,
     save_structure: bool = False,
     scattering_table: str | None = None,
+    b_factor: float | None = None,
 ) -> None:
     """Process multiple structures from a CSV file in batch mode.
 
@@ -296,6 +301,8 @@ def process_batch(
         If True, save the processed structure to a CIF file in the input directory.
     scattering_table
         ``"wk1995"``, ``"it1992"`` or ``"electron"``; ``None`` takes the mode's default.
+    b_factor
+        Optional isotropic B-factor assigned to every retained atom.
     """
     from joblib import delayed, Parallel
 
@@ -317,6 +324,7 @@ def process_batch(
             strip_waters=strip_waters,
             strip_ligands=strip_ligands,
             save_structure=save_structure,
+            b_factor=b_factor,
         )
         for row in rows
     )
@@ -366,6 +374,12 @@ def parse_args() -> argparse.Namespace:
     density_group = parser.add_argument_group("Density Options")
     density_group.add_argument(
         "--resolution", "-r", type=float, default=2.0, help="Map resolution in Angstroms"
+    )
+    density_group.add_argument(
+        "--b-factor",
+        type=float,
+        default=None,
+        help="Override every retained atom's isotropic B-factor",
     )
     density_group.add_argument(
         "--em-mode", action="store_true", help="Use electron scattering factors (EM mode)"
@@ -438,6 +452,7 @@ def main() -> None:
             strip_waters=args.remove_waters,
             strip_ligands=args.remove_ligands,
             save_structure=args.save_structure,
+            b_factor=args.b_factor,
         )
     elif args.structure:
         row = BatchRow(
@@ -461,6 +476,7 @@ def main() -> None:
             strip_waters=args.remove_waters,
             strip_ligands=args.remove_ligands,
             save_structure=args.save_structure,
+            b_factor=args.b_factor,
         )
     else:
         logger.error("Please specify --structure or --batch-csv")

@@ -211,13 +211,14 @@ def load_structure_for_synthetic_reward(
     strip_waters: bool = False,
     strip_ligands: bool = False,
     selection: str | None = None,
+    b_factor: float | None = None,
 ) -> AtomArray | None:
     """Load and prepare a structure for synthetic reward generation.
 
     Handles loading, optional atom selection, stripping of unwanted atom classes,
-    and occupancy assignment. Returns None on load or selection errors (logged);
-    raises ValueError on invalid occupancy_mode or occupancy assignment errors (logged
-    before raising).
+    occupancy assignment, and removal of zero-occupancy atoms. Returns None on load
+    or selection errors (logged); raises ValueError on invalid occupancy_mode or
+    occupancy assignment errors (logged before raising).
 
     Parameters
     ----------
@@ -237,6 +238,9 @@ def load_structure_for_synthetic_reward(
         If True, keep only polymer amino-acid atoms
     selection
         Optional atom selection string. If None, the full structure is used.
+    b_factor
+        Optional isotropic B-factor assigned to every retained atom. If None,
+        preserve the values from the input structure.
 
     Returns
     -------
@@ -292,6 +296,18 @@ def load_structure_for_synthetic_reward(
     else:
         logger.error(f"Invalid occupancy mode '{occupancy_mode}' for {structure_path}")
         raise ValueError(f"Invalid occupancy mode '{occupancy_mode}'")
+
+    zero_occupancy = atom_array.occupancy == 0.0
+    if zero_occupancy.any():
+        logger.info(f"Removed {zero_occupancy.sum()} zero-occupancy atoms")
+        atom_array = atom_array[~zero_occupancy]
+        assert isinstance(atom_array, AtomArray)
+
+    if b_factor is not None:
+        if not math.isfinite(b_factor) or b_factor < 0.0:
+            raise ValueError(f"B-factor must be finite and non-negative, got {b_factor}")
+        atom_array.b_factor = np.full(len(atom_array), b_factor, dtype=np.float32)
+        logger.info(f"Assigned B-factor {b_factor:g} to {len(atom_array)} atoms")
 
     return atom_array
 
