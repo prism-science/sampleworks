@@ -11,6 +11,7 @@ BOLTZ_AVAILABLE = False
 PROTENIX_AVAILABLE = False
 RF3_AVAILABLE = False
 PROTPARDELLE_AVAILABLE = False
+TORCHREF_AVAILABLE = False
 
 try:
     from sampleworks.models.boltz.wrapper import Boltz1Wrapper, Boltz2Wrapper
@@ -50,6 +51,17 @@ try:
     PROTPARDELLE_AVAILABLE = True
     del ProtpardelleWrapper
 except (ImportError, ModuleNotFoundError, OSError):
+    pass
+
+try:
+    # torchref backs the reciprocal-space reward in
+    # sampleworks.core.rewards.torchref_rewards, which imports it lazily so this
+    # flag is the only thing that has to know whether it is installed.
+    from torchref import ModelFT, read_mtz
+
+    TORCHREF_AVAILABLE = True
+    del ModelFT, read_mtz
+except (ImportError, ModuleNotFoundError):
     pass
 
 F = TypeVar("F", bound=Callable[..., Any])
