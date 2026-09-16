@@ -118,9 +118,7 @@ class TestFromArrays:
             AtomReconciler.from_arrays(model, struct)
 
     def test_different_chain_and_numbering_require_reconciliation(self):
-        model = build_test_atom_array(
-            chain_ids=["A", "A"], res_ids=[0, 0], atom_names=["N", "CA"]
-        )
+        model = build_test_atom_array(chain_ids=["A", "A"], res_ids=[0, 0], atom_names=["N", "CA"])
         struct = build_test_atom_array(
             chain_ids=["B", "B"], res_ids=[365, 365], atom_names=["N", "CA"]
         )
@@ -131,9 +129,7 @@ class TestFromArrays:
         assert rec.n_common == len(model) == len(struct)
 
     def test_mse_se_maps_to_met_sd(self):
-        model = build_test_atom_array(
-            chain_ids=["A", "A"], res_ids=[0, 0], atom_names=["N", "SD"]
-        )
+        model = build_test_atom_array(chain_ids=["A", "A"], res_ids=[0, 0], atom_names=["N", "SD"])
         model.res_name[:] = "MET"
         model.element[:] = ["N", "S"]
         struct = build_test_atom_array(
@@ -209,9 +205,7 @@ class TestCoordinateTranslation:
             rec.model_to_struct(torch.randn(1, 5, 3), torch.randn(1, 4, 3))
 
     def test_mapped_struct_mask_excludes_unmapped_template_atoms(self):
-        model = build_test_atom_array(
-            chain_ids=["A", "A"], res_ids=[0, 0], atom_names=["N", "CA"]
-        )
+        model = build_test_atom_array(chain_ids=["A", "A"], res_ids=[0, 0], atom_names=["N", "CA"])
         struct = build_test_atom_array(
             chain_ids=["B", "B", "B"], res_ids=[5, 5, 5], atom_names=["N", "CA", "O"]
         )

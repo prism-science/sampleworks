@@ -440,6 +440,8 @@ class LatentOptimization:
         }
         if reconciler.has_mismatch and processed.model_atom_array is not None:
             metadata["model_atom_array"] = processed.model_atom_array
+            metadata["struct_atom_array"] = processed.atom_array
+            metadata["reconciler"] = processed.reconciler
 
         return GuidanceOutput(
             structure=structure,
