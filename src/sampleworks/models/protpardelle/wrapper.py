@@ -603,8 +603,6 @@ class ProtpardelleWrapper:
 
             model_input = atom_array[np.asarray(atom_array.atom_name) != "OXT"].copy()
             model_seq_idx = np.asarray(model_input.seq_idx, dtype=np.int64)
-            if np.any(model_seq_idx < 0):
-                raise ValueError("All protein atoms must map to the override sequence")
             model_input.res_id = model_seq_idx + 1
             model_input.res_name = np.asarray(
                 [
@@ -653,16 +651,31 @@ class ProtpardelleWrapper:
             for chain_id, sequence in zip(protein_chain_ids, sequences):
                 chain_ids_by_global_position.extend([chain_id] * len(sequence))
                 local_positions_by_global_position.extend(range(len(sequence)))
-            order = [
-                expanded_indices[
-                    (
-                        chain_ids_by_global_position[int(global_position)],
-                        local_positions_by_global_position[int(global_position)],
-                        atom_names_by_slot[int(atom_slot)],
-                    )
-                ]
-                for global_position, atom_slot in zip(flat_residue_indices, flat_atom_indices)
-            ]
+            order = []
+            keep_mask = []
+            for i, (global_position, atom_slot) in enumerate(
+                zip(flat_residue_indices, flat_atom_indices)
+            ):
+                key = (
+                    chain_ids_by_global_position[int(global_position)],
+                    local_positions_by_global_position[int(global_position)],
+                    atom_names_by_slot[int(atom_slot)],
+                )
+                if key in expanded_indices:
+                    order.append(expanded_indices[key])
+                    keep_mask.append(True)
+                else:
+                    keep_mask.append(False)
+
+            if not all(keep_mask):
+                keep = torch.tensor(keep_mask, dtype=torch.bool, device=self.device)
+                atom37_residue_index = atom37_residue_index[keep]
+                atom37_atom_index = atom37_atom_index[keep]
+                atom_mask = torch.zeros(
+                    (padded_len, ATOM37_NUM_ATOMS), dtype=torch.float, device=self.device
+                )
+                atom_mask[atom37_residue_index, atom37_atom_index] = 1
+
             model_atom_array = expanded[np.asarray(order, dtype=np.int64)]
 
         atom_mask = atom_mask[None, :, :]  # [1, L, 37]
