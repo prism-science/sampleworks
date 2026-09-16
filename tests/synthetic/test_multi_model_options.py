@@ -57,6 +57,22 @@ def _load(path: Path, **kwargs):
     )
 
 
+def test_altloc_expansion_accepts_a_pymol_style_selection(resources_dir: Path):
+    """--altlocs-as-models with a selection must take the same selection syntax as
+    every other path here. map_altlocs_to_stack's own selection argument wants an
+    atomworks expression, so passing the pymol-like string through raised
+    SyntaxError."""
+    source = resources_dir / "1vme" / "1vme_final.cif"
+    if not source.exists():
+        pytest.skip(f"Source structure not found at {source}")
+
+    atom_array, coords = _load(source, row={"selection": "chain A"}, altlocs_as_models=True)
+
+    assert coords.shape[0] >= 2
+    assert coords.shape[1] == atom_array.array_length()
+    assert set(np.unique(atom_array.chain_id)) == {"A"}
+
+
 def test_multi_model_input_loads_every_model(multi_model_cif: Path):
     _, coords = _load(multi_model_cif)
 

@@ -76,16 +76,17 @@ def test_report_summarises_a_mixed_batch(batch):
     """The summary is the whole point: one line answering "did this batch work?"."""
     report = _run(batch)
 
-    assert report["total"] == 2
-    assert report["succeeded"] == 1
-    assert report["failed"] == 1
-    assert report["succeeded"] + report["failed"] == report["total"]
+    summary = report["summary"]
+    assert summary["total"] == 2
+    assert summary["successful"] == 1
+    assert summary["failed"] == 1
+    assert summary["successful"] + summary["failed"] == summary["total"]
 
 
 def test_report_holds_one_record_per_row_naming_both_outcomes(batch):
     report = _run(batch)
 
-    by_name = {r["filename"]: r for r in report["rows"]}
+    by_name = {r["filename"]: r for r in report["runs"]}
     assert set(by_name) == {"good.cif", "broken.cif"}
     assert by_name["good.cif"]["status"] == "success"
     assert by_name["broken.cif"]["status"] == "failed"
@@ -95,7 +96,7 @@ def test_a_failed_row_does_not_suppress_a_successful_one(batch):
     """The reason rows are isolated at all: one bad structure must not lose the rest."""
     report = _run(batch)
 
-    good = next(r for r in report["rows"] if r["filename"] == "good.cif")
+    good = next(r for r in report["runs"] if r["filename"] == "good.cif")
     assert Path(good["output_path"]).exists(), "the good row's MTZ should be on disk"
 
 
@@ -103,7 +104,7 @@ def test_a_failed_row_records_the_stage_and_the_error(batch):
     """Enough to know where to look; the traceback stays in the log."""
     report = _run(batch)
 
-    broken = next(r for r in report["rows"] if r["filename"] == "broken.cif")
+    broken = next(r for r in report["runs"] if r["filename"] == "broken.cif")
     assert broken["failure_stage"] == "load"
     assert broken["error"], "the error string should not be empty"
     assert "output_path" not in broken
@@ -125,7 +126,7 @@ def test_single_configuration_diffuse_rows_are_reported_as_validation_failures(b
     """
     report = _run(batch, write_diffuse=True)
 
-    good = next(r for r in report["rows"] if r["filename"] == "good.cif")
+    good = next(r for r in report["runs"] if r["filename"] == "good.cif")
     assert good["status"] == "failed"
     assert good["failure_stage"] == "validate"
     assert "output_path" not in good, "nothing should be written for a refused row"
