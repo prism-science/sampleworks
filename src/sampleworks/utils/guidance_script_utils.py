@@ -8,6 +8,7 @@ import traceback
 from datetime import datetime
 from importlib.resources import files
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import numpy as np
@@ -122,12 +123,20 @@ def _load_reference_cif(protein: str) -> CIFFile:
     Returns
     -------
     CIFFile
-        Parsed deposited CIF from the local RCSB cache.
+        Parsed deposited CIF from the local RCSB cache. The cache entry is populated
+        atomically, so concurrent first-time fetches cannot read a truncated file.
     """
     rcsb_id = _resolve_rcsb_id(protein)
     _RCSB_CACHE.mkdir(parents=True, exist_ok=True)
-    reference_path = fetch(rcsb_id, format="cif", target_path=str(_RCSB_CACHE))
-    return CIFFile.read(str(reference_path))
+    cached_path = _RCSB_CACHE / f"{rcsb_id}.cif"
+    if not cached_path.is_file():
+        # Grid-search workers share the cache directory. Fetching straight into it lets one
+        # worker read another's partially written entry, so stage the download in a private
+        # directory on the same filesystem and move it into place atomically.
+        with TemporaryDirectory(dir=_RCSB_CACHE) as staging_dir:
+            fetched_path = fetch(rcsb_id, format="cif", target_path=staging_dir)
+            os.replace(fetched_path, cached_path)
+    return CIFFile.read(str(cached_path))
 
 
 def save_trajectory(

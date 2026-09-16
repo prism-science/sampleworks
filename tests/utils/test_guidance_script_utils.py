@@ -129,6 +129,51 @@ def test_resolve_rcsb_id_rejects_non_deposited_name():
         _resolve_rcsb_id("example_run")
 
 
+def test_load_reference_cif_caches_atomically(
+    tmp_path: Path, resources_dir: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Populate the shared cache in one move and reuse it without fetching again."""
+    cache_dir = tmp_path / "rcsb-cache"
+    fetch_calls = []
+
+    def fetch_reference(pdb_id: str, *, format: str, target_path: str) -> str:
+        """Write one offline reference into the download directory, as RCSB fetch does.
+
+        Parameters
+        ----------
+        pdb_id : str
+            Deposited structure ID.
+        format : str
+            Requested structure format.
+        target_path : str
+            Download directory.
+
+        Returns
+        -------
+        str
+            Path of the written deposited CIF.
+        """
+        fetch_calls.append(Path(target_path))
+        downloaded = Path(target_path) / f"{pdb_id}.{format}"
+        downloaded.write_bytes((resources_dir / "1vme" / "1vme_final.cif").read_bytes())
+        return str(downloaded)
+
+    monkeypatch.setattr(guidance_script_utils, "fetch", fetch_reference)
+    monkeypatch.setattr(guidance_script_utils, "_RCSB_CACHE", cache_dir)
+
+    first = guidance_script_utils._load_reference_cif("1vme_0.5occA")
+    second = guidance_script_utils._load_reference_cif("1VME_1.0occB")
+
+    assert len(fetch_calls) == 1
+    # The download never lands in the shared cache directory itself, so a concurrent
+    # reader cannot observe a partially written entry.
+    assert fetch_calls[0].parent == cache_dir
+    assert fetch_calls[0] != cache_dir
+    assert [path.name for path in cache_dir.iterdir()] == ["1vme.cif"]
+    assert "entity_poly_seq" in first.block
+    assert "entity_poly_seq" in second.block
+
+
 def test_save_everything_writes_validated_metadata_to_all_cifs(
     tmp_path: Path,
     resources_dir: Path,
@@ -147,7 +192,7 @@ def test_save_everything_writes_validated_metadata_to_all_cifs(
     fetch_calls = []
 
     def fetch_reference(pdb_id: str, *, format: str, target_path: str) -> str:
-        """Record one offline reference fetch.
+        """Write one offline reference into the download directory, as RCSB fetch does.
 
         Parameters
         ----------
@@ -156,15 +201,17 @@ def test_save_everything_writes_validated_metadata_to_all_cifs(
         format : str
             Requested structure format.
         target_path : str
-            Cache directory.
+            Download directory.
 
         Returns
         -------
         str
-            Offline deposited CIF path.
+            Path of the written deposited CIF.
         """
         fetch_calls.append((pdb_id, format, target_path))
-        return str(resources_dir / "1vme" / "1vme_final.cif")
+        downloaded = Path(target_path) / f"{pdb_id}.{format}"
+        downloaded.write_bytes((resources_dir / "1vme" / "1vme_final.cif").read_bytes())
+        return str(downloaded)
 
     monkeypatch.setattr(guidance_script_utils, "fetch", fetch_reference)
     monkeypatch.setattr(guidance_script_utils, "_RCSB_CACHE", tmp_path / "rcsb-cache")
