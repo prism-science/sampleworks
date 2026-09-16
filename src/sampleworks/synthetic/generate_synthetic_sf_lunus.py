@@ -37,7 +37,8 @@ difference as a floor.
 configuration coordinates; :func:`compute_ensemble_amplitudes` runs the forward
 pass and returns plain arrays, reusing the coordinate-independent setup that
 ``lunus_sf.build_setup`` caches; :func:`dataset_from_bragg_amplitudes` and
-:func:`dataset_from_diffuse_intensities` turn those arrays into MTZs.
+:func:`dataset_from_diffuse_intensities` turn those arrays into datasets, which
+:func:`save_mtz` writes.
 :func:`_process_single_row` is the only place the three meet, and it wraps each
 in its own ``try``/``except`` so ``batch_report.json`` can say which stage a row
 died in — a failed diffuse write still lets the amplitudes through. Keeping the
@@ -443,9 +444,8 @@ def dataset_from_diffuse_intensities(
     space_group: gemmi.SpaceGroup,
     *,
     label: str = "ID",
-    output_path: Path | None = None,
 ) -> rs.DataSet:
-    """Write diffuse intensities as an MTZ.
+    """Build an MTZ-ready dataset of diffuse intensities.
 
     The second central moment of the ensemble, ``<|F|²> − |<F>|²``, and *not* the
     square of what :func:`dataset_from_bragg_amplitudes` writes: that would be
@@ -471,8 +471,6 @@ def dataset_from_diffuse_intensities(
         Crystal metadata written into the MTZ.
     label
         Column name.
-    output_path
-        If given, write the dataset there.
 
     Returns
     -------
@@ -495,11 +493,6 @@ def dataset_from_diffuse_intensities(
     # The type is the interoperability contract here, so state it for this column.
     dataset[label] = dataset[label].astype(rs.IntensityDtype())
 
-    if output_path is not None:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        dataset.write_mtz(str(output_path))
-        logger.info(f"Saved diffuse intensities to {output_path}")
-
     return dataset
 
 
@@ -514,7 +507,6 @@ def dataset_from_bragg_amplitudes(
     test_fraction: float = 0.05,
     seed: int | None = None,
     ccp4_convention: bool = False,
-    output_path: Path | None = None,
 ) -> rs.DataSet:
     """Build an MTZ-ready dataset from Miller indices and complex amplitudes.
 
@@ -580,12 +572,28 @@ def dataset_from_bragg_amplitudes(
             dataset, ccp4_convention=ccp4_convention, fraction=test_fraction, seed=seed
         )
 
-    if output_path is not None:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        dataset.write_mtz(str(output_path))
-        logger.info(f"Saved structure factors to {output_path}")
-
     return dataset
+
+
+def save_mtz(dataset: rs.DataSet, output_path: Path, description: str) -> None:
+    """Write a dataset to disk as an MTZ.
+
+    Separate from the builders above so they stay what their names say they are.
+    The caller owns the path, which is where the batch record's ``output_path``
+    bookkeeping already lives.
+
+    Parameters
+    ----------
+    dataset
+        Dataset to write, already carrying MTZ dtypes.
+    output_path
+        Destination; parent directories are created.
+    description
+        What is being written, for the log line (e.g. ``"diffuse intensities"``).
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    dataset.write_mtz(str(output_path))
+    logger.info(f"Saved {description} to {output_path}")
 
 
 def _resolve_crystal_metadata(
@@ -709,8 +717,10 @@ def _process_single_row(
         )
         diffuse_path = output_dir / (f"{structure_path.stem}_{resolution:.2f}A_diffuse.mtz")
         try:
-            dataset_from_diffuse_intensities(
-                hkl, diffuse, unit_cell, space_group, output_path=diffuse_path
+            save_mtz(
+                dataset_from_diffuse_intensities(hkl, diffuse, unit_cell, space_group),
+                diffuse_path,
+                "diffuse intensities",
             )
             record["diffuse_output_path"] = str(diffuse_path)
         except Exception as e:
@@ -727,15 +737,18 @@ def _process_single_row(
     label = "total" if solvent_cutoff is not None else "protein"
     output_path = output_dir / (row.mtzfile or f"{structure_path.stem}_{resolution:.2f}A.mtz")
     try:
-        dataset_from_bragg_amplitudes(
-            hkl,
-            mean_f,
-            unit_cell,
-            space_group,
-            label=label,
-            test_fraction=test_fraction,
-            seed=seed,
-            output_path=output_path,
+        save_mtz(
+            dataset_from_bragg_amplitudes(
+                hkl,
+                mean_f,
+                unit_cell,
+                space_group,
+                label=label,
+                test_fraction=test_fraction,
+                seed=seed,
+            ),
+            output_path,
+            "structure factors",
         )
         record["output_path"] = str(output_path)
     except Exception as e:

@@ -42,6 +42,7 @@ from sampleworks.synthetic.generate_synthetic_sf_lunus import (
     dataset_from_bragg_amplitudes,
     dataset_from_diffuse_intensities,
     load_configurations,
+    save_mtz,
 )
 from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ
 
@@ -420,15 +421,18 @@ class TestMTZWriters:
         cell = gemmi.UnitCell(31.7, 42.3, 55.9, 90.0, 104.5, 90.0)
         path = tmp_path / "amplitudes.mtz"
 
-        dataset_from_bragg_amplitudes(
-            hkl,
-            structure_factors,
-            cell,
-            gemmi.SpaceGroup("P 1 21 1"),
-            label="MODEL",
-            sigma_f_scale=0.2,
-            test_fraction=0.0,
-            output_path=path,
+        save_mtz(
+            dataset_from_bragg_amplitudes(
+                hkl,
+                structure_factors,
+                cell,
+                gemmi.SpaceGroup("P 1 21 1"),
+                label="MODEL",
+                sigma_f_scale=0.2,
+                test_fraction=0.0,
+            ),
+            path,
+            "structure factors",
         )
 
         mtz = gemmi.read_mtz_file(str(path))
@@ -461,12 +465,15 @@ class TestMTZWriters:
         intensities = np.linspace(-0.5, 10.0, len(hkl)).astype(np.float32)
         path = tmp_path / "diffuse.mtz"
 
-        dataset_from_diffuse_intensities(
-            hkl,
-            intensities,
-            gemmi.UnitCell(31.7, 42.3, 55.9, 90.0, 104.5, 90.0),
-            gemmi.SpaceGroup("P 1 21 1"),
-            output_path=path,
+        save_mtz(
+            dataset_from_diffuse_intensities(
+                hkl,
+                intensities,
+                gemmi.UnitCell(31.7, 42.3, 55.9, 90.0, 104.5, 90.0),
+                gemmi.SpaceGroup("P 1 21 1"),
+            ),
+            path,
+            "diffuse intensities",
         )
 
         mtz = gemmi.read_mtz_file(str(path))
@@ -488,14 +495,20 @@ class TestMTZWriters:
         args = (hkl, structure_factors, gemmi.UnitCell(30.0, 30.0, 30.0, 90.0, 90.0, 90.0))
 
         without = tmp_path / "without.mtz"
-        dataset_from_bragg_amplitudes(
-            *args, gemmi.SpaceGroup("P 1"), test_fraction=0.0, output_path=without
+        save_mtz(
+            dataset_from_bragg_amplitudes(*args, gemmi.SpaceGroup("P 1"), test_fraction=0.0),
+            without,
+            "structure factors",
         )
         assert not any(c.type == "I" for c in gemmi.read_mtz_file(str(without)).columns)
 
         with_flags = tmp_path / "with.mtz"
-        dataset_from_bragg_amplitudes(
-            *args, gemmi.SpaceGroup("P 1"), test_fraction=0.25, seed=7, output_path=with_flags
+        save_mtz(
+            dataset_from_bragg_amplitudes(
+                *args, gemmi.SpaceGroup("P 1"), test_fraction=0.25, seed=7
+            ),
+            with_flags,
+            "structure factors",
         )
         flags = gemmi.read_mtz_file(str(with_flags)).column_with_label("R-free-flags")
         assert flags.type == "I"
@@ -509,20 +522,24 @@ class TestMTZWriters:
         hkl = self.reflections(8)
         path = tmp_path / "labelled.mtz"
 
-        dataset_from_diffuse_intensities(
-            hkl,
-            np.ones(len(hkl), dtype=np.float32),
-            gemmi.UnitCell(30.0, 30.0, 30.0, 90.0, 90.0, 90.0),
-            gemmi.SpaceGroup("P 1"),
-            label="DIFFUSE",
-            output_path=path,
+        save_mtz(
+            dataset_from_diffuse_intensities(
+                hkl,
+                np.ones(len(hkl), dtype=np.float32),
+                gemmi.UnitCell(30.0, 30.0, 30.0, 90.0, 90.0, 90.0),
+                gemmi.SpaceGroup("P 1"),
+                label="DIFFUSE",
+            ),
+            path,
+            "diffuse intensities",
         )
 
         column = gemmi.read_mtz_file(str(path)).column_with_label("DIFFUSE")
         assert column.type == "J"
 
-    def test_dataset_is_returned_without_writing(self, tmp_path):
-        """Both writers are usable as builders: no output_path, no file."""
+    def test_builders_return_indexed_datasets_with_mtz_dtypes(self, tmp_path):
+        """The builders only build. Writing is save_mtz's job, so calling them
+        touches no filesystem and returns datasets already carrying MTZ dtypes."""
         hkl = self.reflections(8)
         cell = gemmi.UnitCell(30.0, 30.0, 30.0, 90.0, 90.0, 90.0)
         space_group = gemmi.SpaceGroup("P 1")
