@@ -46,24 +46,31 @@ Needs no reward; confirms precondition (a). Inject a `requires_grad` leaf as `z_
 
 ```python
 import torch
-from sampleworks.utils.guidance_script_utils import get_model_and_device, get_reward_function_and_structure
+from sampleworks.utils.guidance_script_utils import (
+    get_model_and_device,
+    get_reward_function_and_structure,
+)
 from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
 from sampleworks.models.latent_adapter import AttrLatentIO
 from sampleworks.models.protocol import GenerativeModelInput
 
 device, model = get_model_and_device("cuda:0", "<protenix.ckpt>", "protenix")
 reward, structure = get_reward_function_and_structure(
-    density="<map.ccp4>", device=device, em=False, loss_order=2,
-    resolution=1.8, structure_path="<structure.cif>",
+    density="<map.ccp4>",
+    device=device,
+    em=False,
+    loss_order=2,
+    resolution=1.8,
+    structure_path="<structure.cif>",
 )
 
-feats = model.featurize(structure)                       # trunk pass
+feats = model.featurize(structure)  # trunk pass
 io = AttrLatentIO(single_attr="s_trunk", pair_attr="z_trunk")
 
 z0 = io.read_pair(feats.conditioning).detach()
 z_leaf = z0.clone().requires_grad_(True)
 cond = io.write_pair(feats.conditioning, z_leaf)
-feats2 = GenerativeModelInput(conditioning=cond)         # conditioning-only (x_init removed in #330)
+feats2 = GenerativeModelInput(conditioning=cond)  # conditioning-only (x_init removed in #330)
 
 sampler = AF3EDMSampler(EDMSamplerConfig(device=str(device), augmentation=False))
 schedule = sampler.compute_schedule(num_steps=200)
@@ -91,13 +98,19 @@ print("z_leaf.grad abs-sum:", None if z_leaf.grad is None else z_leaf.grad.abs()
 from sampleworks.core.scalers.latent_optimization import LatentOptimization
 
 itopt = LatentOptimization(
-    ensemble_size=1, num_steps=20, outer_steps=1,   # tiny
-    learning_rate=0.05, max_grad_norm=1.0,
-    optimize_single=True, optimize_pair=False,      # single-only is cache-safe
-    anchor_weight_single=1.0, single_attr="s_trunk", pair_attr="z_trunk",
+    ensemble_size=1,
+    num_steps=20,
+    outer_steps=1,  # tiny
+    learning_rate=0.05,
+    max_grad_norm=1.0,
+    optimize_single=True,
+    optimize_pair=False,  # single-only is cache-safe
+    anchor_weight_single=1.0,
+    single_attr="s_trunk",
+    pair_attr="z_trunk",
 )
 out = itopt.sample(structure, model, sampler, step_scaler=None, reward=reward)
-opt = out.metadata["optimization_losses"][0]        # per-step data losses, round 0
+opt = out.metadata["optimization_losses"][0]  # per-step data losses, round 0
 print("first→last opt loss:", opt[0], "→", opt[-1])
 ```
 

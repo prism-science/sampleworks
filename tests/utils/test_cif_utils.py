@@ -9,7 +9,10 @@ from atomworks.io.utils.io_utils import load_any
 from biotite.structure import array, Atom, AtomArray, AtomArrayStack
 from biotite.structure.io.pdbx.cif import CIFColumn, CIFFile
 from sampleworks.utils.atom_array_utils import save_structure_to_cif
-from sampleworks.utils.cif_utils import add_category_to_cif, resolve_mixed_hetatm_atom_altlocs
+from sampleworks.utils.cif_utils import (
+    add_category_to_cif,
+    resolve_mixed_hetatm_atom_altlocs,
+)
 
 
 # ---------------------------------------------------------------------------
