@@ -39,8 +39,8 @@ pytest.importorskip("lunus.sf", reason="lunus[sf] not installed")
 # at module scope, so without lunus this has to skip rather than fail collection.
 from sampleworks.synthetic.generate_synthetic_sf_lunus import (
     compute_ensemble_amplitudes,
-    dataset_from_amplitudes,
-    dataset_from_intensities,
+    dataset_from_bragg_amplitudes,
+    dataset_from_diffuse_intensities,
     load_configurations,
 )
 from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ
@@ -420,7 +420,7 @@ class TestMTZWriters:
         cell = gemmi.UnitCell(31.7, 42.3, 55.9, 90.0, 104.5, 90.0)
         path = tmp_path / "amplitudes.mtz"
 
-        dataset_from_amplitudes(
+        dataset_from_bragg_amplitudes(
             hkl,
             structure_factors,
             cell,
@@ -461,7 +461,7 @@ class TestMTZWriters:
         intensities = np.linspace(-0.5, 10.0, len(hkl)).astype(np.float32)
         path = tmp_path / "diffuse.mtz"
 
-        dataset_from_intensities(
+        dataset_from_diffuse_intensities(
             hkl,
             intensities,
             gemmi.UnitCell(31.7, 42.3, 55.9, 90.0, 104.5, 90.0),
@@ -488,13 +488,13 @@ class TestMTZWriters:
         args = (hkl, structure_factors, gemmi.UnitCell(30.0, 30.0, 30.0, 90.0, 90.0, 90.0))
 
         without = tmp_path / "without.mtz"
-        dataset_from_amplitudes(
+        dataset_from_bragg_amplitudes(
             *args, gemmi.SpaceGroup("P 1"), test_fraction=0.0, output_path=without
         )
         assert not any(c.type == "I" for c in gemmi.read_mtz_file(str(without)).columns)
 
         with_flags = tmp_path / "with.mtz"
-        dataset_from_amplitudes(
+        dataset_from_bragg_amplitudes(
             *args, gemmi.SpaceGroup("P 1"), test_fraction=0.25, seed=7, output_path=with_flags
         )
         flags = gemmi.read_mtz_file(str(with_flags)).column_with_label("R-free-flags")
@@ -509,7 +509,7 @@ class TestMTZWriters:
         hkl = self.reflections(8)
         path = tmp_path / "labelled.mtz"
 
-        dataset_from_intensities(
+        dataset_from_diffuse_intensities(
             hkl,
             np.ones(len(hkl), dtype=np.float32),
             gemmi.UnitCell(30.0, 30.0, 30.0, 90.0, 90.0, 90.0),
@@ -527,10 +527,10 @@ class TestMTZWriters:
         cell = gemmi.UnitCell(30.0, 30.0, 30.0, 90.0, 90.0, 90.0)
         space_group = gemmi.SpaceGroup("P 1")
 
-        amplitudes = dataset_from_amplitudes(
+        amplitudes = dataset_from_bragg_amplitudes(
             hkl, np.ones(len(hkl), dtype=np.complex64), cell, space_group, test_fraction=0.0
         )
-        intensities = dataset_from_intensities(
+        intensities = dataset_from_diffuse_intensities(
             hkl, np.ones(len(hkl), dtype=np.float32), cell, space_group
         )
 
