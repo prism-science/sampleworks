@@ -5,7 +5,7 @@ only, or when ``--simulate-solvent-and-scale`` is set, both the protein and tota
 (Fprotein/SIGFprotein/PHIFprotein and Ftotal/SIGFtotal/PHIFtotal) in the same
 MTZ. The MTZ file has dummy values for the SIGF column(s) and optionally an R-free flag
 column. Each structure can be optionally overridden with unit cell, space group, atom
-selection, and occupancy.
+selection, occupancy, and a flat isotropic B-factor.
 """
 
 import argparse
@@ -285,6 +285,7 @@ def _process_single_row(
     strip_ligands: bool = False,
     simulate_solvent_and_scale: bool = False,
     save_structure: bool = False,
+    b_factor: float | None = None,
 ) -> None:
     """Compute synthetic protein structure factors for a single structure.
     Assume no anomalous scattering.
@@ -324,6 +325,8 @@ def _process_single_row(
     save_structure
         If True, save the processed structure (after selection and occupancy assignment)
         as mmCIF to output_dir. Unit cell and space group are preserved. Default is False.
+    b_factor
+        Optional isotropic B-factor assigned to every retained atom.
     """
     structure_path = base_dir / row.filename
     atom_array = load_structure_for_synthetic_reward(
@@ -334,6 +337,7 @@ def _process_single_row(
         strip_waters=strip_waters,
         strip_ligands=strip_ligands,
         selection=row.selection,
+        b_factor=b_factor,
     )
     if atom_array is None:
         return
@@ -466,6 +470,7 @@ def process_batch(
     strip_ligands: bool = False,
     simulate_solvent_and_scale: bool = False,
     save_structure: bool = False,
+    b_factor: float | None = None,
 ) -> None:
     """Process multiple structures from a CSV file in batch mode.
 
@@ -501,6 +506,8 @@ def process_batch(
         If True, compute bulk solvent and scale factors in addition to F_protein.
     save_structure
         If True, save each processed structure as mmCIF to output_dir.
+    b_factor
+        Optional isotropic B-factor assigned to every retained atom.
     """
     from joblib import delayed, Parallel
 
@@ -524,6 +531,7 @@ def process_batch(
             strip_ligands=strip_ligands,
             simulate_solvent_and_scale=simulate_solvent_and_scale,
             save_structure=save_structure,
+            b_factor=b_factor,
         )
         for row in rows
     )
@@ -573,6 +581,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="High-resolution (dmin) limit in Angstroms",
+    )
+    sf_group.add_argument(
+        "--b-factor",
+        type=float,
+        default=None,
+        help="Override every retained atom's isotropic B-factor",
     )
     sf_group.add_argument(
         "--scattering-factor-mode",
@@ -675,6 +689,7 @@ def main() -> None:
             strip_ligands=args.remove_ligands,
             simulate_solvent_and_scale=args.simulate_solvent_and_scale,
             save_structure=args.save_structure,
+            b_factor=args.b_factor,
         )
     elif args.structure:
         row = BatchRowForMTZ.from_dict(
@@ -702,6 +717,7 @@ def main() -> None:
             strip_ligands=args.remove_ligands,
             simulate_solvent_and_scale=args.simulate_solvent_and_scale,
             save_structure=args.save_structure,
+            b_factor=args.b_factor,
         )
     else:
         logger.error("Please specify --structure or --batch-csv")
