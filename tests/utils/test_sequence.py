@@ -129,11 +129,9 @@ def test_override_with_no_protein_chain_raises():
 def test_shorter_override_raises(structure_5i09_density: dict):
     """An override shorter than the observed sequence must fail, not silently corrupt."""
     chain_info = structure_5i09_density["chain_info"]
-    protein_chain = next(
-        cid for cid, info in chain_info.items() if info["chain_type"].is_protein()
-    )
+    protein_chain = next(cid for cid, info in chain_info.items() if info["chain_type"].is_protein())
     observed_seq = chain_info[protein_chain]["processed_entity_canonical_sequence"]
-    shorter = observed_seq[:len(observed_seq) // 2]
+    shorter = observed_seq[: len(observed_seq) // 2]
 
     with pytest.raises(ValueError, match="could not be aligned"):
         apply_sequence_override(structure_5i09_density, shorter)

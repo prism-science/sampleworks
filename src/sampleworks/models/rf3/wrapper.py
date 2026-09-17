@@ -17,13 +17,12 @@ from rf3.loss.loss import calc_chiral_grads_flat_impl
 from rf3.model.RF3 import RF3WithConfidence
 from rf3.trainers.rf3 import assert_no_nans, RF3TrainerWithConfidence
 from rf3.utils.inference import InferenceInput, InferenceInputDataset
-from torch import Tensor
-from torch.utils.data import DataLoader
-
 from sampleworks.models.protocol import GenerativeModelInput
 from sampleworks.utils.framework_utils import match_batch
 from sampleworks.utils.guidance_constants import StructurePredictor
 from sampleworks.utils.msa import MSAManager
+from torch import Tensor
+from torch.utils.data import DataLoader
 
 
 # Attached to the trainer-owned model after RF3InferenceEngine initialization in

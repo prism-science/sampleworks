@@ -760,9 +760,7 @@ def make_normalized_atom_id(arr: AtomArray | AtomArrayStack) -> np.ndarray:
         mask = override >= 0
         seq_pos[mask] = override[mask]
 
-    return np.array(
-        [f"{chain_to_idx[c]}_{s}_{a}" for c, s, a in zip(chain_id, seq_pos, atom_name)]
-    )
+    return np.array([f"{chain_to_idx[c]}_{s}_{a}" for c, s, a in zip(chain_id, seq_pos, atom_name)])
 
 
 @overload

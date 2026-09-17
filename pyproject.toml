@@ -18,83 +18,11 @@ analysis = [
 ]
 test = ["pytest", "pytest-cov", "pytest-loguru"]
 
-[tool.pixi.feature.dev]
-platforms = ["linux-64", "osx-arm64"]
-
-[tool.pixi.feature.dev.pypi-dependencies]
-pytest = "*"
-pytest-cov = "*"
-mypy = "*"
-prek = "*"
-ty = "==0.0.39"
-ruff = "*"
-pytest-loguru = "*"
-python-semantic-release = "*"
-
-
-[tool.pixi.feature.boltz]
-pypi-dependencies = {"boltz" = "==2.2.1", "cuequivariance-torch" = "*", "cuequivariance-ops-torch-cu12" = "*", "rdkit" = ">=2025.3.6"}
-platforms = ["linux-64"]
-
-[tool.pixi.feature.boltz.pypi-options.dependency-overrides]
-click = "==8.1.7"
-
-[tool.pixi.feature.boltz-osx]
-pypi-dependencies = {"boltz" = "*", "cuequivariance-torch" = "*", "rdkit" = ">=2025.3.6", "joblib" = "*", "sfcalculator-torch" = ">=0.3.2"}
-platforms = ["osx-arm64"]
-
-
-[tool.pixi.feature.protenix]
-pypi-dependencies = {"protenix" = "*", "einx" = "*", "triton" = "*"}
-platforms = ["linux-64"]
-
-[tool.pixi.feature.external-tools]
-# Binaries the eval scripts shell out to. Kept separate from the `analysis`
-# feature so adding one does not re-solve the model environments, and bioconda
-# is scoped here so everything else keeps solving against conda-forge alone.
-channels = ["conda-forge", "bioconda"]
-platforms = ["linux-64", "osx-arm64"]
-
-[tool.pixi.feature.external-tools.dependencies]
-# PDB-REDO's ramachandran/torsion z-score tool, invoked as a binary on PATH by
-# scripts/eval/run_and_process_tortoize.py.
-tortoize = ">=2.0.16,<3"
-
-[tool.pixi.feature.protpardelle]
-platforms = ["linux-64", "osx-arm64"]
-
-[tool.pixi.feature.protpardelle.dependencies]
-biopython = "*"
-einops = "*"
-huggingface_hub = "*"
-hydra-core = "*"
-jupyter = "*"
-numpy = ">=1.25.0,<2.0"
-omegaconf = "*"
-pandas = "==2.3.1"
-prody = "*"
-pyyaml = "*"
-scipy = "*"
-tqdm = "*"
-typer = "*"
-
-[tool.pixi.feature.protpardelle.pypi-dependencies]
-protpardelle = {git = "https://github.com/ProteinDesignLab/protpardelle-1c.git", rev = "ee378400f25b801fa481028000f9060183d7fb4c"}
-torch = ">=2.6.0,<2.8"
-biotite = "*"
-dm-tree = "*"
-jaxtyping = "*"
-ml_collections = "*"
-modelcif = "*"
-transformers = "*"
-wandb = "*"
-
 [project]
 authors = [
-    {email = "karson.chrispens@ucsf.edu", name = "Karson Chrispens"},
-    {email = "marcus.collins@astera.org", name = "Marcus D. Collins"}
+  {email = "karson.chrispens@ucsf.edu", name = "Karson Chrispens"},
+  {email = "marcus.collins@astera.org", name = "Marcus D. Collins"}
 ]
-
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
@@ -130,16 +58,16 @@ readme = "README.md"
 requires-python = ">= 3.11, <3.14"
 version = "0.18.1"
 
+[project.scripts]
+sampleworks-analysis = "sampleworks.runs.analysis_cli:main"
+sampleworks-guidance = "sampleworks.cli.guidance:main"
+sampleworks-runs = "sampleworks.runs.cli:main"
+
 [project.urls]
 Changelog = "https://github.com/prism-science/sampleworks/blob/main/CHANGELOG.md"
 Homepage = "https://diffuse.science/posts/sampleworks/"
 Issues = "https://github.com/prism-science/sampleworks/issues"
 Repository = "https://github.com/prism-science/sampleworks"
-
-[project.scripts]
-sampleworks-analysis = "sampleworks.runs.analysis_cli:main"
-sampleworks-guidance = "sampleworks.cli.guidance:main"
-sampleworks-runs = "sampleworks.runs.cli:main"
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -181,11 +109,6 @@ ninja = "*"
 numpy = "<2.0"
 pyarrow = "==17.0.0"
 
-[tool.pixi.target.linux-64.dependencies]
-cuda-toolkit = ">=12,<13"
-gcc_linux-64 = ">=9,<13"
-gxx_linux-64 = ">=9,<13"
-
 [tool.pixi.environments]
 analysis = {features = ["analysis", "external-tools"]}
 analysis-dev = {features = ["analysis", "dev", "external-tools"]}
@@ -200,24 +123,100 @@ protpardelle-dev = {features = ["protpardelle", "dev"]}
 rf3 = {features = ["rf3"]}
 rf3-dev = {features = ["rf3", "dev"]}
 
+[tool.pixi.feature.boltz]
+platforms = ["linux-64"]
+pypi-dependencies = {"boltz" = "==2.2.1", "cuequivariance-ops-torch-cu12" = "*", "cuequivariance-torch" = "*", "rdkit" = ">=2025.3.6"}
+
+[tool.pixi.feature.boltz.pypi-options.dependency-overrides]
+click = "==8.1.7"
+
+[tool.pixi.feature.boltz-osx]
+platforms = ["osx-arm64"]
+pypi-dependencies = {"boltz" = "*", "cuequivariance-torch" = "*", "joblib" = "*", "rdkit" = ">=2025.3.6", "sfcalculator-torch" = ">=0.3.2"}
+
+[tool.pixi.feature.dev]
+platforms = ["linux-64", "osx-arm64"]
+
+[tool.pixi.feature.dev.pypi-dependencies]
+mypy = "*"
+prek = "*"
+pytest = "*"
+pytest-cov = "*"
+pytest-loguru = "*"
+python-semantic-release = "*"
+ruff = "*"
+ty = "==0.0.39"
+
+[tool.pixi.feature.external-tools]
+# Binaries the eval scripts shell out to. Kept separate from the `analysis`
+# feature so adding one does not re-solve the model environments, and bioconda
+# is scoped here so everything else keeps solving against conda-forge alone.
+channels = ["conda-forge", "bioconda"]
+platforms = ["linux-64", "osx-arm64"]
+
+[tool.pixi.feature.external-tools.dependencies]
+# PDB-REDO's ramachandran/torsion z-score tool, invoked as a binary on PATH by
+# scripts/eval/run_and_process_tortoize.py.
+tortoize = ">=2.0.16,<3"
+
+[tool.pixi.feature.protenix]
+platforms = ["linux-64"]
+pypi-dependencies = {"einx" = "*", "protenix" = "*", "triton" = "*"}
+
 [tool.pixi.feature.protenix.pypi-options.dependency-overrides]
 rdkit = ">=2024.3.5,<2025.9"
 
+[tool.pixi.feature.protpardelle]
+platforms = ["linux-64", "osx-arm64"]
+
+[tool.pixi.feature.protpardelle.dependencies]
+biopython = "*"
+einops = "*"
+huggingface_hub = "*"
+hydra-core = "*"
+jupyter = "*"
+numpy = ">=1.25.0,<2.0"
+omegaconf = "*"
+pandas = "==2.3.1"
+prody = "*"
+pyyaml = "*"
+scipy = "*"
+tqdm = "*"
+typer = "*"
+
+[tool.pixi.feature.protpardelle.pypi-dependencies]
+biotite = "*"
+dm-tree = "*"
+jaxtyping = "*"
+ml_collections = "*"
+modelcif = "*"
+protpardelle = {git = "https://github.com/ProteinDesignLab/protpardelle-1c.git", rev = "ee378400f25b801fa481028000f9060183d7fb4c"}
+torch = ">=2.6.0,<2.8"
+transformers = "*"
+wandb = "*"
+
 [tool.pixi.feature.rf3.pypi-dependencies]
 rc-foundry = {editable = true, extras = ["rf3"], git = "https://github.com/k-chrispens/foundry.git"}
+
+[tool.pixi.pypi-dependencies]
+sampleworks = {editable = true, path = "."}
 
 # Workspace-level override: reciprocalspaceship (sfcalculator-torch transitive dep)
 # caps pandas<=2.2.3 in its metadata, but runs fine on 2.3.1; protenix hard-pins
 # pandas==2.3.1. Standardize all envs on 2.3.1 to avoid silent downgrades.
 [tool.pixi.pypi-options.dependency-overrides]
-pandas = "==2.3.1"
 gemmi = "==0.6.7"
-
-[tool.pixi.pypi-dependencies]
-sampleworks = {editable = true, path = "."}
+pandas = "==2.3.1"
 
 [tool.pixi.system-requirements]
 cuda = "12"
+
+[tool.pixi.target]
+
+[tool.pixi.target.linux-64.dependencies]
+cuda-toolkit = ">=12,<13"
+gcc_linux-64 = ">=9,<13"
+gxx_linux-64 = ">=9,<13"
 
 # Includes slow tests that require GPU or model weights
 [tool.pixi.tasks.all-tests]

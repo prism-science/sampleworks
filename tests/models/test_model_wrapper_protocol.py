@@ -339,9 +339,7 @@ class TestFullSequenceAtomCoverage:
             subdir_name="denoised",
             save_every=1,
         )
-        written = parse_structure(
-            temp_output_dir / "trajectory" / "denoised" / "trajectory_0.cif"
-        )
+        written = parse_structure(temp_output_dir / "trajectory" / "denoised" / "trajectory_0.cif")
         written_atom_array = get_asym_unit_from_structure(written, atom_array_index=0)
 
         assert len(written_atom_array) == len(model_atom_array)
@@ -381,9 +379,7 @@ class TestFullSequenceAtomCoverage:
                 f"{wrapper_info.name}: {label} output does not contain the full sequence "
                 "with one residue assignment per sequence position"
             )
-            for position, (res_id, res_name) in enumerate(
-                zip(residue_atom_names, residue_names)
-            ):
+            for position, (res_id, res_name) in enumerate(zip(residue_atom_names, residue_names)):
                 expected_atom_names = {
                     str(atom_name)
                     for element, atom_name in zip(
