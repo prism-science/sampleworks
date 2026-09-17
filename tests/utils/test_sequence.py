@@ -6,6 +6,44 @@ from sampleworks.utils.atom_array_utils import make_normalized_atom_id
 from sampleworks.utils.sequence import apply_sequence_override, validate_seq_with_error
 
 
+@pytest.mark.parametrize("stacked", [False, True])
+def test_override_preserves_insertion_code_residues(stacked):
+    """Map insertion-code residues independently, retaining all coordinate frames.
+
+    Parameters
+    ----------
+    stacked : bool
+        Whether to supply a multi-model structure with shared annotations.
+    """
+    from atomworks.enums import ChainType
+    from biotite.structure import AtomArray, stack
+
+    atoms = AtomArray(6)
+    atoms.chain_id[:] = "A"
+    atoms.res_id[:] = 10
+    atoms.ins_code = np.repeat(["", "A", "B"], 2)
+    atoms.res_name = np.repeat(["ALA", "CYS", "ASP"], 2)
+    atoms.atom_name = np.tile(["N", "CA"], 3)
+    atoms.coord = np.arange(18, dtype=np.float32).reshape(6, 3)
+    array = stack([atoms, atoms.copy()]) if stacked else atoms
+    structure = {
+        "asym_unit": array,
+        "chain_info": {
+            "A": {
+                "chain_type": ChainType.POLYPEPTIDE_L,
+                "processed_entity_canonical_sequence": "ACD",
+            }
+        },
+    }
+
+    updated = apply_sequence_override(structure, "MACDE")["asym_unit"]
+
+    np.testing.assert_array_equal(updated.seq_idx, [1, 1, 2, 2, 3, 3])
+    np.testing.assert_array_equal(updated.coord, array.coord)
+    assert len(np.unique(make_normalized_atom_id(updated))) == 6
+    assert "seq_idx" not in array.get_annotation_categories()
+
+
 def test_sequence_override_updates_protein_chain_without_mutating_input(structure_6b8x: dict):
     """A sequence override should update copied metadata and preserve the input."""
     protein_chain_id = next(
@@ -17,14 +55,50 @@ def test_sequence_override_updates_protein_chain_without_mutating_input(structur
         "processed_entity_canonical_sequence"
     ]
 
-    updated = apply_sequence_override(structure_6b8x, "ACDE")
+    override = original_sequence + "GGG"
+    updated = apply_sequence_override(structure_6b8x, override)
 
     assert updated is not structure_6b8x
-    assert updated["chain_info"][protein_chain_id]["processed_entity_canonical_sequence"] == "ACDE"
+    assert (
+        updated["chain_info"][protein_chain_id]["processed_entity_canonical_sequence"] == override
+    )
     assert (
         structure_6b8x["chain_info"][protein_chain_id]["processed_entity_canonical_sequence"]
         == original_sequence
     )
+
+
+@pytest.mark.parametrize("res_name, sequence", [("MSE", "M"), ("CSO", "C"), ("ASP", "E")])
+def test_override_requires_matching_canonical_residue(res_name, sequence):
+    """Accept canonicalized modifications but reject residue substitutions.
+
+    Parameters
+    ----------
+    res_name : str
+        Observed CCD residue name.
+    sequence : str
+        Candidate one-residue override.
+    """
+    from atomworks.enums import ChainType
+    from biotite.structure import AtomArray
+
+    atoms = AtomArray(1)
+    atoms.chain_id[:] = "A"
+    atoms.res_id[:] = 1
+    atoms.res_name[:] = res_name
+    atoms.atom_name[:] = "CA"
+    structure = {
+        "asym_unit": atoms,
+        "chain_info": {"A": {"chain_type": ChainType.POLYPEPTIDE_L}},
+    }
+
+    if res_name == "ASP":
+        with pytest.raises(ValueError, match="could not be aligned"):
+            apply_sequence_override(structure, sequence)
+    else:
+        updated = apply_sequence_override(structure, sequence)
+        np.testing.assert_array_equal(updated["asym_unit"].seq_idx, [0])
+        np.testing.assert_array_equal(updated["asym_unit"].res_name, [res_name])
 
 
 def test_empty_sequence_preserves_structure_identity(structure_6b8x: dict):
@@ -129,11 +203,9 @@ def test_override_with_no_protein_chain_raises():
 def test_shorter_override_raises(structure_5i09_density: dict):
     """An override shorter than the observed sequence must fail, not silently corrupt."""
     chain_info = structure_5i09_density["chain_info"]
-    protein_chain = next(
-        cid for cid, info in chain_info.items() if info["chain_type"].is_protein()
-    )
+    protein_chain = next(cid for cid, info in chain_info.items() if info["chain_type"].is_protein())
     observed_seq = chain_info[protein_chain]["processed_entity_canonical_sequence"]
-    shorter = observed_seq[:len(observed_seq) // 2]
+    shorter = observed_seq[: len(observed_seq) // 2]
 
     with pytest.raises(ValueError, match="could not be aligned"):
         apply_sequence_override(structure_5i09_density, shorter)
@@ -214,7 +286,7 @@ class TestEntityPolySequence:
         assert len(protein_chains) == 1, "5I09 density CIF should be single-chain"
 
         original_seq = chain_info[protein_chains[0]]["processed_entity_canonical_sequence"]
-        new_seq = "A" * (len(original_seq) + 10)
+        new_seq = original_seq + "A" * 10
         result = apply_sequence_override(structure_5i09_density, new_seq)
         assert (
             result["chain_info"][protein_chains[0]]["processed_entity_canonical_sequence"]
@@ -236,7 +308,7 @@ class TestReconcilerWithSequenceOverride:
     ):
         """After override with the real deposited sequence, seq_idx maps observed
         residues to their correct positions including N-terminal and internal gaps."""
-        from sampleworks.eval.structure_utils import get_asym_unit_from_structure
+        from sampleworks.utils.structure_utils import get_asym_unit_from_structure
 
         chain_info = structure_5i09_density["chain_info"]
         protein_chain = next(
@@ -296,8 +368,8 @@ class TestReconcilerWithSequenceOverride:
         residue range (386 residues) with dense numbering.
         """
         import biotite.structure as struc
-        from sampleworks.eval.structure_utils import get_asym_unit_from_structure
         from sampleworks.utils.atom_reconciler import AtomReconciler
+        from sampleworks.utils.structure_utils import get_asym_unit_from_structure
 
         chain_info = structure_5i09_density["chain_info"]
         protein_chain = next(

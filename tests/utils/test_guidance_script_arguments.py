@@ -38,18 +38,33 @@ def test_resolve_sequence_arg_returns_trimmed_literal_sequence():
     assert resolve_sequence_arg(" ACDEFG ") == "ACDEFG"
 
 
+def test_resolve_sequence_arg_accepts_literal_longer_than_filename_limit():
+    """Literal sequences longer than NAME_MAX (255) must not be stat'ed as paths."""
+    sequence = "ACDEFGHIKLMNPQRSTVWY" * 20
+    assert resolve_sequence_arg(sequence) == sequence
+
+
 def test_resolve_sequence_arg_reads_relative_fasta_from_root(tmp_path: Path):
     """Relative FASTA paths should be resolved against the supplied root."""
     fasta = tmp_path / "sequence.fasta"
-    fasta.write_text("; comment\n  >protein\n AC D \n EF\n")
+    fasta.write_text("; leading comment\n>protein\nACD\n; internal comment\nEF\n")
 
     assert resolve_sequence_arg("sequence.fasta", tmp_path) == "ACDEF"
 
 
-def test_resolve_sequence_arg_rejects_multiple_fasta_records(tmp_path: Path):
-    """A sequence argument should not silently concatenate FASTA records."""
+@pytest.mark.parametrize("second_header", ["second", "first"])
+def test_resolve_sequence_arg_rejects_multiple_fasta_records(tmp_path: Path, second_header: str):
+    """Reject multiple records even when headers repeat.
+
+    Parameters
+    ----------
+    tmp_path : Path
+        Temporary directory for the FASTA input.
+    second_header : str
+        Distinct or repeated header for the second record.
+    """
     fasta = tmp_path / "sequences.fasta"
-    fasta.write_text(">first\nACD\n>second\nEFG\n")
+    fasta.write_text(f">first\nACD\n>{second_header}\nEFG\n")
 
     # TODO: eventually we will need to scale this to multiple sequences and ligands
     # which will invalidate this test

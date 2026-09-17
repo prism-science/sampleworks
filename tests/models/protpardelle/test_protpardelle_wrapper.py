@@ -54,6 +54,8 @@ from sampleworks.utils.structure_utils import get_asym_unit_from_structure
 
 SEQ_A = "ACDEFGHIKL"
 SEQ_B = "MNPQRSTVWY"
+# An override must extend the observed sequence, not contradict it.
+SEQ_A_EXTENDED = SEQ_A + SEQ_B
 
 # A real crystallographic structure (hen egg-white lysozyme) shipped as a test
 # fixture; used to verify atom37 round-tripping preserves real atom ordering.
@@ -140,9 +142,9 @@ class TestExtractProteinSequences:
     def test_sequence_override_replaces_structure_sequence(self):
         from sampleworks.utils.sequence import apply_sequence_override
 
-        structure = apply_sequence_override(_protein_structure(SEQ_A), SEQ_B)
+        structure = apply_sequence_override(_protein_structure(SEQ_A), SEQ_A_EXTENDED)
 
-        assert extract_protein_sequences(structure) == [SEQ_B]
+        assert extract_protein_sequences(structure) == [SEQ_A_EXTENDED]
 
     def test_skips_non_protein_chains(self):
         structure = _protein_structure(SEQ_A)
@@ -181,10 +183,10 @@ class TestAnnotateStructure:
     def test_sequence_override_applied_upstream_reaches_annotated(self):
         from sampleworks.utils.sequence import apply_sequence_override
 
-        structure = apply_sequence_override(_protein_structure(SEQ_A), SEQ_B)
+        structure = apply_sequence_override(_protein_structure(SEQ_A), SEQ_A_EXTENDED)
         annotated = annotate_structure_for_protpardelle(structure)
 
-        assert extract_protein_sequences(annotated) == [SEQ_B]
+        assert extract_protein_sequences(annotated) == [SEQ_A_EXTENDED]
 
 
 class TestProtocolConformance:
@@ -198,6 +200,53 @@ class TestProtocolConformance:
 
 
 class TestFeaturize:
+    def test_override_serializes_generated_atoms_as_occupied(
+        self, protpardelle_wrapper, tmp_path, structure_5i09_density, seq_5i09_deposited
+    ):
+        """Preserve occupied full-sequence atoms through trajectory serialization.
+
+        Parameters
+        ----------
+        protpardelle_wrapper : ProtpardelleWrapper
+            Wrapper backed by the small randomly initialized model.
+        tmp_path : Path
+            Temporary output directory.
+        structure_5i09_density : dict
+            Atomworks-parsed structure with missing residues.
+        seq_5i09_deposited : str
+            Full deposited sequence including the unobserved residues.
+        """
+        from sampleworks.utils.atom_array_utils import parse_structure
+        from sampleworks.utils.guidance_constants import GuidanceType
+        from sampleworks.utils.guidance_script_utils import save_trajectory
+        from sampleworks.utils.sequence import apply_sequence_override
+
+        structure = apply_sequence_override(structure_5i09_density, seq_5i09_deposited)
+        annotated = annotate_structure_for_protpardelle(structure)
+        features = protpardelle_wrapper.featurize(annotated)
+        template = features.conditioning.model_atom_array
+        assert template is not None
+        assert np.all(template.occupancy > 0)
+        starts = struc.get_residue_starts(template)
+        assert template.res_name[starts].tolist() == [
+            ProteinSequence.convert_letter_1to3(aa) for aa in seq_5i09_deposited
+        ]
+        prior = protpardelle_wrapper.initialize_from_prior(1, features=features)
+        save_trajectory(
+            scaler_type=GuidanceType.PURE_GUIDANCE,
+            trajectory=[prior],
+            atom_array=template,
+            output_dir=tmp_path,
+            subdir_name="denoised",
+            save_every=1,
+        )
+        written = parse_structure(tmp_path / "trajectory" / "denoised" / "trajectory_0.cif")
+        array = get_asym_unit_from_structure(written, atom_array_index=0)
+        assert len(array) == len(template) == prior.shape[1]
+        assert np.all(array.occupancy > 0)
+        np.testing.assert_array_equal(array.res_name, template.res_name)
+        np.testing.assert_array_equal(array.atom_name, template.atom_name)
+
     def test_returns_generative_model_input(self, protpardelle_wrapper):
         structure = _protein_structure(SEQ_A)
         features = protpardelle_wrapper.featurize(structure)

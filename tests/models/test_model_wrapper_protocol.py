@@ -299,13 +299,13 @@ class TestFullSequenceAtomCoverage:
         atoms from different sequence positions into one output residue.
         """
         from biotite.structure.info import residue as ccd_residue
-        from sampleworks.eval.structure_utils import (
-            get_asym_unit_from_structure,
-            process_structure_to_trajectory_input,
-        )
         from sampleworks.utils.atom_array_utils import parse_structure
         from sampleworks.utils.guidance_constants import GuidanceType
         from sampleworks.utils.guidance_script_utils import save_trajectory
+        from sampleworks.utils.structure_utils import (
+            get_asym_unit_from_structure,
+            process_structure_to_trajectory_input,
+        )
 
         fixture_name = get_fixture_name_for_wrapper(wrapper_info)
         wrapper = request.getfixturevalue(fixture_name)
@@ -339,9 +339,7 @@ class TestFullSequenceAtomCoverage:
             subdir_name="denoised",
             save_every=1,
         )
-        written = parse_structure(
-            temp_output_dir / "trajectory" / "denoised" / "trajectory_0.cif"
-        )
+        written = parse_structure(temp_output_dir / "trajectory" / "denoised" / "trajectory_0.cif")
         written_atom_array = get_asym_unit_from_structure(written, atom_array_index=0)
 
         assert len(written_atom_array) == len(model_atom_array)
@@ -364,6 +362,9 @@ class TestFullSequenceAtomCoverage:
         ]
         for array, label in ((model_atom_array, "model"), (written_atom_array, "written")):
             chain_mask = np.asarray(array.chain_id) == protein_chain
+            assert np.all(array.occupancy[chain_mask] > 0), (
+                f"{wrapper_info.name}: {label} output contains unoccupied protein atoms"
+            )
             residue_names: list[str] = []
             residue_atom_names: dict[int, list[str]] = {}
             for res_id, res_name, atom_name in zip(
@@ -381,9 +382,7 @@ class TestFullSequenceAtomCoverage:
                 f"{wrapper_info.name}: {label} output does not contain the full sequence "
                 "with one residue assignment per sequence position"
             )
-            for position, (res_id, res_name) in enumerate(
-                zip(residue_atom_names, residue_names)
-            ):
+            for position, (res_id, res_name) in enumerate(zip(residue_atom_names, residue_names)):
                 expected_atom_names = {
                     str(atom_name)
                     for element, atom_name in zip(

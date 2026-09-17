@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import functools
 import os
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from atomworks.io.utils.ccd import ChainType
+from atomworks.io.utils.sequence import get_1_from_3_letter_code
 from biotite.sequence import ProteinSequence
 from biotite.sequence.align import align_optimal, SubstitutionMatrix
+from biotite.sequence.io.fasta import FastaFile
+from biotite.structure import get_residue_starts
 from biotite.structure.info import residue as ccd_residue
 
 
@@ -33,9 +38,7 @@ def expected_heavy_atom_count(sequence: str) -> int:
     int
         Sum of heavy atoms across all residues, using CCD definitions.
     """
-    return sum(
-        _heavy_atoms_per_residue(ProteinSequence.convert_letter_1to3(aa)) for aa in sequence
-    )
+    return sum(_heavy_atoms_per_residue(ProteinSequence.convert_letter_1to3(aa)) for aa in sequence)
 
 
 def validate_seq_with_error(sequence: str) -> None:
@@ -93,26 +96,17 @@ def resolve_sequence_arg(
         path = Path(root).expanduser() / path
 
     _FASTA_EXTENSIONS = {".fasta", ".fa", ".faa", ".fas"}
-    if path.is_file() and path.suffix.lower() in _FASTA_EXTENSIONS:
-        sequence_lines: list[str] = []
-        record_count = 0
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith(">"):
-                record_count += 1
-                if record_count > 1:
-                    # TODO: Deal with ligands and multichain
-                    raise ValueError(f"FASTA file contains multiple sequences: {path}")
-                continue
-            if line.startswith(";") and not sequence_lines:
-                continue
-            sequence_lines.append("".join(line.split()))
-
-        if not sequence_lines:
+    # Check the suffix first: stat() on a literal sequence > 255 chars raises ENAMETOOLONG.
+    if path.suffix.lower() in _FASTA_EXTENSIONS and path.is_file():
+        fasta = list(islice(FastaFile.read_iter(path), 2))
+        if len(fasta) == 0:
             raise ValueError(f"FASTA file contains no sequence: {path}")
-        sequence = "".join(sequence_lines)
+        if len(fasta) > 1:
+            # TODO: Deal with ligands and multichain
+            raise ValueError(f"FASTA file contains multiple sequences: {path}")
+        sequence = fasta[0][1].strip()
+        if not sequence:
+            raise ValueError(f"FASTA file contains no sequence: {path}")
 
     validate_seq_with_error(sequence)
 
@@ -180,17 +174,14 @@ def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> 
     chain_id_str = protein_chain_ids[0]
     chain_ids = np.asarray(arr.chain_id)
     res_ids = np.asarray(arr.res_id)
-    res_names = np.asarray(arr.res_name)
     chain_mask = chain_ids == chain_id_str
 
     # Build observed 1-letter sequence in residue order.
-    chain_res_ids = res_ids[chain_mask]
-    chain_res_names = res_names[chain_mask]
-    _, first_idx = np.unique(chain_res_ids, return_index=True)
-    ordered_idx = np.sort(first_idx)
-    unique_rids = chain_res_ids[ordered_idx]
+    chain_array = arr[..., chain_mask]
+    starts = get_residue_starts(chain_array, add_exclusive_stop=True)
     observed_seq = "".join(
-        ProteinSequence.convert_letter_3to1(n) for n in chain_res_names[ordered_idx]
+        get_1_from_3_letter_code(n, ChainType.POLYPEPTIDE_L, use_closest_canonical=True)
+        for n in chain_array.res_name[starts[:-1]]
     )
 
     # Align observed → override to map each observed residue to its position
@@ -201,16 +192,18 @@ def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> 
     alignments = align_optimal(obs_prot, full_prot, matrix, terminal_penalty=False)
     trace = alignments[0].trace
 
-    rid_to_seq_idx: dict[int, int] = {}
+    residue_seq_idx = np.full(len(starts) - 1, -1, dtype=np.int64)
     for row in trace:
         obs_i, full_i = int(row[0]), int(row[1])
         if obs_i != -1 and full_i != -1:
-            rid_to_seq_idx[int(unique_rids[obs_i])] = full_i
+            if observed_seq[obs_i] != sequence[full_i]:
+                continue
+            residue_seq_idx[obs_i] = full_i
 
     # Every observed residue must map to the override sequence.  Unmapped
     # residues (seq_idx == -1) would corrupt downstream tensor indexing in
     # model wrappers (Protpardelle, RF3) that use seq_idx as array indices.
-    unmapped = [int(r) for r in unique_rids if int(r) not in rid_to_seq_idx]
+    unmapped = chain_array.res_id[starts[:-1]][residue_seq_idx < 0].tolist()
     if unmapped:
         raise ValueError(
             f"Sequence override failed: {len(unmapped)} observed residue(s) could not be "
@@ -222,9 +215,7 @@ def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> 
     # Annotate atoms with seq_idx: aligned position for the protein chain,
     # -1 elsewhere (make_normalized_atom_id falls back to dense rank for -1).
     seq_idx = np.full(len(res_ids), -1, dtype=np.int64)
-    seq_idx[chain_mask] = np.array(
-        [rid_to_seq_idx[int(r)] for r in chain_res_ids], dtype=np.int64
-    )
+    seq_idx[chain_mask] = np.repeat(residue_seq_idx, np.diff(starts))
     updated_arr = arr.copy()
     updated_arr.set_annotation("seq_idx", seq_idx)
 

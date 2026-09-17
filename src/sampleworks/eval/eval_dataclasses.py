@@ -6,7 +6,7 @@ import numpy as np
 from loguru import logger
 from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.volume import XMap
 from sampleworks.eval.occupancy_utils import occupancy_to_str
-from sampleworks.utils.guidance_script_arguments import resolve_sequence_arg
+from sampleworks.utils.sequence import resolve_sequence_arg
 
 
 @dataclass
