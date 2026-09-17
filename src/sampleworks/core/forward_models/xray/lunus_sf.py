@@ -111,11 +111,17 @@ DEFAULT_GRID_RATE = 1.5
 # compute_fcalc. 0.0 disables it.
 # Effective B needed for the splat to be sampled adequately: the real-space
 # Gaussian of an atom at B has width sigma^2 = B / (8 pi^2), and the criterion is
-# sigma >= one grid spacing. Measured against SFcalculator at d_min 2.2 A, this
-# takes 6B8X (B_min 2.0, two thirds of atoms under B 10) from R 0.1007 with no
-# blur to 0.0000, and 1VME chain A (B_min 12.1) from 0.0009 to 0.0001. gemmi's
-# Refmac-compatible rule recommends effective B 25.8-46.2 over the same two
-# structures and resolutions, so this sits in the established range.
+# sigma >= one grid spacing.
+#
+# Checked against this module's own converged calculation rather than against
+# another engine, so the number isolates grid sampling: on 6B8X at d_min 2.2 A,
+# taking rate 4.5 with no blur as the reference (which agrees with rate 3.0 to
+# R 0.0018), the default rate 1.5 gives R 0.1007 with no blur and R 0.00004 with
+# the recommended 40.5 -- closer to the reference than the reference is to the
+# next grid down. Comparing to SFcalculator gives the same 0.1007 at blur 0,
+# which is what says that discrepancy was sampling and not the engines
+# disagreeing. gemmi's Refmac-compatible rule recommends effective B 25.8-46.2
+# over 6B8X and 1VME at 1.8 and 2.2 A, so this sits in the established range.
 B_TARGET_COEFFICIENT = 8.0 * np.pi**2
 
 

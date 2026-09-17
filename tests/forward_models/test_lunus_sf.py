@@ -129,12 +129,17 @@ def test_cell_volume_matches_gemmi_at_either_dtype(atom_array, dtype):
 class TestRecommendedBlur:
     """The blur that makes the splat adequately sampled.
 
-    Measured against SFcalculator at d_min 2.2 A on 2026-09-17: 6B8X (B_min 2.0,
-    two thirds of its atoms under B 10) goes from R 0.1007 with no blur to 0.0000
-    with the recommended 40.5, and 1VME chain A (B_min 12.1) from 0.0009 to
-    0.0001 with 30.4. gemmi's Refmac-compatible rule recommends an effective B of
-    25.8-46.2 over the same structures and resolutions, so these sit in the
-    established range.
+    Validated against a converged calculation rather than another engine, so the
+    numbers isolate grid sampling. On 6B8X at d_min 2.2 A on 2026-09-17, with
+    rate 4.5 and no blur as the reference (itself agreeing with rate 3.0 to
+    R 0.0018): the default rate 1.5 gives R 0.1007 with no blur and R 0.00004
+    with the recommended 40.5.
+
+    The comparison against SFcalculator gives the same 0.1007 at blur 0, which is
+    what identifies that discrepancy as sampling rather than the engines
+    disagreeing; there it goes to 0.0000 blurred, and 1VME chain A (B_min 12.1)
+    from 0.0009 to 0.0001. gemmi's Refmac-compatible rule recommends an effective
+    B of 25.8-46.2 over those structures and resolutions.
     """
 
     def test_raises_the_sharpest_atom_to_the_sampling_target(self):
