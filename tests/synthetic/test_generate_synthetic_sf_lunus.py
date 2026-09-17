@@ -281,17 +281,22 @@ class TestCrossEngineAgreement:
     Thresholds are provisional; see the module docstring.
     """
 
-    # Measured on 1VME chain A at 2.2 A, 47499 reflections: correlation
-    # 0.999999, R 0.0009, scale 1.0000 -- better than lunus's own agreement with
-    # gemmi (0.999989 / 0.0077), the two engines' shared IT92 coefficients and
-    # identical atom input leaving little room to disagree. Bounds are set an
-    # order of magnitude looser than measured, to tolerate platform variation
-    # without admitting a real regression.
+    # Measured on 1VME chain A at 2.2 A, 47499 reflections: correlation 1.000000,
+    # R 0.0001 -- the two engines' shared IT92 coefficients and identical atom
+    # input leave little room to disagree. Bounds are set an order of magnitude
+    # looser than measured, to tolerate platform variation without admitting a
+    # real regression.
     #
-    # Both improve monotonically with resolution (R 0.0119 / 0.0026 / 0.0009 at
-    # 3.0 / 2.5 / 2.2 A, extrapolating onto the 0.0002 recorded at 1.8 A), so
-    # these bounds are tied to CROSS_ENGINE_RESOLUTION and must be remeasured
+    # Remeasured 2026-09-17, when build_setup began choosing the blur itself
+    # (recommended_blur). At blur 0 the same comparison gave correlation 0.999999
+    # and R 0.0009, and R improved monotonically with resolution (0.0119 / 0.0026
+    # / 0.0009 at 3.0 / 2.5 / 2.2 A); with the blur applied the grid-sampling term
+    # is gone and what is left is not resolution-limited in the same way. These
+    # bounds are still tied to CROSS_ENGINE_RESOLUTION and should be remeasured
     # if it moves.
+    #
+    # The blur matters much more for a sharp structure than for this one: on 6B8X
+    # (B_min 2.0) the same comparison goes from R 0.1007 to 0.0000.
     MIN_CORRELATION = 0.9999
     MAX_R_FACTOR = 0.009
 

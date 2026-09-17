@@ -24,7 +24,11 @@ pytest.importorskip("lunus.sf", reason="lunus[sf] not installed")
 
 # Imported below the guard, not above it: lunus_sf imports lunus.sf at module
 # scope, so without lunus this has to skip rather than fail collection.
-from sampleworks.core.forward_models.xray.lunus_sf import build_setup
+from sampleworks.core.forward_models.xray.lunus_sf import (
+    B_TARGET_COEFFICIENT,
+    build_setup,
+    recommended_blur,
+)
 
 
 CELLS = {
@@ -120,3 +124,48 @@ def test_cell_volume_matches_gemmi_at_either_dtype(atom_array, dtype):
     cell_params = CELLS["triclinic"]
     setup = setup_for(atom_array, cell_params, dtype=dtype)
     assert setup.cell_volume == pytest.approx(gemmi.UnitCell(*cell_params).volume, abs=1e-6)
+
+
+class TestRecommendedBlur:
+    """The blur that makes the splat adequately sampled.
+
+    Measured against SFcalculator at d_min 2.2 A on 2026-09-17: 6B8X (B_min 2.0,
+    two thirds of its atoms under B 10) goes from R 0.1007 with no blur to 0.0000
+    with the recommended 40.5, and 1VME chain A (B_min 12.1) from 0.0009 to
+    0.0001 with 30.4. gemmi's Refmac-compatible rule recommends an effective B of
+    25.8-46.2 over the same structures and resolutions, so these sit in the
+    established range.
+    """
+
+    def test_raises_the_sharpest_atom_to_the_sampling_target(self):
+        """The blur is chosen so the minimum effective B reaches the target set by
+        the grid spacing, and is keyed on the sharpest atom alone."""
+        b_factors = np.array([2.0, 30.0, 90.0])
+        blur = recommended_blur(b_factors, resolution=2.2, rate=1.5)
+
+        spacing = 2.2 / (2 * 1.5)
+        assert b_factors.min() + blur == pytest.approx(B_TARGET_COEFFICIENT * spacing**2)
+
+    def test_is_zero_when_every_atom_is_already_smooth(self):
+        """A structure with no sharp atom needs no blur, and blur is not free: it
+        is divided back out with exp(+blur / (4 d^2)), amplifying any error."""
+        assert recommended_blur(np.array([60.0, 90.0]), resolution=2.2) == 0.0
+
+    def test_grows_with_resolution(self):
+        """Coarser d_min means coarser grid spacing, so more blur is needed for
+        the same structure -- the requirement follows the grid, not the data."""
+        b_factors = np.array([10.0, 20.0])
+        assert recommended_blur(b_factors, 3.0) > recommended_blur(b_factors, 1.8)
+
+    def test_build_setup_applies_it_by_default(self, atom_array):
+        """``blur=None`` is the default, so a caller that never thinks about
+        sampling still gets a resolvable splat. ``0.0`` stays available."""
+        sharp = atom_array.copy()
+        sharp.b_factor = np.full(sharp.array_length(), 2.0)
+
+        auto = setup_for(sharp, CELLS["monoclinic"])
+        explicit_off = setup_for(sharp, CELLS["monoclinic"], blur=0.0)
+
+        assert auto.blur == pytest.approx(recommended_blur(sharp.b_factor, 2.0))
+        assert auto.blur > 0.0
+        assert explicit_off.blur == 0.0

@@ -109,7 +109,47 @@ DEFAULT_GRID_RATE = 1.5
 # Isotropic B applied on top of each atom's own, widening the Gaussians so the
 # grid samples them adequately, then divided back out analytically in
 # compute_fcalc. 0.0 disables it.
-DEFAULT_BLUR = 0.0
+# Effective B needed for the splat to be sampled adequately: the real-space
+# Gaussian of an atom at B has width sigma^2 = B / (8 pi^2), and the criterion is
+# sigma >= one grid spacing. Measured against SFcalculator at d_min 2.2 A, this
+# takes 6B8X (B_min 2.0, two thirds of atoms under B 10) from R 0.1007 with no
+# blur to 0.0000, and 1VME chain A (B_min 12.1) from 0.0009 to 0.0001. gemmi's
+# Refmac-compatible rule recommends effective B 25.8-46.2 over the same two
+# structures and resolutions, so this sits in the established range.
+B_TARGET_COEFFICIENT = 8.0 * np.pi**2
+
+
+def recommended_blur(
+    b_factors: np.ndarray, resolution: float, rate: float = DEFAULT_GRID_RATE
+) -> float:
+    """Smallest blur that makes the sharpest atom resolvable on the grid.
+
+    The grid spacing follows ``resolution`` and ``rate``, so whether the splat is
+    adequately sampled depends on the *sharpest* atom: it sets the requirement,
+    and everything smoother is already satisfied. Raising the minimum effective
+    B to :data:`B_TARGET_COEFFICIENT` times the squared spacing is therefore the
+    minimal choice, and minimal matters -- the blur is divided back out with
+    ``exp(+blur / (4 d^2))``, which amplifies whatever error is present, by more
+    at high resolution.
+
+    Parameters
+    ----------
+    b_factors
+        Per-atom B-factors, Å².
+    resolution
+        High-resolution limit (d_min) in Å.
+    rate
+        Grid oversampling rate; spacing is ``d_min / (2 * rate)``.
+
+    Returns
+    -------
+    float
+        Blur to add, Å². Zero when the sharpest atom is already smooth enough.
+    """
+    spacing = resolution / (2.0 * rate)
+    b_target = B_TARGET_COEFFICIENT * spacing**2
+    b_min = float(np.min(np.asarray(b_factors, dtype=np.float64)))
+    return max(0.0, b_target - b_min)
 
 
 def space_group_operations(
@@ -276,7 +316,7 @@ def build_setup(
     resolution: float,
     *,
     rate: float = DEFAULT_GRID_RATE,
-    blur: float = DEFAULT_BLUR,
+    blur: float | None = None,
     device: torch.device | str = "cpu",
     dtype: torch.dtype = torch.float32,
 ) -> LunusSetup:
@@ -307,6 +347,9 @@ def build_setup(
         Grid oversampling rate; spacing is ``d_min / (2 * rate)``.
     blur
         Extra isotropic B for grid sampling, divided back out in the FFT.
+        ``None`` takes :func:`recommended_blur`, the smallest blur that resolves
+        the sharpest atom on this grid. Pass ``0.0`` to disable it, which is only
+        safe when no atom is sharp relative to the spacing.
     device, dtype
         Torch placement for the kernel tensors.
 
@@ -383,6 +426,15 @@ def build_setup(
             "space-group constraints."
         )
     grid_ops = build_grid_ops(rotations, translations, grid_shape)
+
+    if blur is None:
+        blur = recommended_blur(b_factors, resolution, rate)
+        if blur > 0.0:
+            logger.info(
+                f"Blur {blur:.1f} A^2 added for grid sampling: the sharpest atom is at "
+                f"B {float(np.min(b_factors)):.1f} and the grid spacing wants an effective "
+                f"B of {blur + float(np.min(b_factors)):.1f}."
+            )
 
     atom_A, atom_lam, elem_offsets, atom_radius_ang, taper_width, _ = build_atom_kernels_torch(
         elements,
