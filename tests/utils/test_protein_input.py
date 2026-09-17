@@ -61,7 +61,8 @@ class TestSequenceColumn:
             ProteinInput.from_csv(csv_path)
 
     def test_reports_an_empty_name_before_checking_the_sequence(self, inputs_dir):
-        csv_path = write_csv(inputs_dir, f"{HEADER},sequence", ",s.cif,d.ccp4,1.8,ACDE")
+        """Report the missing required name before an invalid optional sequence."""
+        csv_path = write_csv(inputs_dir, f"{HEADER},sequence", ",s.cif,d.ccp4,1.8,absent.fasta")
 
         with pytest.raises(ValueError, match="Protein name must not be empty"):
             ProteinInput.from_csv(csv_path)

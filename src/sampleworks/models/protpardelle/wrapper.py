@@ -629,6 +629,7 @@ class ProtpardelleWrapper:
                 fix_formal_charges=False,
                 fix_bond_types=False,
             )
+            expanded.occupancy[:] = 1.0
             expanded_seq_idx = np.empty(len(expanded), dtype=np.int64)
             for chain_id in protein_chain_ids:
                 chain_mask = np.asarray(expanded.chain_id) == chain_id

@@ -64,7 +64,11 @@ class TestCreateBoltzInputFromStructure:
         """The sequence override should reach the YAML."""
         from sampleworks.utils.sequence import apply_sequence_override
 
-        sequence = "ACDEFG"
+        chain_info = structure_6b8x["chain_info"]
+        protein_chain_id = next(
+            cid for cid, info in chain_info.items() if info["chain_type"].is_protein()
+        )
+        sequence = chain_info[protein_chain_id]["processed_entity_canonical_sequence"] + "GGG"
         overridden = apply_sequence_override(structure_6b8x, sequence)
         yaml_path = create_boltz_input_from_structure(
             overridden,
