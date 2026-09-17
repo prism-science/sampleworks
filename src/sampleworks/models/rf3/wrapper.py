@@ -8,7 +8,8 @@ import numpy as np
 import torch
 from atomworks.enums import ChainType
 from atomworks.ml.samplers import LoadBalancedDistributedSampler
-from biotite.structure import AtomArray, AtomArrayStack
+from biotite.sequence import ProteinSequence
+from biotite.structure import AtomArray, AtomArrayStack, concatenate
 from jaxtyping import Float
 from loguru import logger
 from rf3.inference_engines import RF3InferenceEngine
@@ -16,13 +17,12 @@ from rf3.loss.loss import calc_chiral_grads_flat_impl
 from rf3.model.RF3 import RF3WithConfidence
 from rf3.trainers.rf3 import assert_no_nans, RF3TrainerWithConfidence
 from rf3.utils.inference import InferenceInput, InferenceInputDataset
-from torch import Tensor
-from torch.utils.data import DataLoader
-
 from sampleworks.models.protocol import GenerativeModelInput
 from sampleworks.utils.framework_utils import match_batch
 from sampleworks.utils.guidance_constants import StructurePredictor
 from sampleworks.utils.msa import MSAManager
+from torch import Tensor
+from torch.utils.data import DataLoader
 
 
 # Attached to the trainer-owned model after RF3InferenceEngine initialization in
@@ -83,9 +83,9 @@ class RF3Config:
         coordinates into out-of-distribution chiral configurations. Default is False.
     track_chiral_features : bool
         If True, log the chiral gradient L2 norm at each denoising step. The
-        chiral gradient (output of calc_chiral_grads_flat_impl on the
-        EDM scaled coordinates) is the input feature to the model's chiral
-        processing layer. Uses original features when disable_chiral_features is True to
+        chiral gradient (output of calc_chiral_grads_flat_impl on the EDM scaled
+        coordinates) is the input feature to the model's chiral processing layer.
+        Uses original features when disable_chiral_features is True to
         determine if guidance would be breaking them (e.g. magnitude is much larger when guidance
         is on than off). Default is False.
     """
@@ -94,6 +94,112 @@ class RF3Config:
     recycling_steps: int | None = None
     disable_chiral_features: bool = False
     track_chiral_features: bool = False
+
+
+def _add_placeholder_atoms_for_override(
+    atom_array: AtomArray | AtomArrayStack, chain_info: dict
+) -> AtomArray | AtomArrayStack:
+    """Add CA placeholder atoms for unobserved residues from a sequence override.
+
+    When ``apply_sequence_override`` has been applied, the atom array's protein
+    chain has ``seq_idx`` annotations mapping observed atoms to positions in the
+    full override sequence.  Positions absent from the atom array get a single
+    CA atom with NaN coordinates and zero occupancy so RF3's pipeline creates
+    tokens for them.
+
+    Parameters
+    ----------
+    atom_array : AtomArray or AtomArrayStack
+        The structure's atom representation, potentially with ``seq_idx``.
+    chain_info : dict
+        Chain metadata including ``processed_entity_canonical_sequence``.
+
+    Returns
+    -------
+    AtomArray or AtomArrayStack
+        The array with placeholder atoms appended (or unchanged if no override
+        is active).  For ``AtomArrayStack`` inputs, only frame 0 is used;
+        the result is a single-frame stack.
+    """
+    arr = atom_array[0] if isinstance(atom_array, AtomArrayStack) else atom_array
+    if "seq_idx" not in arr.get_annotation_categories():
+        return atom_array
+
+    protein_chains = [
+        (cid, info) for cid, info in chain_info.items() if info["chain_type"].is_protein()
+    ]
+    if not protein_chains:
+        return atom_array
+
+    placeholders: list[AtomArray] = []
+    for chain_id, info in protein_chains:
+        seq = info.get("processed_entity_canonical_sequence", "")
+        if not seq:
+            continue
+        chain_mask = np.asarray(arr.chain_id) == chain_id
+        chain_seq_idx = arr.seq_idx[chain_mask]
+        present = set(int(s) for s in chain_seq_idx)
+        missing = sorted(set(range(len(seq))) - present)
+        if not missing:
+            continue
+
+        # Start from one-based sequence positions, but keep them distinct from
+        # deposited residue IDs. PDB residue numbering is not guaranteed to be
+        # a full-sequence namespace when residues are absent from the structure.
+        observed_res_ids = set(int(r) for r in arr.res_id[chain_mask])
+
+        ref_idx = np.where(chain_mask)[0][0]
+        ref_atom = arr[ref_idx : ref_idx + 1]
+        anno_cats = ref_atom.get_annotation_categories()
+
+        for seq_idx_val in missing:
+            candidate = seq_idx_val + 1
+            while candidate in observed_res_ids:
+                candidate += 1000
+            observed_res_ids.add(candidate)
+
+            aa_3 = ProteinSequence.convert_letter_1to3(seq[seq_idx_val])
+            placeholder = ref_atom.copy()
+            placeholder.atom_name[:] = "CA"
+            placeholder.res_name[:] = aa_3
+            placeholder.res_id[:] = candidate
+            placeholder.element[:] = "C"
+            placeholder.coord[:] = np.nan
+            if "occupancy" in anno_cats:
+                placeholder.occupancy[:] = 0.0
+            if "b_factor" in anno_cats:
+                placeholder.b_factor[:] = 0.0
+            if "seq_idx" in anno_cats:
+                placeholder.seq_idx[:] = seq_idx_val
+            if "hetero" in anno_cats:
+                placeholder.hetero[:] = False
+            if "is_backbone_atom" in anno_cats:
+                setattr(placeholder, "is_backbone_atom", np.array([True], dtype=bool))
+            placeholders.append(placeholder)
+
+    if not placeholders:
+        return atom_array
+
+    result = concatenate([arr] + placeholders)
+
+    # RF3 preserves the input atom order when it builds its model atom array.
+    # Inserted placeholders were appended above, so restore sequence order within
+    # each protein chain while preserving the original atom order within residues.
+    protein_chain_ids = {chain_id for chain_id, info in protein_chains}
+    ordered_indices: list[int] = []
+    for chain_id in dict.fromkeys(np.asarray(result.chain_id).tolist()):
+        chain_indices = np.flatnonzero(np.asarray(result.chain_id) == chain_id)
+        if chain_id in protein_chain_ids:
+            chain_seq_idx = np.asarray(result.seq_idx)[chain_indices]
+            chain_indices = chain_indices[np.argsort(chain_seq_idx, kind="stable")]
+        ordered_indices.extend(chain_indices.tolist())
+    result = result[np.asarray(ordered_indices, dtype=np.int64)]
+
+    if isinstance(atom_array, AtomArrayStack):
+        from biotite.structure import stack
+
+        return stack([result])
+    return result
 
 
 def annotate_structure_for_rf3(
@@ -366,6 +472,8 @@ class RF3Wrapper:
         logger.info(f"Using MSA paths: {msa_path}")
 
         chain_info = add_msa_to_chain_info(chain_info, msa_path)
+
+        atom_array = _add_placeholder_atoms_for_override(atom_array, chain_info)
 
         inference_input = InferenceInput.from_atom_array(atom_array, chain_info=chain_info)
 

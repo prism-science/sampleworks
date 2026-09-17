@@ -45,6 +45,28 @@ from tests.mocks import MockFlowModelWrapper, MockStepScaler
 from tests.mocks.rewards import MockGradientRewardFunction
 
 
+@pytest.fixture
+def seq_5i09_deposited() -> str:
+    """Return the deposited 386-residue sequence for PDB 5I09 chain A.
+
+    Returns
+    -------
+    str
+        The deposited sequence, including the residues absent from the density
+        input structure.
+    """
+    return (
+        "MVEATAQETDRPRFSFSIAAREGKARTGTIEMKRGVIRTPAFMPVGTAAT"
+        "VKALKPETVRATGADIILGNTYHLMLRPGAERIAKLGGLHSFMGWDRPI"
+        "LTDSGGYQVMSLSSLTKQSEEGVTFKSHLDGSRHMLSPERSIEIQHLLG"
+        "SDIVMAFDECTPYPATPSRAASSMERSMRWAKRSRDAFDSRKEQAENAAL"
+        "FGIQQGSVFENLRQQSADALAEIGFDGYAVGGLAVGEGQDEMFRVLDFSVP"
+        "MLPDDKPHYLMGVGKPDDIVGAVERGIDMFDCVLPTRSGRNGQAFTWDG"
+        "PINIRNARFSEDLKPLDSECHCAVCQKWSRAYIHHLIRAGEILGAMLMTE"
+        "HNIAFYQQLMQKIRDSISEGRFSQFAQDFRARYFARNS"
+    )
+
+
 if TYPE_CHECKING:
     from sampleworks.models.boltz.wrapper import (
         Boltz1Wrapper,
@@ -699,6 +721,8 @@ def protpardelle_checkpoint_path() -> Path:
     # if the user specifies a path to the model_params directory, use that instead.
     path = Path(os.environ.get("PROTPARDELLE_MODEL_PARAMS", builtin_path))
     path = path / "weights/cc89_epoch415.pth"
+    if not path.exists():
+        pytest.skip(f"Protpardelle checkpoint not found at {path}")
     return path
 
 

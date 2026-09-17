@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from sampleworks.utils.guidance_constants import GuidanceType, StructurePredictor
+from sampleworks.utils.sequence import resolve_sequence_arg
 
 
 # Baked-in checkpoint paths (Docker image), ACTL shared-storage paths, and
@@ -232,6 +233,7 @@ class GuidanceConfig:
     alignment_reverse_diffusion: bool | None = None
     recycling_steps: int | None = None
     num_diffusion_steps: int = 200
+    sequence: str | None = None
 
     # DO NOT remove the **kwargs, it is for compatibility with argparse.
     def add_argument(self, name: str, default: Any = None, **kwargs):
@@ -349,6 +351,7 @@ class GuidanceConfig:
             augmentation=args.augmentation,
             align_to_input=args.align_to_input,
             alignment_reverse_diffusion=args.alignment_reverse_diffusion,
+            sequence=resolve_sequence_arg(args.sequence),
         )
 
         # __post_init__ already set defaults for model/guidance-specific
@@ -427,6 +430,14 @@ def add_generic_args(parser: argparse.ArgumentParser | GuidanceConfig):
     """Add CLI arguments shared by all models and guidance methods."""
     parser.add_argument("--structure", type=str, required=True, help="Input structure")
     parser.add_argument("--density", type=str, required=True, help="Input density map")
+    parser.add_argument(
+        "--sequence",
+        type=str,
+        default=None,
+        help="Ground-truth sequence (amino acid string or path to a FASTA file)."
+        "This sequence will be what gets passed into the structure predictor in the case of "
+        "unmodeled regions.",
+    )
     parser.add_argument("--output-dir", type=str, default="output", help="Output directory")
     parser.add_argument(
         "--log-path", type=str, default=None, help="Log file path (default: output-dir/run.log)"
@@ -668,6 +679,7 @@ class JobConfig:
     method: str | None
     output_dir: str
     log_path: str
+    sequence: str | None = None
 
 
 @dataclass

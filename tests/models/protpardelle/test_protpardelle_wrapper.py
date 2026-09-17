@@ -34,6 +34,7 @@ import numpy as np
 import torch
 from atomworks.enums import ChainType
 from atomworks.io.parser import parse
+from biotite.sequence import ProteinSequence
 from protpardelle.common import residue_constants
 from protpardelle.data.sequence import seq_to_aatype
 from sampleworks.models.protocol import GenerativeModelInput, StructureModelWrapper
@@ -70,7 +71,7 @@ def _build_asym_unit(sequences) -> struc.AtomArray:
     """
     chain_ids = "ABCDEFGH"
     atom_mask = np.asarray(residue_constants.restype_atom37_mask)
-    atom_names, res_ids, chains = [], [], []
+    atom_names, res_ids, res_names, chains = [], [], [], []
     for chain_idx, seq in enumerate(sequences):
         for res_pos, aa in enumerate(seq):
             restype = residue_constants.restype_order[aa]
@@ -81,11 +82,13 @@ def _build_asym_unit(sequences) -> struc.AtomArray:
             ]
             atom_names.extend(present)
             res_ids.extend([res_pos + 1] * len(present))
+            res_names.extend([ProteinSequence.convert_letter_1to3(aa)] * len(present))
             chains.extend([chain_ids[chain_idx]] * len(present))
 
     arr = struc.AtomArray(len(atom_names))
     arr.atom_name = np.array(atom_names)
     arr.res_id = np.array(res_ids)
+    arr.res_name = np.array(res_names)
     arr.chain_id = np.array(chains)
     arr.coord = np.arange(len(atom_names) * 3, dtype=np.float32).reshape(-1, 3)
     return arr
@@ -134,6 +137,13 @@ class TestExtractProteinSequences:
         structure = _protein_structure(SEQ_A, SEQ_B)
         assert extract_protein_sequences(structure) == [SEQ_A, SEQ_B]
 
+    def test_sequence_override_replaces_structure_sequence(self):
+        from sampleworks.utils.sequence import apply_sequence_override
+
+        structure = apply_sequence_override(_protein_structure(SEQ_A), SEQ_B)
+
+        assert extract_protein_sequences(structure) == [SEQ_B]
+
     def test_skips_non_protein_chains(self):
         structure = _protein_structure(SEQ_A)
         structure["chain_info"]["L"] = {
@@ -167,6 +177,14 @@ class TestAnnotateStructure:
         assert isinstance(config, ProtpardelleConfig)
         # Original structure is not mutated.
         assert "_protpardelle_config" not in structure
+
+    def test_sequence_override_applied_upstream_reaches_annotated(self):
+        from sampleworks.utils.sequence import apply_sequence_override
+
+        structure = apply_sequence_override(_protein_structure(SEQ_A), SEQ_B)
+        annotated = annotate_structure_for_protpardelle(structure)
+
+        assert extract_protein_sequences(annotated) == [SEQ_B]
 
 
 class TestProtocolConformance:
