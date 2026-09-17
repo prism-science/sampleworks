@@ -77,6 +77,9 @@ class ProteinInput:
                 if not density.is_absolute():
                     density = csv_dir / density
 
+                if not name:
+                    raise ValueError(f"Row {row_idx}: Protein name must not be empty.")
+
                 try:
                     resolution = float(resolution_raw)
                 except ValueError as err:
