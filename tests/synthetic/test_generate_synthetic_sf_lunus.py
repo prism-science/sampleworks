@@ -20,9 +20,16 @@ module, because SFcalculator's memory scales with the reflection count and 1.8 A
 exhausts a 15 GiB machine. See the constant for the measurements.
 
 Thresholds come from measured values, recorded in each test's docstring, per
-lunus's own convention. First measured 2026-08-17 on 1VME chain A (P 1 21 1,
-3357 atoms) at 1.8 A, grid 96x160x160, 86499 reflections, CPU. The cross-engine
-bounds were remeasured at 2.2 A / 47499 reflections on 2026-09-06.
+lunus's own convention. Remeasured 2026-09-17 on 6B8X (P 31 2 1, 3011 polymer
+atoms) at 1.8 A, grid 150x150x180, 46119 reflections, CPU, with the cross-engine
+bounds at 2.2 A / 25514 reflections.
+
+The structure moved from 1VME chain A to 6B8X, which is reused from
+``structure_6b8x_with_altlocs`` in ``tests/conftest.py`` rather than loaded here.
+6B8X is also the sharper of the two the repo ships -- B_min 2.0 against 1VME's
+12.1, two thirds of its atoms under B 10 -- so it exercises the grid-sampling
+regime ``recommended_blur`` exists for, where the blur is worth R 0.1007 against
+SFcalculator rather than 1VME's 0.0009.
 """
 
 from pathlib import Path
@@ -31,6 +38,9 @@ import gemmi
 import numpy as np
 import pytest
 import torch
+from atomworks.io.transforms.atom_array import remove_waters
+from biotite.structure import AtomArrayStack
+from sampleworks.utils.atom_array_utils import keep_amino_acids, keep_polymer
 
 
 pytest.importorskip("lunus.sf", reason="lunus[sf] not installed")
@@ -41,10 +51,8 @@ from sampleworks.synthetic.generate_synthetic_sf_lunus import (
     compute_ensemble_amplitudes,
     dataset_from_bragg_amplitudes,
     dataset_from_diffuse_intensities,
-    load_configurations,
     save_mtz,
 )
-from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ
 
 
 # Deliberately unmarked. These need neither a GPU nor model weights, and the
@@ -64,22 +72,20 @@ RESOLUTION = 1.8
 # The cross-engine test runs coarser than the rest of the module, because
 # SFcalculator is the memory bound. Its F_protein builds several
 # [n_atoms, n_refl] tensors before reducing over atoms (SFC_Torch/Fmodel.py),
-# so peak memory is linear in the reflection count -- measured on this
-# structure at 3357 atoms:
+# so peak memory is linear in the reflection count. 6B8X's P 31 2 1 has six
+# symmetry operations, so its ASU is less than half of 1VME's P 1 21 1 at the
+# same resolution, and it costs proportionally less:
 #
-#     3.0 A   18858 refl   4.91 GiB
-#     2.5 A   32467 refl   7.29 GiB
-#     2.2 A   47499 refl   9.92 GiB
-#     1.8 A   86499 refl   ~16.7 GiB (extrapolated; OOM-killed a 15 GiB machine)
+#     3.0 A   10249 refl
+#     2.5 A   17510 refl
+#     2.2 A   25514 refl   4.94 GB peak RSS, measured
+#     1.8 A   46119 refl   (untested here; 1VME's 47499 took 9.92 GiB)
 #
-# 2.2 A is the finest that fits with headroom. Coarser is cheaper but blunts
-# the test: lunus sizes its grid from the resolution, so a coarser grid means
-# more splat discretization error against SFcalculator's direct summation, and
-# the R-factor bound below has to open up to match (R was 0.0009 at 2.2 A,
-# 0.0026 at 2.5 A, 0.0119 at 3.0 A).
+# 2.2 A is kept for comparability with the earlier 1VME measurements, not
+# because 1.8 A would not fit -- on this structure it plausibly would.
 CROSS_ENGINE_RESOLUTION = 2.2
 
-SOURCE_CIF = "1vme_final.cif"
+SOURCE_PDB = "6b8x_final.pdb"
 
 
 @pytest.fixture(scope="module")
@@ -94,36 +100,31 @@ def cpu_device() -> torch.device:
 
 
 @pytest.fixture(scope="module")
-def configurations_1vme(resources_dir: Path):
-    """Chain A of 1VME with hydrogens and waters stripped, as a topology + coordinates.
+def configurations_6b8x(structure_6b8x_with_altlocs):
+    """6B8X's polymer as a topology plus coordinates, from the session fixture.
 
-    Distinct from the session-wide ``structure_1vme`` fixture, which is a parsed
-    atomworks dict; this one is the ``(atom_array, coords)`` pair the lunus
-    generator consumes.
+    Reuses ``structure_6b8x_with_altlocs`` in ``tests/conftest.py`` rather than
+    reading the file again. That fixture loads every altloc, which is what makes
+    the ensemble properties here meaningful, and 6B8X is the sharper of the two
+    structures the repo ships -- B_min 2.0 against 1VME's 12.1, with two thirds
+    of its atoms under B 10 -- so it exercises the grid-sampling regime that
+    :func:`recommended_blur` exists for.
 
-    Deliberately the same selection the SFcalculator reward fixtures use
-    (``tests/rewards/conftest.py``), so the two engines are compared on identical
-    inputs.
+    Waters and the glycerol are stripped so both engines see the same polymer,
+    and the single deposited model becomes one configuration; the tests below
+    build ensembles from it.
     """
-    source_dir = resources_dir / "1vme"
-    if not (source_dir / SOURCE_CIF).exists():
-        pytest.skip(f"Source structure not found at {source_dir / SOURCE_CIF}")
-
-    row = BatchRowForMTZ(filename=SOURCE_CIF, selection="chain A")
-    atom_array, coords = load_configurations(
-        source_dir / SOURCE_CIF,
-        row,
-        occupancy_mode="default",
-        strip_hydrogens=True,
-        strip_waters=True,
-    )
-    return atom_array, coords
+    atom_array = structure_6b8x_with_altlocs
+    if isinstance(atom_array, AtomArrayStack):
+        atom_array = atom_array[0]
+    atom_array = keep_polymer(keep_amino_acids(remove_waters(atom_array)))
+    return atom_array, atom_array.coord[None].astype(np.float64)
 
 
 @pytest.fixture(scope="module")
-def crystal_1vme(resources_dir: Path):
+def crystal_6b8x(resources_dir: Path):
     """Unit cell and space group read from the deposited file."""
-    meta = gemmi.read_structure(str(resources_dir / "1vme" / SOURCE_CIF))
+    meta = gemmi.read_structure(str(resources_dir / "6b8x" / SOURCE_PDB))
     return meta.cell, gemmi.SpaceGroup(meta.spacegroup_hm)
 
 
@@ -138,7 +139,7 @@ class TestSelfConsistency:
     """Properties that follow from the definitions, independent of any other engine."""
 
     def test_identical_configurations_have_zero_diffuse(
-        self, configurations_1vme, crystal_1vme, cpu_device
+        self, configurations_6b8x, crystal_6b8x, cpu_device
     ):
         """N copies of one structure have <|F|^2> == |<F>|^2, so diffuse is zero.
 
@@ -146,8 +147,8 @@ class TestSelfConsistency:
         configurations were being summed rather than averaged, or the occupancy
         convention were doubly applied, the variance would not vanish.
         """
-        atom_array, coords = configurations_1vme
-        cell, spacegroup = crystal_1vme
+        atom_array, coords = configurations_6b8x
+        cell, spacegroup = crystal_6b8x
         replicated = np.repeat(coords[:1], 4, axis=0)
 
         _, mean_f, diffuse = _amplitudes(atom_array, replicated, cell, spacegroup, cpu_device)
@@ -157,9 +158,10 @@ class TestSelfConsistency:
         # RMS to RMS: both are dominated by the strongest reflections, so the
         # ratio measures the relative cancellation error rather than mixing an
         # absolute residual on the largest reflection against a mean intensity.
-        # Measured on 1VME chain A at 1.8 A: 3.1e-8 to 4.4e-8 across runs, i.e.
-        # float32 epsilon. It varies run to run because the splat's reduction
-        # order does; the bound allows for that rather than pinning one value.
+        # Measured on 6B8X at 1.8 A: 4.3e-8, i.e. float32 epsilon, and 3.1e-8 to
+        # 4.4e-8 on 1VME chain A before the structure changed. It varies run to
+        # run because the splat's reduction order does; the bound allows for that
+        # rather than pinning one value.
         intensity = np.abs(mean_f).astype(np.float64) ** 2
         rms_intensity = float(np.sqrt(np.mean(intensity**2)))
         rms_diffuse = float(np.sqrt(np.mean(diffuse.astype(np.float64) ** 2)))
@@ -170,14 +172,14 @@ class TestSelfConsistency:
         assert ratio < 1e-6
 
     def test_single_configuration_matches_its_own_replication(
-        self, configurations_1vme, crystal_1vme, cpu_device
+        self, configurations_6b8x, crystal_6b8x, cpu_device
     ):
         """<F> over N identical copies equals F of one copy.
 
         Guards against an ensemble weighting that scales with N.
         """
-        atom_array, coords = configurations_1vme
-        cell, spacegroup = crystal_1vme
+        atom_array, coords = configurations_6b8x
+        cell, spacegroup = crystal_6b8x
 
         _, single, _ = _amplitudes(atom_array, coords[:1], cell, spacegroup, cpu_device)
         _, replicated, _ = _amplitudes(
@@ -200,7 +202,7 @@ class TestSelfConsistency:
         return np.stack([coords[0], coords[0] + rng.normal(0, 0.3, coords[0].shape)])
 
     def test_diffuse_is_invariant_to_rigid_translation_in_p1(
-        self, configurations_1vme, crystal_1vme, cpu_device
+        self, configurations_6b8x, crystal_6b8x, cpu_device
     ):
         """In P1, translating every configuration identically leaves diffuse unchanged.
 
@@ -212,18 +214,20 @@ class TestSelfConsistency:
         ``test_diffuse_is_not_invariant_under_symmetry`` for what happens
         otherwise, which is the case that matters for real crystals.
 
-        Measured on 1VME chain A at 1.8 A in P1: 9.2e-4. That residual is GRID
-        DISCRETIZATION, not round-off: translating the atoms moves them relative
-        to voxel centres and to the tapered cutoff, so the sampled density is not
-        quite the same function. Float32 noise in this pipeline is four orders
-        smaller -- 3.1e-8 and 9.3e-8 in the two tests above -- and the residual
-        should fall if `rate` is raised in build_setup. The bound below is an
-        order of magnitude above the measurement, matching how the cross-engine
-        bounds are set; what makes the result unambiguous is the contrast with
-        the symmetry case, which is ~800x larger.
+        Measured on 6B8X at 1.8 A in P1: 5.8e-5, against 9.2e-4 on 1VME chain A
+        before the structure changed -- smaller here because the blur widens the
+        density, so moving atoms relative to voxel centres matters less. The
+        residual is GRID DISCRETIZATION, not round-off: translating the atoms
+        moves them relative to voxel centres and to the tapered cutoff, so the
+        sampled density is not quite the same function. Float32 noise in this
+        pipeline is three orders smaller -- 4.3e-8 and 1.4e-7 in the two tests
+        above -- and the residual should fall further if `rate` is raised in
+        build_setup. The bound below is two orders above the measurement; what
+        makes the result unambiguous is the contrast with the symmetry case,
+        which is ~16000x larger (9.3e-1).
         """
-        atom_array, coords = configurations_1vme
-        cell, _ = crystal_1vme
+        atom_array, coords = configurations_6b8x
+        cell, _ = crystal_6b8x
         p1 = gemmi.SpaceGroup("P 1")
         ensemble = self._perturbed_ensemble(coords)
 
@@ -238,7 +242,7 @@ class TestSelfConsistency:
         assert deviation < 1e-2
 
     def test_diffuse_is_not_invariant_under_symmetry(
-        self, configurations_1vme, crystal_1vme, cpu_device
+        self, configurations_6b8x, crystal_6b8x, cpu_device
     ):
         """Translating the ASU contents in a non-P1 group DOES change diffuse.
 
@@ -260,8 +264,8 @@ class TestSelfConsistency:
         If this test ever starts passing, symmetry expansion has silently stopped
         happening, which the cross-engine test would not necessarily catch.
         """
-        atom_array, coords = configurations_1vme
-        cell, spacegroup = crystal_1vme
+        atom_array, coords = configurations_6b8x
+        cell, spacegroup = crystal_6b8x
         assert spacegroup.hm != "P 1", "this test needs a non-trivial space group"
         ensemble = self._perturbed_ensemble(coords)
 
@@ -281,22 +285,18 @@ class TestCrossEngineAgreement:
     Thresholds are provisional; see the module docstring.
     """
 
-    # Measured on 1VME chain A at 2.2 A, 47499 reflections: correlation 1.000000,
-    # R 0.0001 -- the two engines' shared IT92 coefficients and identical atom
+    # Measured on 6B8X at 2.2 A, 25514 reflections: correlation 1.000000, R 0.0001,
+    # scale 1.0000 -- the two engines' shared IT92 coefficients and identical atom
     # input leave little room to disagree. Bounds are set an order of magnitude
     # looser than measured, to tolerate platform variation without admitting a
     # real regression.
     #
-    # Remeasured 2026-09-17, when build_setup began choosing the blur itself
-    # (recommended_blur). At blur 0 the same comparison gave correlation 0.999999
-    # and R 0.0009, and R improved monotonically with resolution (0.0119 / 0.0026
-    # / 0.0009 at 3.0 / 2.5 / 2.2 A); with the blur applied the grid-sampling term
-    # is gone and what is left is not resolution-limited in the same way. These
-    # bounds are still tied to CROSS_ENGINE_RESOLUTION and should be remeasured
-    # if it moves.
-    #
-    # The blur matters much more for a sharp structure than for this one: on 6B8X
-    # (B_min 2.0) the same comparison goes from R 0.1007 to 0.0000.
+    # This structure is why build_setup chooses the blur (recommended_blur): at
+    # blur 0 the same comparison gives correlation 0.991505 and R 0.1007, with
+    # reflection coverage still 1.0000, so the disagreement is grid sampling and
+    # not indexing. 1VME, whose sharpest atom is at B 12.1, only moved from R
+    # 0.0009 to 0.0001. These bounds are tied to CROSS_ENGINE_RESOLUTION and
+    # should be remeasured if it moves.
     MIN_CORRELATION = 0.9999
     MAX_R_FACTOR = 0.009
 
@@ -309,15 +309,15 @@ class TestCrossEngineAgreement:
 
     @pytest.fixture(scope="class")
     @staticmethod
-    def sfcalculator_amplitudes(configurations_1vme, crystal_1vme, cpu_device):
+    def sfcalculator_amplitudes(configurations_6b8x, crystal_6b8x, cpu_device):
         """|F| from SFcalculator on the same atoms, indexed by Miller index."""
         pytest.importorskip("SFC_Torch", reason="sfcalculator-torch not installed")
         from sampleworks.synthetic.synthetic_utils import atomarray_to_gemmi
         from SFC_Torch import SFcalculator
         from SFC_Torch.io import PDBParser
 
-        atom_array, _ = configurations_1vme
-        cell, spacegroup = crystal_1vme
+        atom_array, _ = configurations_6b8x
+        cell, spacegroup = crystal_6b8x
         gemmi_structure = atomarray_to_gemmi(atom_array, cell, spacegroup.hm)
 
         sfc = SFcalculator(
@@ -335,7 +335,7 @@ class TestCrossEngineAgreement:
         return {tuple(h): a for h, a in zip(hkl, amplitude, strict=True)}
 
     def test_amplitudes_agree_with_sfcalculator(
-        self, configurations_1vme, crystal_1vme, cpu_device, sfcalculator_amplitudes
+        self, configurations_6b8x, crystal_6b8x, cpu_device, sfcalculator_amplitudes
     ):
         """Correlation and R-factor over the reflections both engines produced.
 
@@ -344,8 +344,8 @@ class TestCrossEngineAgreement:
         A small intersection is itself a failure -- it would mean the ASU
         conventions disagree.
         """
-        atom_array, coords = configurations_1vme
-        cell, spacegroup = crystal_1vme
+        atom_array, coords = configurations_6b8x
+        cell, spacegroup = crystal_6b8x
 
         hkl, mean_f, _ = _amplitudes(
             atom_array,

@@ -518,8 +518,12 @@ def structure_5i09_density(resources_dir: Path) -> dict:
 
 @pytest.fixture(scope="session")
 def structure_6b8x_with_altlocs(resources_dir: Path) -> AtomArray | AtomArrayStack:
+    # b_factor alongside occupancy: scattering calculations need it per atom, and
+    # loading it here keeps this the one place 6B8X is read.
     return load_any(
-        resources_dir / "6b8x" / "6b8x_final.pdb", altloc="all", extra_fields=["occupancy"]
+        resources_dir / "6b8x" / "6b8x_final.pdb",
+        altloc="all",
+        extra_fields=["occupancy", "b_factor"],
     )
 
 
