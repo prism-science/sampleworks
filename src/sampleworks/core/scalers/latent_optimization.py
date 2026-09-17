@@ -49,11 +49,11 @@ from torch import Tensor
 from tqdm import tqdm
 
 from sampleworks.core.rewards.geometry import BondGeometryReward
-from sampleworks.core.rewards.protocol import RewardFunctionProtocol
+from sampleworks.core.rewards.protocol import prepare_reward_if_needed, RewardFunctionProtocol
 from sampleworks.core.samplers.protocol import TrajectorySampler
 from sampleworks.core.scalers.protocol import GuidanceOutput, StepScalerProtocol
 from sampleworks.core.scalers.step_scalers import NoScalingScaler
-from sampleworks.eval.structure_utils import process_structure_to_trajectory_input
+from sampleworks.utils.structure_utils import process_structure_to_trajectory_input
 from sampleworks.models.latent_adapter import AttrLatentIO
 from sampleworks.models.protocol import FlowModelWrapper, GenerativeModelInput
 
@@ -337,6 +337,7 @@ class LatentOptimization:
         )
         reconciler = processed.reconciler.to(coords.device)
         reward_inputs = processed.to_reward_inputs(device=coords.device)
+        prepare_reward_if_needed(reward, reward_inputs, device=coords.device)
         schedule = sampler.compute_schedule(num_steps=self.num_steps)
         grad_enabler = _GradEnablingScaler()
 
