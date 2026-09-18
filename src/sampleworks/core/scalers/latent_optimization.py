@@ -53,9 +53,9 @@ from sampleworks.core.rewards.protocol import prepare_reward_if_needed, RewardFu
 from sampleworks.core.samplers.protocol import TrajectorySampler
 from sampleworks.core.scalers.protocol import GuidanceOutput, StepScalerProtocol
 from sampleworks.core.scalers.step_scalers import NoScalingScaler
-from sampleworks.utils.structure_utils import process_structure_to_trajectory_input
 from sampleworks.models.latent_adapter import AttrLatentIO
 from sampleworks.models.protocol import FlowModelWrapper, GenerativeModelInput
+from sampleworks.utils.structure_utils import process_structure_to_trajectory_input
 
 
 # ---- Reading the type hints in this file --------------------------------------
