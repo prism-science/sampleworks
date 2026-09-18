@@ -40,6 +40,7 @@ import pytest
 import torch
 from atomworks.io.transforms.atom_array import remove_waters
 from biotite.structure import AtomArrayStack
+from sampleworks.synthetic.synthetic_utils import atomarray_to_gemmi
 from sampleworks.utils.atom_array_utils import keep_amino_acids, keep_polymer
 
 
@@ -308,8 +309,10 @@ class TestCrossEngineAgreement:
     @staticmethod
     def sfcalculator_amplitudes(polymer_6b8x, crystal_6b8x, cpu_device):
         """|F| from SFcalculator on the same atoms, indexed by Miller index."""
+        # These two stay inline: they are the only sfcalculator-torch uses in the
+        # module, and it is an optional dependency, so the import has to follow
+        # the guard above rather than run at collection.
         pytest.importorskip("SFC_Torch", reason="sfcalculator-torch not installed")
-        from sampleworks.synthetic.synthetic_utils import atomarray_to_gemmi
         from SFC_Torch import SFcalculator
         from SFC_Torch.io import PDBParser
 
