@@ -474,8 +474,8 @@ class AnnealedLangevinSampler:
                 )
 
             _, _, noisy_state_working_frame = transform_coords_and_noise_to_frame(
-                torch.as_tensor(state_centered),
-                torch.zeros_like(torch.as_tensor(state_centered)),
+                torch.as_tensor(noisy_state),
+                torch.zeros_like(torch.as_tensor(noisy_state)),
                 align_transform,
             )
 
