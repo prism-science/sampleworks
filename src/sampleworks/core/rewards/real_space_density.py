@@ -17,11 +17,13 @@ from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.sf import
 from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.volume import (
     XMap,
 )
-from sampleworks.utils.elements import elements_to_scattering_indices
+from sampleworks.utils.elements import elements_to_scattering_indices, it92_coefficients
 from sampleworks.utils.torch_utils import try_gpu
 
 
-def setup_scattering_params(em_mode: bool, device: torch.device) -> torch.Tensor:
+def setup_scattering_params(
+    em_mode: bool, device: torch.device, it92_mode: bool = False
+) -> torch.Tensor:
     """Set up atomic scattering parameters for density calculation.
 
     The returned tensor is indexed by the values in
@@ -37,14 +39,34 @@ def setup_scattering_params(em_mode: bool, device: torch.device) -> torch.Tensor
         ``False``, use X-ray scattering factors.
     device
         PyTorch device that should own the returned lookup tensor.
+    it92_mode
+        If ``True``, use IT92 X-ray scattering factors, the same table the
+        ``lunus.sf`` structure-factor path uses, instead of the tabulated
+        Cromer-Mann ones. Not compatible with ``em_mode``.
 
     Returns
     -------
     torch.Tensor
         Tensor of shape ``(n_indices, n_coeffs, 2)`` containing scattering
         coefficients.
+
+    Raises
+    ------
+    ValueError
+        If both ``em_mode`` and ``it92_mode`` are requested. IT92 tabulates
+        X-ray scattering only.
     """
-    structure_factors = ELECTRON_SCATTERING_FACTORS if em_mode else ATOM_STRUCTURE_FACTORS
+    if em_mode and it92_mode:
+        raise ValueError("it92_mode is X-ray only and cannot be combined with em_mode.")
+
+    if it92_mode:
+        # IT92 is four Gaussians plus a constant; pad to the five-plus-constant layout.
+        structure_factors = {
+            element: [[*c[:4], 0.0, c[8]], [*c[4:8], 0.0, 0.0]]
+            for element, c in it92_coefficients().items()
+        }
+    else:
+        structure_factors = ELECTRON_SCATTERING_FACTORS if em_mode else ATOM_STRUCTURE_FACTORS
     n_coeffs = len(structure_factors["C"][0])
     n_elements = max(ELEMENT_TO_SCATTERING_INDEX.values()) + 1
     scattering_tensor = torch.zeros((n_elements, n_coeffs, 2), dtype=torch.float32, device=device)
