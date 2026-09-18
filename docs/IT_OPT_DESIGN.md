@@ -22,6 +22,8 @@ experimental reward evaluated on the *denoised* structure. No model weights are 
 It is a `TrajectoryScalerProtocol`, a peer of `PureGuidance` and `FKSteering`, living in
 [core/scalers/latent_optimization.py](../src/sampleworks/core/scalers/latent_optimization.py). It is
 a faithful port of the reference `run_it_optimization`, with the reference's bugs fixed (§6).
+The reference is [arXiv:2602.24007](https://arxiv.org/abs/2602.24007), code at
+[github.com/sai-advaith/it_opt](https://github.com/sai-advaith/it_opt).
 
 **v1 is latent-only.** Coordinate-space guidance is *not* applied — the attached step-scaler
 returns a zero coordinate direction (§4, `_GradEnablingScaler`), so the only steering comes from the
@@ -31,11 +33,11 @@ evolving latents.
 
 ```
 extract (s, z) from the trunk once  ->  clone into optimizable leaves (requires_grad=True)
-for each outer round (fresh prior noise each round):
+for each outer round (a round = one full traversal of the schedule, fresh prior noise each):
     optimizer = Adam([s, z])                      # ONE persistent Adam per round
     for each diffusion step:
         x̂₀   = differentiable denoise(x_t, s, z)  # ONE forward, run under autograd
-        loss  = reward(x̂₀) + anchor(s, z) + bond_geometry(x̂₀)
+        loss  = reward(x̂₀) + anchor(s, z) + bond_geometry(x̂₀)   # both penalties off at weight 0
         loss.backward();  clip s and z INDEPENDENTLY;  optimizer.step()
         x_t   = step_output.state.detach()         # advance; coordinate graph cut here
 final clean sampling pass with the optimized latents  ->  saved ensemble
@@ -67,17 +69,17 @@ Private helpers, for orientation: `_leaf_latents` (promote s/z to leaves), `_opt
 ```python
 LatentOptimization(
     ensemble_size=1, num_steps=200, guidance_t_start=0.0, *,
-    outer_steps=1, learning_rate=0.05, max_grad_norm=1.0,
+    t_start=0.0, outer_steps=1, learning_rate=0.05, max_grad_norm=1.0,
     optimize_single=True, optimize_pair=True,
     anchor_weight_single=0.0, anchor_weight_pair=0.0,
-    bond_length_weight=0.0, single_attr="s", pair_attr="z",
+    bond_length_weight=5e-5, single_attr="s", pair_attr="z",
 )
 ```
 
 - `ensemble_size` structures are sampled in parallel, each with its **own** `s`/`z` leaf, so members
   can diverge under the reward instead of collapsing onto one solution.
 - `guidance_t_start` is a fraction in `[0,1]`; stored as `guidance_start = int(guidance_t_start*num_steps)`.
-  Steps before it are plain frozen-latent diffusion.
+  Everything before it is plain frozen-latent diffusion.
 - `outer_steps` resample rounds, fresh prior noise each. **Constructor default `1`; CLI default `2`.**
 - `learning_rate` Adam LR; one persistent Adam is built **once per round**.
 - `max_grad_norm` clips `s` and `z` **independently** (see §6 — a joint clip starves `s`).
@@ -90,7 +92,8 @@ LatentOptimization(
 
 The load-bearing mechanism. `AF3EDMSampler.step` reads `getattr(scaler, "requires_gradients", False)`;
 if true it runs the denoiser under `torch.set_grad_enabled(True)` and returns a `denoised` (`x̂₀`)
-that still carries a graph back to the latent leaves:
+that still carries a graph back to the latent leaves. `_GradEnablingScaler` is defined in
+[core/scalers/latent_optimization.py](../src/sampleworks/core/scalers/latent_optimization.py):
 
 ```python
 class _GradEnablingScaler:
