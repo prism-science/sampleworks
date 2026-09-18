@@ -100,8 +100,8 @@ def cpu_device() -> torch.device:
 
 
 @pytest.fixture(scope="module")
-def configurations_6b8x(structure_6b8x_with_altlocs):
-    """6B8X's polymer as a topology plus coordinates, from the session fixture.
+def polymer_6b8x(structure_6b8x_with_altlocs):
+    """6B8X's polymer, from the session fixture.
 
     Reuses ``structure_6b8x_with_altlocs`` in ``tests/conftest.py`` rather than
     reading the file again. That fixture loads every altloc, which is what makes
@@ -110,15 +110,14 @@ def configurations_6b8x(structure_6b8x_with_altlocs):
     of its atoms under B 10 -- so it exercises the grid-sampling regime that
     :func:`recommended_blur` exists for.
 
-    Waters and the glycerol are stripped so both engines see the same polymer,
-    and the single deposited model becomes one configuration; the tests below
-    build ensembles from it.
+    Waters and the glycerol are stripped so both engines see the same polymer.
+    Coordinates come off it as ``atom_array.coord``; the tests below add the
+    configuration axis themselves, since each wants a different ensemble.
     """
     atom_array = structure_6b8x_with_altlocs
     if isinstance(atom_array, AtomArrayStack):
         atom_array = atom_array[0]
-    atom_array = keep_polymer(keep_amino_acids(remove_waters(atom_array)))
-    return atom_array, atom_array.coord[None].astype(np.float64)
+    return keep_polymer(keep_amino_acids(remove_waters(atom_array)))
 
 
 @pytest.fixture(scope="module")
@@ -139,7 +138,7 @@ class TestSelfConsistency:
     """Properties that follow from the definitions, independent of any other engine."""
 
     def test_identical_configurations_have_zero_diffuse(
-        self, configurations_6b8x, crystal_6b8x, cpu_device
+        self, polymer_6b8x, crystal_6b8x, cpu_device
     ):
         """N copies of one structure have <|F|^2> == |<F>|^2, so diffuse is zero.
 
@@ -147,9 +146,9 @@ class TestSelfConsistency:
         configurations were being summed rather than averaged, or the occupancy
         convention were doubly applied, the variance would not vanish.
         """
-        atom_array, coords = configurations_6b8x
+        atom_array = polymer_6b8x
         cell, spacegroup = crystal_6b8x
-        replicated = np.repeat(coords[:1], 4, axis=0)
+        replicated = np.repeat(atom_array.coord[None], 4, axis=0)
 
         _, mean_f, diffuse = _amplitudes(atom_array, replicated, cell, spacegroup, cpu_device)
 
@@ -158,10 +157,10 @@ class TestSelfConsistency:
         # RMS to RMS: both are dominated by the strongest reflections, so the
         # ratio measures the relative cancellation error rather than mixing an
         # absolute residual on the largest reflection against a mean intensity.
-        # Measured on 6B8X at 1.8 A: 4.3e-8, i.e. float32 epsilon, and 3.1e-8 to
-        # 4.4e-8 on 1VME chain A before the structure changed. It varies run to
-        # run because the splat's reduction order does; the bound allows for that
-        # rather than pinning one value.
+        # Measured on 6B8X at 1.8 A: 8e-9 to 4.3e-8 across runs, i.e. float32
+        # epsilon, and 3.1e-8 to 4.4e-8 on 1VME chain A before the structure
+        # changed. It varies run to run because the splat's reduction order does;
+        # the bound allows for that rather than pinning one value.
         intensity = np.abs(mean_f).astype(np.float64) ** 2
         rms_intensity = float(np.sqrt(np.mean(intensity**2)))
         rms_diffuse = float(np.sqrt(np.mean(diffuse.astype(np.float64) ** 2)))
@@ -172,18 +171,18 @@ class TestSelfConsistency:
         assert ratio < 1e-6
 
     def test_single_configuration_matches_its_own_replication(
-        self, configurations_6b8x, crystal_6b8x, cpu_device
+        self, polymer_6b8x, crystal_6b8x, cpu_device
     ):
         """<F> over N identical copies equals F of one copy.
 
         Guards against an ensemble weighting that scales with N.
         """
-        atom_array, coords = configurations_6b8x
+        atom_array = polymer_6b8x
         cell, spacegroup = crystal_6b8x
 
-        _, single, _ = _amplitudes(atom_array, coords[:1], cell, spacegroup, cpu_device)
+        _, single, _ = _amplitudes(atom_array, atom_array.coord[None], cell, spacegroup, cpu_device)
         _, replicated, _ = _amplitudes(
-            atom_array, np.repeat(coords[:1], 3, axis=0), cell, spacegroup, cpu_device
+            atom_array, np.repeat(atom_array.coord[None], 3, axis=0), cell, spacegroup, cpu_device
         )
 
         # A norm ratio rather than elementwise tolerances: the two differ only by
@@ -196,13 +195,13 @@ class TestSelfConsistency:
         assert deviation < 1e-5
 
     @staticmethod
-    def _perturbed_ensemble(coords: np.ndarray) -> np.ndarray:
+    def _perturbed_ensemble(coord: np.ndarray) -> np.ndarray:
         """Two genuinely different configurations, so the diffuse term is nonzero."""
         rng = np.random.default_rng(0)
-        return np.stack([coords[0], coords[0] + rng.normal(0, 0.3, coords[0].shape)])
+        return np.stack([coord, coord + rng.normal(0, 0.3, coord.shape)])
 
     def test_diffuse_is_invariant_to_rigid_translation_in_p1(
-        self, configurations_6b8x, crystal_6b8x, cpu_device
+        self, polymer_6b8x, crystal_6b8x, cpu_device
     ):
         """In P1, translating every configuration identically leaves diffuse unchanged.
 
@@ -226,10 +225,10 @@ class TestSelfConsistency:
         makes the result unambiguous is the contrast with the symmetry case,
         which is ~16000x larger (9.3e-1).
         """
-        atom_array, coords = configurations_6b8x
+        atom_array = polymer_6b8x
         cell, _ = crystal_6b8x
         p1 = gemmi.SpaceGroup("P 1")
-        ensemble = self._perturbed_ensemble(coords)
+        ensemble = self._perturbed_ensemble(atom_array.coord)
 
         _, _, diffuse = _amplitudes(atom_array, ensemble, cell, p1, cpu_device)
         _, _, shifted = _amplitudes(
@@ -241,9 +240,7 @@ class TestSelfConsistency:
         print(f"\nP1 diffuse deviation under rigid translation: {deviation:.2e}")
         assert deviation < 1e-2
 
-    def test_diffuse_is_not_invariant_under_symmetry(
-        self, configurations_6b8x, crystal_6b8x, cpu_device
-    ):
+    def test_diffuse_is_not_invariant_under_symmetry(self, polymer_6b8x, crystal_6b8x, cpu_device):
         """Translating the ASU contents in a non-P1 group DOES change diffuse.
 
         Characterization test for a result that corrected the plan. Translating
@@ -264,10 +261,10 @@ class TestSelfConsistency:
         If this test ever starts passing, symmetry expansion has silently stopped
         happening, which the cross-engine test would not necessarily catch.
         """
-        atom_array, coords = configurations_6b8x
+        atom_array = polymer_6b8x
         cell, spacegroup = crystal_6b8x
         assert spacegroup.hm != "P 1", "this test needs a non-trivial space group"
-        ensemble = self._perturbed_ensemble(coords)
+        ensemble = self._perturbed_ensemble(atom_array.coord)
 
         _, _, diffuse = _amplitudes(atom_array, ensemble, cell, spacegroup, cpu_device)
         _, _, shifted = _amplitudes(
@@ -309,14 +306,14 @@ class TestCrossEngineAgreement:
 
     @pytest.fixture(scope="class")
     @staticmethod
-    def sfcalculator_amplitudes(configurations_6b8x, crystal_6b8x, cpu_device):
+    def sfcalculator_amplitudes(polymer_6b8x, crystal_6b8x, cpu_device):
         """|F| from SFcalculator on the same atoms, indexed by Miller index."""
         pytest.importorskip("SFC_Torch", reason="sfcalculator-torch not installed")
         from sampleworks.synthetic.synthetic_utils import atomarray_to_gemmi
         from SFC_Torch import SFcalculator
         from SFC_Torch.io import PDBParser
 
-        atom_array, _ = configurations_6b8x
+        atom_array = polymer_6b8x
         cell, spacegroup = crystal_6b8x
         gemmi_structure = atomarray_to_gemmi(atom_array, cell, spacegroup.hm)
 
@@ -335,7 +332,7 @@ class TestCrossEngineAgreement:
         return {tuple(h): a for h, a in zip(hkl, amplitude, strict=True)}
 
     def test_amplitudes_agree_with_sfcalculator(
-        self, configurations_6b8x, crystal_6b8x, cpu_device, sfcalculator_amplitudes
+        self, polymer_6b8x, crystal_6b8x, cpu_device, sfcalculator_amplitudes
     ):
         """Correlation and R-factor over the reflections both engines produced.
 
@@ -344,12 +341,12 @@ class TestCrossEngineAgreement:
         A small intersection is itself a failure -- it would mean the ASU
         conventions disagree.
         """
-        atom_array, coords = configurations_6b8x
+        atom_array = polymer_6b8x
         cell, spacegroup = crystal_6b8x
 
         hkl, mean_f, _ = _amplitudes(
             atom_array,
-            coords[:1],
+            atom_array.coord[None],
             cell,
             spacegroup,
             cpu_device,
