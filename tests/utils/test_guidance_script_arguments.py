@@ -376,3 +376,54 @@ def test_job_result_migrates_legacy_model_pickle() -> None:
     assert restored.model_name == "boltz2"
     assert "model" not in restored.__dict__
     assert "model" not in restored.as_dict()
+
+
+# ============================================================================
+# latent-opt CLI flag plumbing (regression: flags must reach the config)
+# ============================================================================
+
+
+def test_latent_opt_cli_flags_reach_the_config():
+    """Every --guidance-type latent_opt flag must land on the GuidanceConfig.
+
+    Regression guard: these attribute names have to be listed in
+    ``_DYNAMIC_ATTRS`` or ``from_cli`` silently drops the parsed values and
+    ``_run_guidance``'s ``getattr(args, ...)`` falls back to the defaults, making
+    every flag a no-op. Passing *non-default* values here catches that.
+    """
+    config = GuidanceConfig.from_cli(
+        argv=[
+            "--protein",
+            "1vme",
+            "--structure",
+            "s.cif",
+            "--density",
+            "d.ccp4",
+            "--resolution",
+            "1.8",
+            "--output-dir",
+            "/tmp/out",
+            # IT-opt flags, all set to values that differ from their defaults
+            "--which-latent",
+            "single",  # default "pair"
+            "--learning-rate",
+            "0.123",  # default 0.05
+            "--outer-steps",
+            "5",  # default 2
+            "--anchor-weight",
+            "0.7",  # default 0.0
+            "--max-grad-norm",
+            "2.0",  # default 1.0
+            "--bond-length-weight",
+            "0.001",  # default 5e-5
+        ],
+        model_name="protenix",
+        guidance_type="latent_opt",
+    )
+
+    assert config.which_latent == "single"
+    assert config.learning_rate == pytest.approx(0.123)
+    assert config.outer_steps == 5
+    assert config.anchor_weight == pytest.approx(0.7)
+    assert config.max_grad_norm == pytest.approx(2.0)
+    assert config.bond_length_weight == pytest.approx(0.001)
