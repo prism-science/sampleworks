@@ -1,34 +1,4 @@
 """Annealed Langevin SDE sampler for AF3-style models.
-
-Adapts the drift ("follow the temperature-scaled score") + diffusion ("inject
-Langevin noise") structure of Chroma's ``reverse_sde``/``langevin_factor``
-mechanism (Ingraham et al., Nature 2023) to the Karras/EDM noise convention
-used by AF3-family model wrappers in this repo (Boltz/Protenix/RF3).
-
-This is *not* a literal port of Chroma's ``reverse_sde``: that formula is
-parameterized by a VP-SDE schedule (alpha(t), beta(t)) under which the clean
-signal decays as noise grows. AF3-family models are trained under the
-Karras/EDM variance-exploding convention (alpha == 1 always; only sigma(t)
-grows), so calling them with Chroma's own alpha/beta schedule would feed them
-noise levels they were never trained on. This sampler keeps the same sigma(t)
-annealing schedule as ``AF3EDMSampler`` (required for the denoiser to be
-queried correctly) and reformulates Chroma's drift+diffusion structure
-directly in terms of that schedule instead.
-
-I am about 85% confident this reformulation is a sound SDE discretization; it
-has not been checked against a reference implementation, and correlated
-(chain-covariance) noise -- the other major piece of Chroma's diffusion
-process -- is deliberately not implemented here (noise is i.i.d. per atom,
-matching every other model wrapper in this codebase). See
-``docs/`` discussion / PR description for the phased plan to add it later.
-
-References
-----------
-Ingraham et al. "Illuminating protein space with a programmable generative
-model" (Nature, 2023). https://doi.org/10.1038/s41586-023-06728-8
-
-Reference implementation: https://github.com/generatebio/chroma,
-``chroma/layers/structure/diffusion.py::DiffusionChainCov.reverse_sde``.
 """
 
 from __future__ import annotations
@@ -105,17 +75,13 @@ class LangevinSamplerConfig:
     p
         Exponent (``rho`` in Karras et al.) controlling schedule spacing.
     inverse_temperature
-        Scales the score's contribution to the drift term, analogous to
-        Chroma's parameter of the same name. Values above 1.0 bias sampling
-        toward higher-likelihood, lower-diversity structures ("low-
-        temperature sampling"); 1.0 leaves the base EDM-equivalent score
-        weighting unchanged.
+        Scales the score's contribution to the drift term (Chroma's
+        parameter of the same name). Above 1.0 biases sampling toward
+        higher-likelihood, lower-diversity structures; 1.0 is unscaled.
     langevin_factor
-        Strength of the additional Langevin (Brownian) noise injected on top
-        of the deterministic score-following update, analogous to Chroma's
-        parameter of the same name. ``0.0`` recovers a purely deterministic,
-        temperature-scaled Euler step (an ODE); positive values make the
-        trajectory a true SDE.
+        Strength of the Langevin (Brownian) noise injected on top of the
+        deterministic drift (Chroma's parameter of the same name). ``0.0``
+        is a deterministic Euler step; positive values make it a true SDE.
     step_scale
         Multiplier on the Euler step size, matching ``EDMSamplerConfig``.
     augmentation
@@ -186,11 +152,7 @@ class AnnealedLangevinSampler:
         Parameters
         ----------
         config : LangevinSamplerConfig
-            Configuration object containing schedule hyperparameters
-            (``sigma_data``, ``s_max``, ``s_min``, ``p``), the Langevin knobs
-            (``inverse_temperature``, ``langevin_factor``), and runtime flags
-            (``step_scale``, ``augmentation``, ``align_to_input``,
-            ``scale_guidance_to_diffusion``, ``device``).
+            See :class:`LangevinSamplerConfig` for field documentation.
         """
         self.config = config
 
@@ -313,12 +275,10 @@ class AnnealedLangevinSampler:
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Apply guidance from scaler to the denoising direction.
 
-        Copied from ``AF3EDMSampler._apply_scaler_guidance`` (see module
-        docstring re: deferred deduplication), minus the ``proposal_shift``
-        return value -- FK-steering-style log-proposal-correction bookkeeping
-        for this sampler's Langevin diffusion term has not been derived, so
-        ``log_proposal_correction`` is left as ``None`` in ``step()`` for now.
-        This sampler has only been designed against ``PureGuidance``/CSG.
+        Copied from ``AF3EDMSampler._apply_scaler_guidance`` (see class
+        docstring), minus ``proposal_shift`` -- this sampler doesn't derive
+        ``log_proposal_correction`` for its Langevin term, so it isn't
+        FKSteering-compatible yet; only tested against PureGuidance/CSG.
 
         Returns
         -------
@@ -375,16 +335,10 @@ class AnnealedLangevinSampler:
 
         The denoised prediction and its Tweedie-derived score-following
         direction (``delta``) are computed exactly as in
-        ``AF3EDMSampler.step()``. The final update then differs: instead of a
-        Heun ODE step, it combines a temperature-scaled deterministic drift
-        with an injected Langevin diffusion term:
-
-        .. math::
-
-            x_{t-1} = x_t + \text{step\_scale} \cdot dt \cdot
-            (\text{inverse\_temperature} \cdot \delta) +
-            \text{langevin\_factor} \cdot \sqrt{|\text{step\_scale} \cdot dt|}
-            \cdot z, \quad z \sim \mathcal{N}(0, I)
+        ``AF3EDMSampler.step()``. The final update then differs: instead of
+        an EDM-style step, it combines a temperature-scaled deterministic
+        drift with an injected Langevin diffusion term (see module/class
+        docstrings for the full update equation).
 
         Parameters
         ----------

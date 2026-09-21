@@ -1,15 +1,7 @@
 """Smoke test / small sweep for AnnealedLangevinSampler against the CSG baseline.
 
-Not wired into the sampleworks-guidance CLI -- this constructs the same
-model/reward/scaler as the CSG baseline run directly and swaps in
-``AnnealedLangevinSampler`` in place of ``AF3EDMSampler``, so the loss curve
-can be compared to the existing baseline numbers (Initial 0.025783 -> Final
-0.007554 for the full-parameter CSG run on 1VME). See
-``core/samplers/langevin.py`` for the sampler itself and its docstring for
-what is/isn't a faithful port of Chroma's Annealed Langevin SDE.
-
 The model/reward/structure are loaded once and reused across every
-``--langevin-factor`` value, since checkpoint loading dominates per-run time
+--langevin-factor value, since checkpoint loading dominates per-run time
 otherwise.
 
 Usage
