@@ -307,6 +307,48 @@ def selection_to_residues(atom_array: AtomArray, selection: str) -> set[tuple[st
     }
 
 
+def filter_to_selection(
+    atom_array: AtomArray | AtomArrayStack, selection: str
+) -> AtomArray | AtomArrayStack:
+    """Restrict an atom array to the atoms matching ``selection``.
+
+    The selection mask is computed exactly as in
+    :func:`extract_selection_coordinates`. For an
+    :class:`~biotite.structure.AtomArrayStack`, the mask is derived from the first
+    model but applied across every model, so the returned structure keeps all models.
+
+    Parameters
+    ----------
+    atom_array : AtomArray | AtomArrayStack
+        Atomworks parsed structure. For a stack, the same atom mask is applied to all models.
+    selection : str
+        Selection string, either legacy (``chain A and resi 326-339``) or atomworks-style
+        (``chain_id == 'A' and ...``).
+
+    Returns
+    -------
+    AtomArray | AtomArrayStack
+        The subset of ``atom_array`` matching ``selection``, of the same type as the input.
+    """
+    # TODO: we will need to handle other kinds of selections later, like radius around a point.
+    #   surely biotite has this capability?
+    if isinstance(atom_array, AtomArrayStack):
+        working_array = cast(AtomArray, atom_array[0])
+    else:
+        working_array = atom_array
+
+    if not any(x in selection for x in atom_array_utils.ATOMWORKS_COMPARISON_OPS):
+        mask = atom_array_utils.get_mask_from_old_selection_string(atom_array, selection)
+    else:
+        mask = working_array.mask(selection)
+
+    # Indexing is typed as possibly returning a single ``Atom``; the boolean mask always
+    # yields an array, so coerce back to the container type.
+    if isinstance(atom_array, AtomArrayStack):
+        return cast(AtomArrayStack, atom_array[:, mask])
+    return cast(AtomArray, atom_array[mask])
+
+
 def extract_selection_coordinates(
     atom_array: AtomArray | AtomArrayStack, selection: str
 ) -> np.ndarray:
@@ -327,19 +369,12 @@ def extract_selection_coordinates(
     RuntimeError: If no atoms match the selection or coordinates are invalid
     TypeError: If the "asym_unit" in `structure` is not an AtomArray or AtomArrayStack
     """
-    # TODO: we will need to handle other kinds of selections later, like radius around a point.
-    #   surely biotite has this capability?
-    if isinstance(atom_array, AtomArrayStack):
-        working_array = cast(AtomArray, atom_array[0])
-    else:
-        working_array = atom_array
-
-    if not any(x in selection for x in atom_array_utils.ATOMWORKS_COMPARISON_OPS):
-        mask = atom_array_utils.get_mask_from_old_selection_string(atom_array, selection)
-    else:
-        mask = working_array.mask(selection)
-
-    selected_coords = cast(np.ndarray, working_array.coord)[mask]
+    selected = filter_to_selection(atom_array, selection)
+    # This function returns coordinates for a single model; use the first model of a stack
+    # (the selection mask already matches across all models).
+    selected_coords = cast(np.ndarray, selected.coord)
+    if isinstance(selected, AtomArrayStack):
+        selected_coords = selected_coords[0]
 
     # VALIDATION
     if len(selected_coords) == 0:

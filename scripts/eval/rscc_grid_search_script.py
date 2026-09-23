@@ -29,7 +29,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from biotite.structure import AtomArray, AtomArrayStack
 
 # Import local modules for density calculation
 from joblib import delayed, Parallel
@@ -39,9 +38,7 @@ from sampleworks.eval.eval_dataclasses import ProteinConfig, Trial
 from sampleworks.eval.grid_search_eval_utils import parse_eval_args, setup_evaluation_parameters
 from sampleworks.eval.metrics import rscc
 from sampleworks.utils.atom_array_utils import (
-    ATOMWORKS_COMPARISON_OPS,
     filter_to_common_atoms,
-    get_mask_from_old_selection_string,
     parse_structure,
     remove_atoms_with_any_nan_coords,
 )
@@ -55,51 +52,13 @@ from sampleworks.utils.frame_transforms import (
 )
 from sampleworks.utils.framework_utils import match_batch
 from sampleworks.utils.structure_utils import (
+    filter_to_selection,
     get_asym_unit_from_structure,
     get_reference_structure_coords,
 )
 
 
 OccKey = tuple[tuple[str, float], ...]
-
-
-def filter_to_selection(
-    atom_array: AtomArray | AtomArrayStack, selection: str
-) -> AtomArray | AtomArrayStack:
-    """Restrict an atom array to the atoms matching ``selection``.
-
-    Mirrors the masking used by
-    :func:`sampleworks.eval.structure_utils.extract_selection_coordinates` (so the
-    filtered atoms correspond to the same residues as the reference selection
-    coordinates), while preserving every model of an ``AtomArrayStack``.
-
-    Parameters
-    ----------
-    atom_array : AtomArray | AtomArrayStack
-        Structure to filter. For a stack the same atom mask is applied to all models.
-    selection : str
-        Legacy (``chain A and resi 60-65``) or atomworks-style
-        (``chain_id == 'A' and ...``) selection string.
-
-    Returns
-    -------
-    AtomArray | AtomArrayStack
-        The subset of ``atom_array`` matching ``selection``.
-
-    Raises
-    ------
-    ValueError
-        If the selection matches no atoms.
-    """
-    working = atom_array[0] if isinstance(atom_array, AtomArrayStack) else atom_array
-    if not any(op in selection for op in ATOMWORKS_COMPARISON_OPS):
-        # get_mask_from_old_selection_string raises ValueError on an empty match.
-        mask = get_mask_from_old_selection_string(atom_array, selection)
-    else:
-        mask = working.mask(selection)
-        if not mask.any():
-            raise ValueError(f"Selection '{selection}' matched no atoms")
-    return atom_array[:, mask] if isinstance(atom_array, AtomArrayStack) else atom_array[mask]
 
 
 def process_group(
@@ -296,12 +255,17 @@ def process_group(
 
         # Per selection, extract base region (cache) + computed region, compute RSCC
         for selection in valid_selections:
+            # These are the coordinates of the selection in the reference (input) structure.
+            # we will use them to limit the region that we extract from the target ("base") and
+            # predicted map computed from the predicted ensemble of structures.
             sel_coords = group_ref_coords[selection]
             row = trial.__dict__.copy()
             row.update(selection=selection, error=None, base_map_path=base_map_path)
             try:
                 extracted_base = extracted_base_cache.get(selection)
                 if extracted_base is None:
+                    # we limit the region of the map to a radius around the
+                    # reference structure selection's atoms
                     _, extracted_base = base_xmap.extract_tight(
                         sel_coords, padding=DEFAULT_SELECTION_PADDING
                     )
@@ -310,8 +274,10 @@ def process_group(
                     extracted_base_cache[selection] = extracted_base
 
                 if selected_residues_only:
-                    # Compute density from only this selection's atoms on the shared grid, so
-                    # the extracted region carries no signal from the surrounding structure.
+                    # In addition to extracting the part of the map around the target structure,
+                    # we may also want to make sure we don't include density from parts of the
+                    # predicted ensemble that are not part of the selection. This way, if other
+                    # parts of the structure fit the target density, we don't inflate the RSCC.
                     selected_atoms = filter_to_selection(atom_array, selection)
                     selected_density = run_density_transformer(transformer, selected_atoms)
                     computed_xmap = copy.copy(base_xmap)
