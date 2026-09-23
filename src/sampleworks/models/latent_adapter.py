@@ -22,6 +22,8 @@ Design goal
   strings, not new code.
 """
 
+# TODO(#416): work out how IT-opt runs with other feature schemes (Protpardelle as the example).
+
 from __future__ import annotations
 
 import dataclasses
@@ -62,6 +64,7 @@ DEFAULT_PAIR_REP_ATTR: dict[str, str] = {
 
 # "conditioning" throughout this file is the model's conditioning object: a (frozen) dataclass
 # carrying the latents ``s``/``z`` (and other cached state) as named attributes.
+# TODO(#417): abstract this so it does not require the specific s/z tensors.
 class AttrLatentIO:
     """A general-purpose :class:`LatentIO` addressing each representation by attribute name.
 
@@ -116,6 +119,7 @@ class AttrLatentIO:
 # which the unit tests use. The real implementation is above: AttrLatentIO is the LatentIO.
 
 
+# TODO(#418): decide whether this protocol survives, and whether it keeps naming single/pair.
 @runtime_checkable
 class LatentIO(Protocol):
     """Reads/writes the single and pair representations on a conditioning object.

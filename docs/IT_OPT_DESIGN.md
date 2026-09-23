@@ -61,7 +61,7 @@ detaches each step, and a true unroll is O(steps·N²·d) memory.)
 | CLI wiring | [utils/guidance_script_utils.py](../src/sampleworks/utils/guidance_script_utils.py) (`_run_guidance`), [utils/guidance_script_arguments.py](../src/sampleworks/utils/guidance_script_arguments.py) (`add_latent_opt_args`), [utils/guidance_constants.py](../src/sampleworks/utils/guidance_constants.py) (`GuidanceType.LATENT_OPT`) | Builds the scaler from CLI flags. |
 
 Private helpers, for orientation: `_leaf_latents` (promote s/z to leaves), `_optimize_one_round`
-(one outer round), `_latent_adam_step` (score → backward → clip → step), `_sample_with_frozen_latents`
+(one outer round), `_latent_optimizer_step` (score → backward → clip → step), `_sample_with_frozen_latents`
 (final clean pass).
 
 ### Constructor contract

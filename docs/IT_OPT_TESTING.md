@@ -134,7 +134,7 @@ Raise `num_steps` (→200), `outer_steps` (→2–4), `ensemble_size`; turn on `
 | `ValueError: no optimizable latent on the conditioning` | Wrong attr names (Boltz `"s"`/`"z"` on Protenix). | Use `s_trunk`/`z_trunk`. |
 | `ValueError: State atom count != reward_inputs atom count` | Reward built from a different atom set than the model's. | Use the same structure/density the CLI takes. |
 
-Cheap instrumentation (one line each in `_latent_adam_step`): the pre-clip grad norm (is the clip
+Cheap instrumentation (one line each in `_latent_optimizer_step`): the pre-clip grad norm (is the clip
 biting?) and the anchor's `mean((Δs)²)`, `mean((Δz)²)` (how far the latents drifted).
 
 ## 4. CLI and wiring

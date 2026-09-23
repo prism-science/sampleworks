@@ -78,6 +78,7 @@ from sampleworks.utils.structure_utils import process_structure_to_trajectory_in
 # -------------------------------------------------------------------------------
 
 
+# TODO(#364): fold this into NoScalingScaler in the step-scalers module.
 class _GradEnablingScaler(NoScalingScaler):
     """``NoScalingScaler`` that also asks the sampler to run its denoiser under autograd.
 
@@ -96,6 +97,7 @@ class _GradEnablingScaler(NoScalingScaler):
     requires_gradients = True
 
 
+# TODO(#363): move under core.rewards once the rewards interface admits latent-space terms.
 class LatentAnchor:
     r"""On-manifold prior penalizing drift of the latents from their trunk baseline.
 
@@ -354,8 +356,7 @@ class LatentOptimization:
         # BondGeometryReward penalizes stretched bonds and steric clashes in the denoised structure,
         # curbing the overshoot where an aggressive latent update trades geometry for density fit.
         if self.bond_length_weight > 0:
-            # Prefer the model atom array; fall back to the input atom array if it is absent.
-            geometry_atom_array = processed.model_atom_array or processed.atom_array
+            geometry_atom_array = processed.reward_atom_array
             bond_geometry = BondGeometryReward(
                 geometry_atom_array, self.bond_length_weight, coords.device
             )
@@ -542,7 +543,7 @@ class LatentOptimization:
             )
 
             if optimize:
-                data_loss = self._latent_adam_step(
+                data_loss = self._latent_optimizer_step(
                     denoised=step_output.denoised,
                     reward=reward,
                     reward_inputs=reward_inputs,
@@ -558,7 +559,7 @@ class LatentOptimization:
             coords = step_output.state.detach()
         return losses
 
-    def _latent_adam_step(
+    def _latent_optimizer_step(
         self,
         *,
         denoised: Tensor | None,
