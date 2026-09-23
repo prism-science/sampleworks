@@ -10,10 +10,12 @@ class GuidanceType(StrEnum):
     References:
     - Feynman-Kaç steering http://arxiv.org/abs/2501.06848
     - Pure guidance (DPS) http://arxiv.org/abs/2209.14687
+    - Latent optimization (IT-opt) https://arxiv.org/abs/2602.24007
     """
 
     FK_STEERING = "fk_steering"
     PURE_GUIDANCE = "pure_guidance"
+    LATENT_OPT = "latent_opt"
 
 
 class StructurePredictor(StrEnum):
@@ -47,6 +49,7 @@ class TrajectoryScalers(StrEnum):
 
     PURE_GUIDANCE = "pure_guidance"
     FK_STEERING = "fk_steering"
+    LATENT_OPT = "latent_opt"
 
 
 class Rewards(StrEnum):

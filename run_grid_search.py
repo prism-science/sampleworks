@@ -19,7 +19,12 @@ from typing import Any
 
 from loguru import logger as log
 from sampleworks.utils.guidance_constants import GuidanceType, StructurePredictor
-from sampleworks.utils.guidance_script_arguments import GuidanceConfig, JobConfig, JobResult
+from sampleworks.utils.guidance_script_arguments import (
+    add_latent_opt_args,
+    GuidanceConfig,
+    JobConfig,
+    JobResult,
+)
 from sampleworks.utils.protein_input import ProteinInput
 
 
@@ -267,12 +272,29 @@ def run_grid_search(
     successful = 0
     failed = 0
 
-    max_workers = len(gpus)
-    log.info(f"Running {len(jobs)} jobs with {max_workers} parallel workers")
+    # Workers per GPU (--jobs-per-gpu) lets two jobs share a card, which is worthwhile because a
+    # single job leaves the GPU idle while it featurizes and writes output. Two constraints shape
+    # the worker count:
+    #   never more workers than jobs -- a surplus worker gets an empty queue, and the
+    #     worker_job_queues[worker_num][0] lookup below then raises IndexError before any model
+    #     loads. Easy to hit once jobs_per_gpu multiplies the count.
+    #   keep it a whole multiple of the GPU count, so every card carries the same load. Clamping
+    #     to the job count alone leaves e.g. 5 workers on 4 GPUs: one card runs two jobs
+    #     concurrently while the other three run one and then idle.
+    max_workers = min(len(gpus) * args.jobs_per_gpu, len(jobs))
+    if max_workers > len(gpus):
+        max_workers -= max_workers % len(gpus)
+    gpus_used = min(max_workers, len(gpus))
+    log.info(
+        f"Running {len(jobs)} jobs with {max_workers} parallel workers "
+        f"({gpus_used} GPU(s) x {max_workers // gpus_used} jobs/GPU)"
+    )
 
-    # Divide the job among the workers:
+    # Divide the job among the workers. The worker index is no longer the GPU ordinal, so the
+    # device wraps with i % len(gpus): workers 0..7 across 4 GPUs pair up as 0,1,2,3,0,1,2,3.
+    # Passing i directly would ask for cuda:4..cuda:7 on a 4-GPU box and fail immediately.
     worker_job_queues = [
-        [build_args_for_process_pool(j, args, i) for j in jobs[i::max_workers]]
+        [build_args_for_process_pool(j, args, i % len(gpus)) for j in jobs[i::max_workers]]
         for i in range(max_workers)
     ]
     # we'll pickle each job queue separately and then execute each job queue in a separate process
@@ -779,6 +801,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--augmentation", action="store_true", help="Enable augmentation")
     parser.add_argument("--align-to-input", action="store_true", help="Align to input structure")
 
+    # Latent optimization (IT-opt) arguments, used when --scalers includes latent_opt.
+    # Registered from the shipped adder rather than restated here so that flag names, types and
+    # defaults stay identical to the sampleworks-guidance CLI.
+    add_latent_opt_args(parser)
+
     # RF3-specific arguments
     parser.add_argument(
         "--disable-chiral-features",
@@ -802,6 +829,14 @@ def parse_args() -> argparse.Namespace:
         "--max-parallel",
         default="auto",
         help="Max parallel jobs (default: auto = number of GPUs)",
+    )
+    parser.add_argument(
+        "--jobs-per-gpu",
+        type=int,
+        default=1,
+        choices=(1, 2),
+        help="Concurrent jobs per GPU (default: 1). Each holds its own copy of the model weights, "
+        "so 2 needs roughly twice the VRAM; 2 is the tested ceiling",
     )
     parser.add_argument(
         "--dry-run",

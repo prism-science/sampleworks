@@ -1,0 +1,39 @@
+description = "IT-opt s_plus_z on 8 GPUs: outer-loop counts K = 5, 10, 20, one job block each."
+
+[defaults]
+DATA_DIR = "/data/inputs"
+RESULTS_DIR = "/data/results/it_opt_8gpu"
+PROTEINS_CSV = "${DATA_DIR}/proteins.csv"
+
+[shared_args]
+proteins = "${PROTEINS_CSV}"
+model = "protenix"
+scalers = "latent_opt"
+which-latent = "both"
+ensemble-sizes = "8"
+gradient-weights = "0.0"
+num-diffusion-steps = 200
+bond-length-weight = 5e-5
+align-to-input = true
+jobs-per-gpu = 2
+
+[[jobs]]
+name = "s_plus_z_K5"
+env = "protenix"
+gpu_count = 2
+output_subdir = "s_plus_z_K5"
+args = { outer-steps = 5 }
+
+[[jobs]]
+name = "s_plus_z_K10"
+env = "protenix"
+gpu_count = 2
+output_subdir = "s_plus_z_K10"
+args = { outer-steps = 10 }
+
+[[jobs]]
+name = "s_plus_z_K20"
+env = "protenix"
+gpu_count = 4
+output_subdir = "s_plus_z_K20"
+args = { outer-steps = 20 }
