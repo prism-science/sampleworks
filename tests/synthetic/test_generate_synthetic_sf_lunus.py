@@ -153,15 +153,24 @@ class TestSelfConsistency:
 
         _, mean_f, diffuse = _amplitudes(atom_array, replicated, cell, spacegroup, cpu_device)
 
-        # Diffuse is a difference of two large, nearly equal numbers, so in
-        # float32 it is exactly zero only where the intensity is small. Compare
-        # RMS to RMS: both are dominated by the strongest reflections, so the
-        # ratio measures the relative cancellation error rather than mixing an
-        # absolute residual on the largest reflection against a mean intensity.
-        # Measured on 6B8X at 1.8 A: 8e-9 to 4.3e-8 across runs, i.e. float32
-        # epsilon, and 3.1e-8 to 4.4e-8 on 1VME chain A before the structure
-        # changed. It varies run to run because the splat's reduction order does;
-        # the bound allows for that rather than pinning one value.
+        # Diffuse is already a difference -- <|F|^2> - |<F>|^2 -- of two large,
+        # nearly equal numbers, so in float32 it is exactly zero only where the
+        # intensity is small. What it is compared against has to be relative,
+        # because cancellation error is proportional to the magnitude of the
+        # operands: doubling the occupancies quadruples the intensity (measured
+        # 3.93e6 -> 1.57e7 RMS) and the residual grows with it, while the ratio
+        # stays put. An absolute bound would encode this structure's scale --
+        # here the worst reflection is off by 16 against an intensity RMS of
+        # millions -- and would need rederiving for every structure, resolution
+        # and occupancy convention.
+        #
+        # RMS to RMS, since both are dominated by the strongest reflections, so
+        # the ratio measures relative cancellation rather than mixing an absolute
+        # residual on the largest reflection against a mean intensity. Measured
+        # on 6B8X at 1.8 A: 8e-9 to 4.3e-8 across runs, i.e. float32 epsilon, and
+        # 3.1e-8 to 4.4e-8 on 1VME chain A before the structure changed. It varies
+        # run to run because the splat's reduction order does; the bound allows
+        # for that rather than pinning one value.
         intensity = np.abs(mean_f).astype(np.float64) ** 2
         rms_intensity = float(np.sqrt(np.mean(intensity**2)))
         rms_diffuse = float(np.sqrt(np.mean(diffuse.astype(np.float64) ** 2)))
