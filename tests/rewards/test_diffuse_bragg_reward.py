@@ -32,11 +32,16 @@ from sampleworks.core.rewards.protocol import (
 
 pytest.importorskip("lunus.sf", reason="lunus[sf] not installed")
 
-# Slow, but needing neither a GPU nor model weights: ~3 min, dominated by ~30
-# forward passes on CPU. Marked at module scope, following
-# tests/eval/test_rscc_grid_search_script.py, where `slow` already covers
-# runtime alone rather than hardware.
-pytestmark = pytest.mark.slow
+# Deliberately unmarked. These need neither a GPU nor model weights, and the
+# whole module runs in ~12 s on CPU -- measured 12.1 s for all 18 tests on
+# 2026-09-23 (4-core aarch64), against the "~3 min, dominated by ~30 forward
+# passes" this comment used to claim, which does not reproduce.
+#
+# Marking it hid the only coverage this reward has from `pixi run -e <env>
+# tests`, which is the loop where a regression in it most wants to fire. CI is
+# unaffected either way -- `cpu-tests` deselects `gpu`, not `slow`. Same
+# treatment as tests/synthetic/test_generate_synthetic_sf_lunus.py, whose
+# equivalent claim was also measured and dropped.
 
 RESOLUTION = 1.8
 SOURCE_CIF = "1vme_final.cif"
