@@ -22,6 +22,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from sampleworks.core.rewards.protocol import (
+    PreparableRewardFunctionProtocol,
+    prepare_reward_if_needed,
+    RewardFunctionProtocol,
+    RewardInputs,
+)
 
 
 pytest.importorskip("lunus.sf", reason="lunus[sf] not installed")
@@ -103,6 +109,19 @@ def build_reward(targets, weight, **kwargs):
     )
 
 
+def prepare(reward, atom_array, device="cpu"):
+    """Prepare the way the sampling loop does, through RewardInputs.
+
+    ``prepare()`` takes reward inputs rather than an atom array, so the topology
+    is wrapped as single-conformer inputs -- the same shape
+    ``StructureFactorRewardFunction``'s tests use.
+    """
+    reward.prepare(
+        RewardInputs.from_atom_array(atom_array, ensemble_size=1, device=device), device=device
+    )
+    return reward
+
+
 def score(reward, atom_array, coords, requires_grad=False):
     """Evaluate the reward the way the sampling loop would.
 
@@ -131,7 +150,7 @@ def test_recovers_the_structure_it_was_generated_from(ensemble, targets, weight)
     """
     atom_array, coords = ensemble
     reward = build_reward(targets, weight)
-    reward.prepare(atom_array, device="cpu")
+    prepare(reward, atom_array)
 
     loss, _ = score(reward, atom_array, coords)
     assert torch.isfinite(loss)
@@ -149,7 +168,7 @@ def test_loss_increases_with_displacement(ensemble, targets, weight):
     """
     atom_array, coords = ensemble
     reward = build_reward(targets, weight)
-    reward.prepare(atom_array, device="cpu")
+    prepare(reward, atom_array)
 
     rng = np.random.default_rng(0)
     direction = rng.normal(size=coords.shape)
@@ -176,7 +195,7 @@ def test_gradients_reach_the_coordinates(ensemble, targets, weight):
     """
     atom_array, coords = ensemble
     reward = build_reward(targets, weight)
-    reward.prepare(atom_array, device="cpu")
+    prepare(reward, atom_array)
 
     rng = np.random.default_rng(1)
     displaced = coords + 0.1 * rng.normal(size=coords.shape)
@@ -198,7 +217,7 @@ def test_gradient_points_downhill(ensemble, targets):
     """
     atom_array, coords = ensemble
     reward = build_reward(targets, 0.5)
-    reward.prepare(atom_array, device="cpu")
+    prepare(reward, atom_array)
 
     rng = np.random.default_rng(2)
     displaced = coords + 0.1 * rng.normal(size=coords.shape)
@@ -247,7 +266,7 @@ class TestWeightHandling:
         """RewardFunctionProtocol carries no t, so nothing sets current_time yet."""
         atom_array, coords = ensemble
         reward = build_reward(targets, lambda t: t)
-        reward.prepare(atom_array, device="cpu")
+        prepare(reward, atom_array)
 
         with pytest.raises(RuntimeError, match="current_time"):
             score(reward, atom_array, coords)
@@ -255,7 +274,7 @@ class TestWeightHandling:
     def test_callable_weight_uses_current_time(self, ensemble, targets):
         atom_array, coords = ensemble
         reward = build_reward(targets, lambda t: 1.0 if t > 0.5 else 0.0)
-        reward.prepare(atom_array, device="cpu")
+        prepare(reward, atom_array)
 
         reward.current_time = 0.9
         pure_bragg, _ = score(reward, atom_array, coords)
@@ -265,3 +284,45 @@ class TestWeightHandling:
         # Both are recovery losses, but of different terms, so they differ by
         # the several orders of magnitude the recovery test documents.
         assert pure_bragg.item() != pure_diffuse.item()
+
+
+class TestProtocolConformance:
+    """The two-phase hook, exercised the way the sampling loop reaches it.
+
+    ``isinstance`` is structural and checks method *names*, so it cannot catch a
+    ``prepare`` whose first parameter is the wrong type: before #402's signature
+    change was followed here, this class satisfied the protocol while
+    ``prepare_reward_if_needed`` handed it a ``RewardInputs`` where an
+    ``AtomArray`` was expected, and the failure surfaced deep inside
+    ``build_setup``. Going through the hook is what pins it.
+    """
+
+    def test_satisfies_both_reward_protocols(self, targets):
+        reward = build_reward(targets, 0.5)
+
+        assert isinstance(reward, RewardFunctionProtocol)
+        assert isinstance(reward, PreparableRewardFunctionProtocol)
+
+    def test_prepare_hook_binds_the_reward(self, ensemble, targets):
+        """``prepare_reward_if_needed`` is how scalers prepare a reward, so the
+        reward has to be usable after being prepared that way and no other."""
+        atom_array, coords = ensemble
+        reward = build_reward(targets, 0.5)
+
+        prepare_reward_if_needed(
+            reward, RewardInputs.from_atom_array(atom_array, ensemble_size=1), device="cpu"
+        )
+
+        assert reward.setup is not None
+        loss, _ = score(reward, atom_array, coords)
+        assert torch.isfinite(loss)
+
+    def test_prepare_without_an_atom_array_is_a_clear_error(self, ensemble, targets):
+        """The topology cannot be recovered from the tensors alone."""
+        atom_array, _ = ensemble
+        reward = build_reward(targets, 0.5)
+        inputs = RewardInputs.from_atom_array(atom_array, ensemble_size=1)
+        inputs.atom_array = None
+
+        with pytest.raises(ValueError, match="atom_array"):
+            reward.prepare(inputs)

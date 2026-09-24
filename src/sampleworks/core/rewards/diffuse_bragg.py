@@ -28,7 +28,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import numpy as np
 import reciprocalspaceship as rs
@@ -36,10 +35,8 @@ import torch
 from jaxtyping import Float, Int
 from loguru import logger
 from sampleworks.core.forward_models.xray import lunus_sf
-
-
-if TYPE_CHECKING:
-    from biotite.structure import AtomArray
+from sampleworks.core.rewards.protocol import RewardInputs
+from sampleworks.synthetic.synthetic_utils import resolve_mtz_column
 
 
 class DiffuseBraggRewardFunction:
@@ -47,9 +44,9 @@ class DiffuseBraggRewardFunction:
 
     Construction is two-phase, like ``StructureFactorRewardFunction``: the
     targets and configuration are read in ``__init__``, but the scattering
-    kernels, grid and symmetry operations need the model atom array and so are
-    built in :meth:`prepare`, which the caller must invoke before the first
-    evaluation.
+    kernels, grid and symmetry operations need the model topology and so are
+    built in :meth:`prepare` from the ``RewardInputs``, which the caller must
+    invoke before the first evaluation.
 
     Parameters
     ----------
@@ -66,9 +63,10 @@ class DiffuseBraggRewardFunction:
         case :attr:`current_time` must be set before each evaluation — see the
         note there, since no sampleworks caller does that yet.
     bragg_column, diffuse_column
-        Column names in the respective MTZs. ``None`` auto-detects: the single
-        structure-factor-amplitude column for Bragg, and for diffuse the single
-        intensity column.
+        Column names in the respective MTZs, resolved by
+        :func:`resolve_mtz_column`: ``None`` takes the sole column of the right
+        MTZ dtype, and a given name is checked against those candidates rather
+        than trusted.
     resolution
         High-resolution cutoff in Å applied to the reflection list, or ``None``
         to use everything the targets contain.
@@ -172,15 +170,15 @@ class DiffuseBraggRewardFunction:
 
         if self._scores_bragg:
             ds = rs.read_mtz(str(bragg_path))
-            column = bragg_column or self._sole_column(
-                ds, rs.StructureFactorAmplitudeDtype(), bragg_path
+            column = resolve_mtz_column(
+                ds, rs.StructureFactorAmplitudeDtype(), column=bragg_column
             )
             bragg_hkl, bragg_values = self._finite_column(ds, column)
             cell, spacegroup = ds.cell, ds.spacegroup
 
         if self._scores_diffuse:
             ds = rs.read_mtz(str(diffuse_path))
-            column = diffuse_column or self._sole_column(ds, rs.IntensityDtype(), diffuse_path)
+            column = resolve_mtz_column(ds, rs.IntensityDtype(), column=diffuse_column)
             diffuse_hkl, diffuse_values = self._finite_column(ds, column)
             if cell is None:
                 cell, spacegroup = ds.cell, ds.spacegroup
@@ -232,17 +230,6 @@ class DiffuseBraggRewardFunction:
         return contiguous.view([("h", "i8"), ("k", "i8"), ("l", "i8")]).ravel()
 
     @staticmethod
-    def _sole_column(dataset: rs.DataSet, dtype, path) -> str:
-        """The one column of the given MTZ dtype, or an error naming the choices."""
-        candidates = [c for c in dataset.columns if isinstance(dataset.dtypes[c], type(dtype))]
-        if len(candidates) != 1:
-            raise ValueError(
-                f"{path} holds {len(candidates)} columns of type {type(dtype).__name__} "
-                f"({candidates}); name one explicitly."
-            )
-        return candidates[0]
-
-    @staticmethod
     def _finite_column(dataset: rs.DataSet, column: str) -> tuple[np.ndarray, np.ndarray]:
         """The (hkl, value) pairs of one column, dropping unmeasured entries."""
         values = dataset[column].to_numpy(dtype=np.float64)
@@ -252,17 +239,45 @@ class DiffuseBraggRewardFunction:
         finite = np.isfinite(values)
         return hkl[finite].astype(np.int64), values[finite]
 
-    def prepare(self, atom_array: AtomArray, *, device: torch.device | str = "cpu") -> None:
+    def prepare(
+        self, reward_inputs: RewardInputs, *, device: torch.device | str = "cpu"
+    ) -> None:
         """Build the scattering setup and the anisotropic transform on ``device``.
 
-        Must be called with the atom array the sampled coordinates correspond to
-        — model atom space, so ``model_atom_array`` where the reconciler reports
-        a mismatch — since its ordering fixes the columns of every coordinate
-        tensor passed to :meth:`__call__`.
+        Must be called with the inputs built for the sampled coordinates — model
+        atom space, so ``model_atom_array`` where the reconciler reports a
+        mismatch — since their atom ordering fixes the columns of every
+        coordinate tensor passed to :meth:`__call__`.
+
+        The topology comes from :meth:`RewardInputs.to_atom_array`, which carries
+        the model atom identities together with the reconciled coordinates and
+        B-factors ``__call__`` will see. The B-factors matter here and not only
+        there: :func:`lunus_sf.build_setup` bakes them into the scattering
+        kernels, which is why they cannot vary per configuration afterwards.
+
+        Parameters
+        ----------
+        reward_inputs
+            Inputs for the sampled coordinates, as returned by
+            ``SampleworksProcessedStructure.to_reward_inputs``. Needs an
+            ``atom_array`` to take the topology from.
+        device
+            Torch device to build on. Every tensor built here is allocated on it,
+            so pass the device the sampled coordinates will live on.
+
+        Raises
+        ------
+        ValueError
+            If ``reward_inputs`` carries no atom array.
         """
         device = torch.device(device)
+        if reward_inputs.atom_array is None:
+            raise ValueError(
+                "DiffuseBraggRewardFunction.prepare() needs reward_inputs.atom_array "
+                "for the topology the scattering kernels are built from."
+            )
         self.setup = lunus_sf.build_setup(
-            atom_array,
+            reward_inputs.to_atom_array(),
             self.unit_cell,
             self.space_group.hm,
             self.resolution or self._highest_resolution(),
