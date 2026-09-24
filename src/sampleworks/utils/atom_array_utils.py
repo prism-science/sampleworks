@@ -74,21 +74,26 @@ def parse_selection_string(selection: str) -> tuple[str | None, int | None, int 
     return chain, resi_start, resi_end
 
 
-def apply_selection(atom_array: AtomArray, selection: str | None) -> AtomArray:
+def apply_selection(
+    atom_array: AtomArray | AtomArrayStack, selection: str | None
+) -> AtomArray | AtomArrayStack:
     """Apply an atom selection string to filter a structure.
 
     Parameters
     ----------
     atom_array
-        Structure to filter
+        Structure to filter. A stack is filtered along its atom axis, leaving
+        every model in place: per-atom annotations are shared across models, so
+        one mask describes them all.
     selection
         Selection string (e.g., 'chain A and resi 10-50'). If None, returns
         the entire structure unchanged.
 
     Returns
     -------
-    AtomArray
-        Filtered structure containing only atoms matching the selection
+    AtomArray | AtomArrayStack
+        Filtered structure containing only atoms matching the selection, of the
+        same type as the input.
 
     Raises
     ------
@@ -103,6 +108,11 @@ def apply_selection(atom_array: AtomArray, selection: str | None) -> AtomArray:
     else:
         mask = atom_array.mask(selection)
 
+    # A stack's first axis is models, so a bare `[mask]` would select models by
+    # an atom-length boolean and raise. Both mask builders above already accept
+    # a stack; only the indexing has to know the difference.
+    if isinstance(atom_array, AtomArrayStack):
+        return cast(AtomArrayStack, atom_array[:, mask])
     return cast(AtomArray, atom_array[mask])
 
 
@@ -388,13 +398,15 @@ def map_altlocs_to_stack(
 
     Returns
     -------
-    tuple[AtomArrayStack, np.ndarray, np.ndarray]
+    tuple[AtomArrayStack, dict[str, np.ndarray]]
         Tuple containing:
 
-        - AtomArrayStack with separate structures for each altloc.
-        - Dictionary of extra annotations that are removed to avoid conflicts, currently
-          'occupancy', 'altloc_id', and 'b_factor'. Each is returned as
-          n_altloc x n_res numpy arrays
+        - AtomArrayStack with separate structures for each altloc. Note that the
+          annotations below are *absent* from it, having been deleted to let the
+          structures stack.
+        - Dictionary of the extra annotations that are removed to avoid conflicts,
+          currently 'occupancy', 'altloc_id', and 'b_factor'. Each is returned as an
+          ``(n_altloc, n_atoms)`` numpy array, indexed by the stack's atom order.
     """
     if isinstance(atom_array, AtomArrayStack):
         if len(atom_array) > 1:

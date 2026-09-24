@@ -29,6 +29,7 @@ from sampleworks.core.rewards.real_space_density import (
     RealSpaceRewardFunction,
     setup_scattering_params,
 )
+from sampleworks.utils.elements import it92_coefficients
 
 
 class TestSetupScatteringParams:
@@ -110,6 +111,40 @@ class TestSetupScatteringParams:
         _, elements, _, _ = extract_density_inputs_from_atomarray(aa, device)
         assert elements.squeeze(0)[0].item() == 0
         assert params[0].sum().item() == 0
+
+    def test_it92_mode_reproduces_it92_scattering_factors(self, device):
+        """The IT92 table is four Gaussians plus a constant, padded into the
+        five-plus-constant layout, so the scattering factor f(s) it yields must
+        equal the one computed from the IT92 coefficients directly."""
+        from sampleworks.core.rewards.real_space_density import ELEMENT_TO_SCATTERING_INDEX
+
+        params = setup_scattering_params(em_mode=False, device=device, it92_mode=True)
+        s = torch.linspace(0.0, 0.6, 7, device=device)
+
+        for element, coefficients in it92_coefficients(["H", "C", "N", "O", "S", "Se"]).items():
+            row = params[ELEMENT_TO_SCATTERING_INDEX[element]]
+            padded = (row[:5, 0:1] * torch.exp(-row[:5, 1:2] * s**2)).sum(0) + row[5, 0]
+            a = torch.tensor(coefficients[:4], device=device).unsqueeze(1)
+            b = torch.tensor(coefficients[4:8], device=device).unsqueeze(1)
+            expected = (a * torch.exp(-b * s**2)).sum(0) + coefficients[8]
+            torch.testing.assert_close(
+                padded, expected, msg=lambda m: f"Mismatch for '{element}': {m}"
+            )
+
+    def test_it92_mode_leaves_untabulated_rows_zero(self, device):
+        """IT92 has no entry for qfit's valence-state pseudo-elements, so those
+        rows stay zero rather than borrowing a neighbouring element's factors."""
+        from sampleworks.core.rewards.real_space_density import ELEMENT_TO_SCATTERING_INDEX
+
+        params = setup_scattering_params(em_mode=False, device=device, it92_mode=True)
+        assert params[ELEMENT_TO_SCATTERING_INDEX["Cval"]].sum().item() == 0
+        assert params[ELEMENT_TO_SCATTERING_INDEX["C"]].sum().item() != 0
+
+    def test_it92_mode_rejects_em_mode(self, device):
+        """IT92 tabulates X-ray scattering only; combining it with electron
+        scattering factors is an error, not a silent preference."""
+        with pytest.raises(ValueError, match="X-ray only"):
+            setup_scattering_params(em_mode=True, device=device, it92_mode=True)
 
 
 class TestStructureToRewardInput:
