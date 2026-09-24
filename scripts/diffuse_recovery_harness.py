@@ -37,7 +37,6 @@ import torch
 from atomworks.io.utils.io_utils import load_any
 from biotite.structure import stack
 from loguru import logger
-from sampleworks.eval.structure_utils import process_structure_to_trajectory_input
 from sampleworks.synthetic.generate_synthetic_sf_lunus import (
     compute_ensemble_amplitudes,
     dataset_from_amplitudes,
@@ -45,6 +44,7 @@ from sampleworks.synthetic.generate_synthetic_sf_lunus import (
 )
 from sampleworks.utils.atom_array_utils import save_structure_to_cif
 from sampleworks.utils.guidance_script_utils import get_model_and_device
+from sampleworks.utils.structure_utils import process_structure_to_trajectory_input
 from sampleworks.utils.torch_utils import try_gpu
 
 

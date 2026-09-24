@@ -378,8 +378,9 @@ def diffuse_targets(tmp_path: Path) -> tuple[Path, Path]:
     pytest.importorskip("lunus.sf", reason="lunus[sf] not installed")
     import gemmi
     from sampleworks.synthetic.generate_synthetic_sf_lunus import (
-        dataset_from_amplitudes,
-        dataset_from_intensities,
+        dataset_from_bragg_amplitudes,
+        dataset_from_diffuse_intensities,
+        save_mtz,
     )
 
     cell = gemmi.UnitCell(30.0, 40.0, 50.0, 90.0, 90.0, 90.0)
@@ -393,8 +394,16 @@ def diffuse_targets(tmp_path: Path) -> tuple[Path, Path]:
 
     bragg_path = tmp_path / "bragg.mtz"
     diffuse_path = tmp_path / "diffuse.mtz"
-    dataset_from_amplitudes(hkl, amplitudes, cell, space_group, output_path=bragg_path)
-    dataset_from_intensities(hkl, intensities, cell, space_group, output_path=diffuse_path)
+    save_mtz(
+        dataset_from_bragg_amplitudes(hkl, amplitudes, cell, space_group),
+        bragg_path,
+        "structure factors",
+    )
+    save_mtz(
+        dataset_from_diffuse_intensities(hkl, intensities, cell, space_group),
+        diffuse_path,
+        "diffuse intensities",
+    )
     return bragg_path, diffuse_path
 
 

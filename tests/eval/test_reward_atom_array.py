@@ -14,9 +14,9 @@ from __future__ import annotations
 import numpy as np
 import torch
 from biotite.structure import AtomArray
-from sampleworks.eval.structure_utils import SampleworksProcessedStructure
 from sampleworks.models.protocol import GenerativeModelInput
 from sampleworks.utils.atom_reconciler import AtomReconciler
+from sampleworks.utils.structure_utils import SampleworksProcessedStructure
 
 
 def _atom_array(n_atoms: int, element: str = "C") -> AtomArray:
