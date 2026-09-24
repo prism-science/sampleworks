@@ -483,7 +483,7 @@ def test_get_diffuse_reward_and_structure_keeps_the_original_structure_file(
 ):
     """Same contract as the real-space builder: the caller's input must survive.
 
-    ``_load_structure`` deletes the temporary file that altloc resolution may
+    ``load_structure`` deletes the temporary file that altloc resolution may
     write, and the comparison guarding that unlink is by string value because
     ``Path(x) != str(x)``.
     """

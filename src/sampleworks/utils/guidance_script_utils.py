@@ -265,7 +265,7 @@ def get_model_and_device(
 
 
 # TODO: further atomize for easier testing.
-def _load_structure(structure_path: str | Path) -> dict[str, Any]:
+def load_structure(structure_path: str | Path) -> dict[str, Any]:
     """Parse a structure file into an atomworks dict, hydrogens removed.
 
     Shared by every target type: the reward differs, the structure does not.
@@ -306,6 +306,10 @@ def get_diffuse_reward_and_structure(
     the same choice ``StructureFactorRewardFunction`` makes: the reflections and
     the cell they were indexed on have to agree, and only the MTZ knows both.
     """
+    # Inline deliberately: diffuse_bragg imports lunus.sf at module scope, and
+    # the analysis, analysis-dev and boltz-analysis environments do not get the
+    # diffuse pixi feature, so importing this at module scope would break their
+    # import of this module entirely.
     from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
 
     logger.info(
@@ -318,7 +322,7 @@ def get_diffuse_reward_and_structure(
         bragg_weight=bragg_weight,
         resolution=resolution,
     )
-    return reward_function, _load_structure(structure_path)
+    return reward_function, load_structure(structure_path)
 
 
 def get_reward_function_and_structure(
@@ -330,7 +334,7 @@ def get_reward_function_and_structure(
     structure_path: str | Path,
 ) -> tuple[RealSpaceRewardFunction, dict[str, Any]]:
     """Load structure and density inputs and build the real-space reward function."""
-    structure = _load_structure(structure_path)
+    structure = load_structure(structure_path)
 
     logger.debug(f"Loading density map from {density}")
     xmap = XMap.fromfile(density, resolution=resolution)

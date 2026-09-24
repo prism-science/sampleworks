@@ -70,7 +70,7 @@ def model_topology_and_coords(
         structure, mapped through the reconciler.
     """
     from sampleworks.models.boltz.wrapper import process_structure_for_boltz
-    from sampleworks.utils.guidance_script_utils import _load_structure
+    from sampleworks.utils.guidance_script_utils import load_structure
 
     # get_model_and_device reads only `.method` off the config for Boltz-2, so a
     # stand-in carries it. Building a real GuidanceConfig would make this harness
@@ -79,7 +79,7 @@ def model_topology_and_coords(
     config = SimpleNamespace(method="X-RAY DIFFRACTION")
 
     _, model = get_model_and_device(str(device), str(checkpoint), "boltz2", config=config)
-    structure = process_structure_for_boltz(_load_structure(structure_path), out_dir=out_dir)
+    structure = process_structure_for_boltz(load_structure(structure_path), out_dir=out_dir)
     features = model.featurize(structure)
 
     prior = torch.as_tensor(model.initialize_from_prior(batch_size=1, features=features))
