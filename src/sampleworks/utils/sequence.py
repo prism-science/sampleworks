@@ -127,6 +127,60 @@ def resolve_sequence_arg(
     return validate_seq_with_error(sequence)
 
 
+def _snap_runs_to_numbering(
+    observed_seq: str,
+    sequence: str,
+    residue_ids: np.ndarray,
+    seq_idx: np.ndarray,
+) -> np.ndarray:
+    """Place runs of consecutive residue numbers on consecutive sequence positions.
+
+    A sequence-only alignment can tie when a residue next to a gap also occurs on the far
+    side of the gap. In 5I09, for example, observed ``LYS 125 | SER 131 ARG 132 ...`` aligns
+    SER 131 directly after LYS 125 as readily as after the gap. Each run of consecutive
+    ``res_id`` is shifted to the first offset (``res_id - position``) that puts every residue
+    of the run on a matching letter, trying the run's own aligned offsets by frequency and
+    then the chain-wide most common offset.
+
+    Parameters
+    ----------
+    observed_seq : str
+        One-letter sequence of the observed residues, in residue order.
+    sequence : str
+        Full override sequence.
+    residue_ids : np.ndarray
+        ``res_id`` of each observed residue, shape ``(n_observed,)``.
+    seq_idx : np.ndarray
+        Aligned position in ``sequence`` of each observed residue, ``-1`` if unaligned,
+        shape ``(n_observed,)``.
+
+    Returns
+    -------
+    np.ndarray
+        Adjusted positions, shape ``(n_observed,)``. ``seq_idx`` is returned unchanged if
+        the adjusted positions would not be strictly increasing.
+    """
+
+    def offsets_by_frequency(indices: np.ndarray) -> list[int]:
+        aligned = indices[seq_idx[indices] >= 0]
+        offsets, counts = np.unique(residue_ids[aligned] - seq_idx[aligned], return_counts=True)
+        return offsets[np.argsort(-counts, kind="stable")].tolist()
+
+    chain_offset = offsets_by_frequency(np.arange(len(residue_ids)))[:1]
+    snapped = seq_idx.copy()
+    run_breaks = np.flatnonzero(np.diff(residue_ids) != 1) + 1
+    for run in np.split(np.arange(len(residue_ids)), run_breaks):
+        for offset in offsets_by_frequency(run) + chain_offset:
+            candidate = residue_ids[run] - offset
+            in_range = candidate.min() >= 0 and candidate.max() < len(sequence)
+            if in_range and all(sequence[c] == observed_seq[i] for i, c in zip(run, candidate)):
+                snapped[run] = candidate
+                break
+
+    placed = snapped[snapped >= 0]
+    return snapped if np.all(np.diff(placed) > 0) else seq_idx
+
+
 def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> dict[str, Any]:
     """Return a structure with its protein-chain sequence overridden when provided.
 
@@ -211,6 +265,9 @@ def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> 
             if observed_seq[obs_i] != sequence[full_i]:
                 continue
             residue_seq_idx[obs_i] = full_i
+    residue_seq_idx = _snap_runs_to_numbering(
+        observed_seq, sequence, chain_array.res_id[starts[:-1]], residue_seq_idx
+    )
 
     # Every observed residue must map to the override sequence.  Unmapped
     # residues (seq_idx == -1) would corrupt downstream tensor indexing in

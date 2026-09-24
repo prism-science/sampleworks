@@ -447,3 +447,63 @@ class TestReconcilerWithSequenceOverride:
         assert n_mispaired == 0, (
             f"{n_mispaired}/{len(m_idx)} atoms mispaired after sequence override"
         )
+
+
+# ---------------------------------------------------------------------------
+# Gap placement: runs of consecutive residue numbers must stay contiguous
+# ---------------------------------------------------------------------------
+
+# RCSB 5I09 chain A entity sequence (pdbx_seq_one_letter_code_can). Author number = position + 1.
+_5I09_FULL_SEQUENCE = (
+    "MVEATAQETDRPRFSFSIAAREGKARTGTIEMKRGVIRTPAFMPVGTAATVKALKPETVRATGADIILGNTYHLMLRPGA"
+    "ERIAKLGGLHSFMGWDRPILTDSGGYQVMSLSSLTKQSEEGVTFKSHLDGSRHMLSPERSIEIQHLLGSDIVMAFDECTP"
+    "YPATPSRAASSMERSMRWAKRSRDAFDSRKEQAENAALFGIQQGSVFENLRQQSADALAEIGFDGYAVGGLAVGEGQDEM"
+    "FRVLDFSVPMLPDDKPHYLMGVGKPDDIVGAVERGIDMFDCVLPTRSGRNGQAFTWDGPINIRNARFSEDLKPLDSECHC"
+    "AVCQKWSRAYIHHLIRAGEILGAMLMTEHNIAFYQQLMQKIRDSISEGRFSQFAQDFRARYFARNS"
+)
+
+
+def _single_chain_structure(res_ids: list[int], one_letter: str) -> dict:
+    """One CA atom per residue on chain A, with the observed sequence as chain_info."""
+    from atomworks.enums import ChainType
+    from biotite.sequence import ProteinSequence
+    from biotite.structure import AtomArray
+
+    atoms = AtomArray(len(res_ids))
+    atoms.chain_id[:] = "A"
+    atoms.res_id[:] = res_ids
+    atoms.res_name = np.array([ProteinSequence.convert_letter_1to3(c) for c in one_letter])
+    atoms.atom_name[:] = "CA"
+    return {
+        "asym_unit": atoms,
+        "chain_info": {
+            "A": {
+                "chain_type": ChainType.POLYPEPTIDE_L,
+                "processed_entity_canonical_sequence": one_letter,
+            }
+        },
+    }
+
+
+def test_residue_after_gap_is_not_pulled_across_the_gap():
+    """A residue that also occurs just before a gap must have the correct numbering.
+
+    Full sequence ``MVEATAQETDFKSHLDGSRHMLS`` is numbered from 114 (the 5I09 motif around
+    its 126-130 gap). With ``SHLDG`` missing, a sequence-only alignment starts the observed
+    ``SRHMLS`` at SER 126, right after LYS 125, and then cannot place the rest of the sequence
+    properly, but the residue numbers say the run starts at SER 131 so we should use that info.
+    """
+    res_ids = [*range(114, 126), *range(131, 137)]
+    structure = _single_chain_structure(res_ids, "MVEATAQETDFK" + "SRHMLS")
+
+    updated = apply_sequence_override(structure, "MVEATAQETDFKSHLDGSRHMLS")["asym_unit"]
+
+    np.testing.assert_array_equal(updated.seq_idx, [*range(0, 12), *range(17, 23)])
+
+
+def test_5i09_observed_residues_follow_author_numbering(structure_5i09_density: dict):
+    """Regression for 5I09: every observed residue lands at author number - 1 (RCSB numbering)."""
+    updated = apply_sequence_override(structure_5i09_density, _5I09_FULL_SEQUENCE)["asym_unit"]
+
+    protein = updated.seq_idx >= 0
+    np.testing.assert_array_equal(updated.res_id[protein] - updated.seq_idx[protein], 1)
