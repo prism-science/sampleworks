@@ -25,9 +25,6 @@ from sampleworks.utils.atom_array_utils import filter_to_common_atoms
 
 # This method is copied from RosettaCommons/foundry/models/rf3/metrics/lddt.py, but
 # modified to return residue-level LDDT scores as well.
-# TODO: break this up into easily testable pieces.
-#  https://github.com/k-chrispens/sampleworks/issues/50
-# TODO? borrow tests from RosettaCommons/foundry?
 def _calc_lddt(
     X_L: Float[torch.Tensor, "D L 3"],
     X_gt_L: Float[torch.Tensor, "D L 3"],
@@ -82,6 +79,8 @@ def _calc_lddt(
     lddt_scores = []
     residue_level_lddt_scores = []
     # TODO: can this be further vectorized? https://github.com/k-chrispens/sampleworks/issues/50
+    # i.e. there's not especially a reason for things to live inside a for loop that goes
+    # through each batch / ensemble member individually
     for d in range(D):
         # Calculate pairwise distances in ground truth structure
         ground_truth_distances = torch.linalg.norm(
@@ -145,11 +144,18 @@ def _calc_lddt(
                     + torch.sum(result < 2.0)
                     + torch.sum(result < 4.0)
                 )
-                / len(result)
+            # For now, I force the residue-level lDDT score to impute 0 when there are no paired
+            # residues to score (i.e. result is an empty tensor). This is to match the global
+            # lDDT behavior; but this prevents downstream operations from determining whether a score
+            # is truly 0 (distances too far) or is NaN (there are no distances to assess). For example, there may be 
+            # cases (e.g. bad selection string) where a token with no valid atoms is selected, in which
+            # there are no distances to assess and NaN would have been returned. 
+                / (len(result) + eps)
             )
 
             return lddt_score.item()
 
+        # can this also be vectorized (over # of tokens) -> then reform into desired output format
         if selected_token_ids is not None:
             residue_lddt_dict = {
                 tk.item(): get_lddt_distances_for_token(tk.item()) for tk in selected_token_ids
