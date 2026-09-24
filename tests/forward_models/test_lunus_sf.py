@@ -28,6 +28,8 @@ from sampleworks.core.forward_models.xray.lunus_sf import (
     B_TARGET_COEFFICIENT,
     build_setup,
     recommended_blur,
+    space_group_operations,
+    structure_factors,
 )
 
 
@@ -174,3 +176,88 @@ class TestRecommendedBlur:
         assert auto.blur == pytest.approx(recommended_blur(sharp.b_factor, 2.0))
         assert auto.blur > 0.0
         assert explicit_off.blur == 0.0
+
+
+class TestSymmetryOperations:
+    """Symmetry read from gemmi, and the grid sized to accommodate it.
+
+    Nothing else exercises a centred or diamond-glide group. The operation count
+    is the part most easily got wrong: gemmi splits a group into ``sym_ops`` and
+    ``cen_ops``, and reading only the former undercounts a centred group by the
+    centring multiplicity -- 48 instead of 192 for F m -3 m. Iterating
+    ``operations()``, which :func:`space_group_operations` does, yields the full
+    set.
+    """
+
+    # Each entry is (Hermann-Mauguin symbol, general-position multiplicity), from
+    # primitive through the three centring multiplicities to the largest groups
+    # there are, plus the quarter-translation cases below.
+    GROUPS = {
+        "P1": ("P 1", 1),
+        "monoclinic screw": ("P 1 21 1", 2),
+        "trigonal": ("P 31 2 1", 6),
+        "C-centred": ("C 1 2 1", 4),
+        "I-centred": ("I 4", 8),
+        "F-centred cubic": ("F 2 3", 48),
+        "I-centred cubic": ("I a -3 d", 96),
+        "largest": ("F m -3 m", 192),
+        "diamond glide": ("F d -3 c", 192),
+    }
+
+    @pytest.fixture
+    @staticmethod
+    def cubic_cell() -> gemmi.UnitCell:
+        """A cell compatible with every group below, cubic being the strictest."""
+        return gemmi.UnitCell(120.0, 120.0, 120.0, 90.0, 90.0, 90.0)
+
+    @pytest.mark.parametrize("hm,multiplicity", GROUPS.values(), ids=list(GROUPS))
+    def test_operation_count_matches_the_group_order(self, hm, multiplicity):
+        """Every operation of the group, centring included."""
+        rotations, translations = space_group_operations(hm)
+
+        assert len(rotations) == multiplicity
+        assert len(translations) == multiplicity
+
+    @pytest.mark.parametrize("hm,multiplicity", GROUPS.values(), ids=list(GROUPS))
+    def test_grid_ops_drop_only_the_identity(self, atom_array, cubic_cell, hm, multiplicity):
+        """``build_grid_ops`` removes the identity and keeps the rest, so the count
+        is one short of the group order -- empty for P1, which lunus reads as no
+        expansion."""
+        setup = build_setup(atom_array, cubic_cell, hm, 4.0)
+
+        assert len(setup.grid_ops) == multiplicity - 1
+
+    @pytest.mark.parametrize("hm,multiplicity", GROUPS.values(), ids=list(GROUPS))
+    def test_grid_is_commensurate_with_every_translation(
+        self, atom_array, cubic_cell, hm, multiplicity
+    ):
+        """A fractional translation has to land on a grid point, or expanding the
+        ASU onto the grid would need interpolation between voxels. Half
+        translations force an even axis; the diamond-glide groups carry quarters
+        and force a multiple of four, which is why F d -3 c comes back on 96 where
+        F m -3 m is content with 90."""
+        setup = build_setup(atom_array, cubic_cell, hm, 4.0)
+        _, translations = space_group_operations(hm)
+        grid = np.array(setup.grid_shape, dtype=np.float64)
+
+        for translation in translations:
+            on_grid = translation * grid
+            assert np.allclose(on_grid, np.rint(on_grid), atol=1e-6), (
+                f"{hm}: translation {translation} does not land on grid {tuple(grid)}"
+            )
+
+    def test_forward_pass_runs_under_the_largest_group(self, atom_array, cubic_cell):
+        """Counting the operations is not the same as expanding onto them. This is
+        the only forward pass here under a centred group -- the cross-engine test
+        covers P 31 2 1 -- so it guards the expansion path for the 191 non-identity
+        operations of F m -3 m, where the ASU is repeated most."""
+        setup = build_setup(atom_array, cubic_cell, "F m -3 m", 6.0)
+        coords = torch.as_tensor(atom_array.coord[None], dtype=torch.float32)
+        occupancies = torch.ones(atom_array.array_length())
+        hkl = torch.tensor([[1, 1, 1], [2, 0, 0], [2, 2, 0]], dtype=torch.long)
+
+        amplitudes = structure_factors(setup, coords, occupancies, hkl)
+
+        assert amplitudes.shape == (1, len(hkl))
+        assert torch.isfinite(amplitudes).all()
+        assert torch.abs(amplitudes).max() > 0, "expansion produced no density"
