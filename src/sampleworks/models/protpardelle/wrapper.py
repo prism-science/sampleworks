@@ -22,6 +22,8 @@ import biotite.structure as struc
 import numpy as np
 import torch
 from atomworks.enums import ChainType
+from biotite.sequence import ProteinSequence
+from biotite.structure import AtomArray
 from jaxtyping import Float, Int
 from loguru import logger
 from protpardelle.common import residue_constants
@@ -84,6 +86,9 @@ class ProtpardelleConditioning:
     x_self_conditioning: Float[Tensor, "batch L 37 3"]
         Self-conditioning for the input structure,
         essentially the previously denoised coordinates (optional).
+    model_atom_array : AtomArray | None
+        Full atom template in the same order as the flattened model coordinates.
+        Present when sequence-override preprocessing adds unobserved residues.
     """
 
     aatype: Int[Tensor, "batch L"]
@@ -95,6 +100,7 @@ class ProtpardelleConditioning:
     atom37_atom_index: Int[Tensor, " atoms"]
     sequences: tuple[str, ...]
     x_self_conditioning: Float[Tensor, "batch L 37 3"] | None = None
+    model_atom_array: AtomArray | None = None
     _initialized: bool = field(default=False, init=False, repr=False)
 
     _FROZEN = frozenset(
@@ -153,7 +159,10 @@ def annotate_structure_for_protpardelle(structure: dict) -> dict:
     dict
         Structure dict with a ``"_protpardelle_config"`` key added.
     """
-    return {**structure, "_protpardelle_config": ProtpardelleConfig()}
+    return {
+        **structure,
+        "_protpardelle_config": ProtpardelleConfig(),
+    }
 
 
 def extract_protein_sequences(structure: dict) -> list[str]:
@@ -484,6 +493,10 @@ class ProtpardelleWrapper:
         GenerativeModelInput[ProtpardelleConditioning]
             Sequence conditioning for :meth:`step`.
         """
+        config = structure.get("_protpardelle_config", ProtpardelleConfig())
+        if isinstance(config, dict):
+            config = ProtpardelleConfig(**config)
+
         if "asym_unit" not in structure:
             raise ValueError(
                 "Protpardelle featurization requires an 'asym_unit' atom array to "
@@ -547,20 +560,125 @@ class ProtpardelleWrapper:
             atom37_residue_index = atom37_residue_index[valid_mask_tensor]
             atom37_atom_index = atom37_atom_index[valid_mask_tensor]
 
-        # the atom_mask created here is used in two ways. First it is used to generate
-        # the initial noisy coordinates (see initialize_from_prior() below) simply for the
-        # atom count. Second it is used in .step() to convert back from atom37 coordinates
-        # (B x res x 37 x 3) to (B x atoms x 3) coordinates. It is only used to operate on
-        # the structure we will model, never the reference structure which may have missing
-        # atoms.
-        #
-        # This should be the way to make the atom mask:
-        #   atom_mask = atom37_mask_from_aatype(aatype, seq_mask) but it doesn't handle OXT,
-        # so:
+        # When a sequence override adds unobserved residues (via seq_idx),
+        # remap observed atoms to their correct full-sequence positions
+        # and fill canonical atoms for the unobserved positions.
+        has_seq_idx = "seq_idx" in atom_array.get_annotation_categories()
+        if has_seq_idx:
+            atom37_residue_index = torch.as_tensor(
+                np.asarray(atom_array.seq_idx), dtype=torch.long, device=self.device
+            )
+
         atom_mask = torch.zeros(
             (padded_len, ATOM37_NUM_ATOMS), dtype=torch.float, device=self.device
         )
         atom_mask[atom37_residue_index, atom37_atom_index] = 1
+
+        if has_seq_idx:
+            # Ensure every residue has its full canonical atom set so the
+            # model generates all heavy atoms and not just those observed in the
+            # input structure (which may have missing sidechains).
+            canonical = torch.as_tensor(
+                residue_constants.restype_atom37_mask, dtype=torch.float, device=self.device
+            )
+            seq_len = int(seq_mask[0].sum().item())
+            aa_indices = aatype[0, :seq_len]
+            valid_aa = aa_indices < canonical.shape[0]
+            # OR canonical mask into every valid residue position
+            atom_mask[:seq_len][valid_aa] = torch.maximum(
+                atom_mask[:seq_len][valid_aa], canonical[aa_indices[valid_aa]]
+            )
+
+            # Rebuild flat to atom37 indices from the complete mask
+            filled = atom_mask.nonzero(as_tuple=False)
+            atom37_residue_index = filled[:, 0].to(dtype=torch.long)
+            atom37_atom_index = filled[:, 1].to(dtype=torch.long)
+
+        model_atom_array = None
+        if has_seq_idx:
+            # Complete the sequence through Atomworks' CCD template expansion rather
+            # than constructing a second atom representation by hand. Protpardelle's
+            # flat coordinates still need the template reordered to atom37 order below.
+            from atomworks.io.template import add_missing_atoms
+
+            model_input = atom_array[np.asarray(atom_array.atom_name) != "OXT"].copy()
+            model_seq_idx = np.asarray(model_input.seq_idx, dtype=np.int64)
+            model_input.res_id = model_seq_idx + 1
+            model_input.res_name = np.asarray(
+                [
+                    ProteinSequence.convert_letter_1to3(
+                        sequences[protein_chain_ids.index(chain)][int(position)]
+                    )
+                    for chain, position in zip(model_input.chain_id, model_seq_idx)
+                ]
+            )
+
+            model_chain_info = {}
+            for chain_id, sequence in zip(protein_chain_ids, sequences):
+                info = dict(structure["chain_info"][chain_id])
+                info["res_id"] = list(range(1, len(sequence) + 1))
+                info["res_name"] = [
+                    ProteinSequence.convert_letter_1to3(letter) for letter in sequence
+                ]
+                model_chain_info[chain_id] = info
+
+            expanded = add_missing_atoms(
+                model_input,
+                chain_info_dict=model_chain_info,
+                remove_hydrogens=True,
+                fix_formal_charges=False,
+                fix_bond_types=False,
+            )
+            expanded.occupancy[:] = 1.0
+            expanded_seq_idx = np.empty(len(expanded), dtype=np.int64)
+            for chain_id in protein_chain_ids:
+                chain_mask = np.asarray(expanded.chain_id) == chain_id
+                expanded_seq_idx[chain_mask] = np.asarray(expanded.res_id)[chain_mask] - 1
+            expanded.set_annotation("seq_idx", expanded_seq_idx)
+
+            atom_names_by_slot = {
+                int(slot): str(name) for name, slot in residue_constants.atom_order.items()
+            }
+            expanded_indices = {
+                (str(chain), int(position), str(atom)): index
+                for index, (chain, position, atom) in enumerate(
+                    zip(expanded.chain_id, expanded.seq_idx, expanded.atom_name)
+                )
+            }
+            flat_residue_indices = atom37_residue_index.detach().cpu().numpy()
+            flat_atom_indices = atom37_atom_index.detach().cpu().numpy()
+            chain_ids_by_global_position = []
+            local_positions_by_global_position = []
+            for chain_id, sequence in zip(protein_chain_ids, sequences):
+                chain_ids_by_global_position.extend([chain_id] * len(sequence))
+                local_positions_by_global_position.extend(range(len(sequence)))
+            order = []
+            keep_mask = []
+            for i, (global_position, atom_slot) in enumerate(
+                zip(flat_residue_indices, flat_atom_indices)
+            ):
+                key = (
+                    chain_ids_by_global_position[int(global_position)],
+                    local_positions_by_global_position[int(global_position)],
+                    atom_names_by_slot[int(atom_slot)],
+                )
+                if key in expanded_indices:
+                    order.append(expanded_indices[key])
+                    keep_mask.append(True)
+                else:
+                    keep_mask.append(False)
+
+            if not all(keep_mask):
+                keep = torch.tensor(keep_mask, dtype=torch.bool, device=self.device)
+                atom37_residue_index = atom37_residue_index[keep]
+                atom37_atom_index = atom37_atom_index[keep]
+                atom_mask = torch.zeros(
+                    (padded_len, ATOM37_NUM_ATOMS), dtype=torch.float, device=self.device
+                )
+                atom_mask[atom37_residue_index, atom37_atom_index] = 1
+
+            model_atom_array = expanded[np.asarray(order, dtype=np.int64)]
+
         atom_mask = atom_mask[None, :, :]  # [1, L, 37]
 
         conditioning = ProtpardelleConditioning(
@@ -573,6 +691,7 @@ class ProtpardelleWrapper:
             atom37_atom_index=atom37_atom_index,
             sequences=tuple(sequences),
             x_self_conditioning=None,
+            model_atom_array=model_atom_array,
         )
 
         return GenerativeModelInput(conditioning=conditioning)

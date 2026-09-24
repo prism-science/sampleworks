@@ -216,6 +216,7 @@ CLAUDE.local.md
 .github/workflows/claude*.yml
 .github/agents/
 .pi/
+IDEA.md
 
 # Model checkpoints
 release_data/

@@ -3,8 +3,11 @@
 Tests that implementations correctly implement FlowModelWrapper protocol.
 """
 
+import numpy as np
 import pytest
 import torch
+from biotite.sequence import ProteinSequence
+from sampleworks.utils.sequence import apply_sequence_override, expected_heavy_atom_count
 
 from tests.conftest import (
     annotate_structure_for_wrapper,
@@ -220,3 +223,182 @@ class TestStepRequiresFeatures:
 
         with pytest.raises(ValueError, match="features"):
             wrapper.step(x_t, t, features=None)
+
+
+@pytest.mark.gpu
+@pytest.mark.slow
+@pytest.mark.parametrize("wrapper_info", get_slow_wrapper_infos(), ids=lambda w: w.name)
+class TestFullSequenceAtomCoverage:
+    """Verify that preprocessing with the real deposited sequence override produces
+    features containing atoms for ALL residues and not just the observed residues.
+
+    Uses the 5I09 density-input fixture (single protein chain, 366 observed out of
+    386 deposited residues: 9 N-terminal, 8 internal, and 3 C-terminal gaps).
+    The override uses the actual PDB deposited sequence so that the alignment
+    must handle real gap positions.
+    """
+
+    def test_featurize_includes_all_sequence_residues(
+        self,
+        wrapper_info: ComponentInfo,
+        structure_5i09_density: dict,
+        seq_5i09_deposited: str,
+        temp_output_dir,
+        request,
+    ):
+        """After override with the real 386-residue deposited sequence,
+        initialize_from_prior should produce more atoms than observed-only."""
+        fixture_name = get_fixture_name_for_wrapper(wrapper_info)
+        wrapper = request.getfixturevalue(fixture_name)
+
+        overridden = apply_sequence_override(structure_5i09_density, seq_5i09_deposited)
+
+        # separate dirs so Boltz process_inputs doesn't cache collide
+        full_seq_dir = temp_output_dir / "full_seq"
+        full_seq_dir.mkdir(exist_ok=True)
+        annotated = annotate_structure_for_wrapper(wrapper_info, overridden, full_seq_dir)
+        features = wrapper.featurize(annotated)
+        prior = wrapper.initialize_from_prior(batch_size=1, features=features)
+
+        # The prior tensor's atom dimension should be consistent with the full
+        # 386-residue deposited sequence, not the 366 observed residues.
+        observed_dir = temp_output_dir / "observed_only"
+        observed_dir.mkdir(exist_ok=True)
+        observed_only = annotate_structure_for_wrapper(
+            wrapper_info, structure_5i09_density, observed_dir
+        )
+        features_observed = wrapper.featurize(observed_only)
+        prior_observed = wrapper.initialize_from_prior(batch_size=1, features=features_observed)
+
+        n_atoms_full = prior.shape[1]
+        n_atoms_observed = prior_observed.shape[1]
+        n_atoms_expected = expected_heavy_atom_count(seq_5i09_deposited)
+        assert n_atoms_full > n_atoms_observed, (
+            f"{wrapper_info.name}: full-sequence prior ({n_atoms_full} atoms) should have "
+            f"more atoms than observed-only ({n_atoms_observed} atoms)"
+        )
+        # Some models add a C-terminal OXT (+1 atom); tolerate that.
+        assert n_atoms_expected <= n_atoms_full <= n_atoms_expected + 1, (
+            f"{wrapper_info.name}: full-sequence prior has {n_atoms_full} atoms, "
+            f"expected {n_atoms_expected}(+1 OXT) heavy atoms from the deposited sequence"
+        )
+
+    def test_trajectory_serialization_preserves_full_sequence_atom_assignments(
+        self,
+        wrapper_info: ComponentInfo,
+        structure_5i09_density: dict,
+        seq_5i09_deposited: str,
+        temp_output_dir,
+        request,
+    ):
+        """The trajectory output template contains every full-sequence residue and atom.
+
+        This follows the same featurization, trajectory-input processing, and trajectory
+        serialization path used by ``run_guidance``. In particular, it verifies that
+        sequence-override placeholders do not collide with observed residue IDs or merge
+        atoms from different sequence positions into one output residue.
+        """
+        from biotite.structure.info import residue as ccd_residue
+        from sampleworks.utils.atom_array_utils import parse_structure
+        from sampleworks.utils.guidance_constants import GuidanceType
+        from sampleworks.utils.guidance_script_utils import save_trajectory
+        from sampleworks.utils.structure_utils import (
+            get_asym_unit_from_structure,
+            process_structure_to_trajectory_input,
+        )
+
+        fixture_name = get_fixture_name_for_wrapper(wrapper_info)
+        wrapper = request.getfixturevalue(fixture_name)
+
+        overridden = apply_sequence_override(structure_5i09_density, seq_5i09_deposited)
+        annotated = annotate_structure_for_wrapper(wrapper_info, overridden, temp_output_dir)
+        features = wrapper.featurize(annotated)
+        prior = wrapper.initialize_from_prior(batch_size=1, features=features)
+
+        processed = process_structure_to_trajectory_input(
+            structure=annotated,
+            coords_from_prior=prior,
+            features=features,
+            ensemble_size=1,
+        )
+        assert processed.model_atom_array is not None, (
+            f"{wrapper_info.name}: full-sequence runs must expose a model atom template "
+            "for trajectory serialization"
+        )
+        model_atom_array = processed.model_atom_array
+        assert len(model_atom_array) == prior.shape[1], (
+            f"{wrapper_info.name}: model atom template ({len(model_atom_array)}) and "
+            f"trajectory ({prior.shape[1]}) have different atom counts"
+        )
+
+        save_trajectory(
+            scaler_type=GuidanceType.PURE_GUIDANCE,
+            trajectory=[prior.detach().cpu()],
+            atom_array=model_atom_array,
+            output_dir=temp_output_dir,
+            subdir_name="denoised",
+            save_every=1,
+        )
+        written = parse_structure(temp_output_dir / "trajectory" / "denoised" / "trajectory_0.cif")
+        written_atom_array = get_asym_unit_from_structure(written, atom_array_index=0)
+
+        assert len(written_atom_array) == len(model_atom_array)
+        for annotation in ("chain_id", "res_id", "res_name", "atom_name", "element"):
+            np.testing.assert_array_equal(
+                getattr(written_atom_array, annotation),
+                getattr(model_atom_array, annotation),
+                err_msg=(
+                    f"{wrapper_info.name}: {annotation} changed during trajectory serialization"
+                ),
+            )
+
+        protein_chain = next(
+            chain_id
+            for chain_id, info in overridden["chain_info"].items()
+            if info["chain_type"].is_protein()
+        )
+        expected_res_names = [
+            ProteinSequence.convert_letter_1to3(letter) for letter in seq_5i09_deposited
+        ]
+        for array, label in ((model_atom_array, "model"), (written_atom_array, "written")):
+            chain_mask = np.asarray(array.chain_id) == protein_chain
+            assert np.all(array.occupancy[chain_mask] > 0), (
+                f"{wrapper_info.name}: {label} output contains unoccupied protein atoms"
+            )
+            residue_names: list[str] = []
+            residue_atom_names: dict[int, list[str]] = {}
+            for res_id, res_name, atom_name in zip(
+                np.asarray(array.res_id)[chain_mask],
+                np.asarray(array.res_name)[chain_mask],
+                np.asarray(array.atom_name)[chain_mask],
+            ):
+                res_id = int(res_id)
+                if res_id not in residue_atom_names:
+                    residue_names.append(str(res_name))
+                    residue_atom_names[res_id] = []
+                residue_atom_names[res_id].append(str(atom_name))
+
+            assert residue_names == expected_res_names, (
+                f"{wrapper_info.name}: {label} output does not contain the full sequence "
+                "with one residue assignment per sequence position"
+            )
+            for position, (res_id, res_name) in enumerate(zip(residue_atom_names, residue_names)):
+                expected_atom_names = {
+                    str(atom_name)
+                    for element, atom_name in zip(
+                        ccd_residue(res_name).element, ccd_residue(res_name).atom_name
+                    )
+                    if str(element) != "H" and str(atom_name) != "OXT"
+                }
+                atom_names = residue_atom_names[res_id]
+                actual_atom_names = set(atom_names)
+                assert len(atom_names) == len(actual_atom_names), (
+                    f"{wrapper_info.name}: {label} residue {position + 1} contains duplicate atoms"
+                )
+                allowed_atom_names = [expected_atom_names]
+                if position == len(residue_names) - 1:
+                    allowed_atom_names.append(expected_atom_names | {"OXT"})
+                assert any(actual_atom_names == allowed for allowed in allowed_atom_names), (
+                    f"{wrapper_info.name}: {label} residue {position + 1} has incorrect "
+                    "atom assignments"
+                )
