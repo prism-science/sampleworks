@@ -155,30 +155,33 @@ class TestSelfConsistency:
 
         # Diffuse is already a difference -- <|F|^2> - |<F>|^2 -- of two large,
         # nearly equal numbers, so in float32 it is exactly zero only where the
-        # intensity is small. What it is compared against has to be relative,
-        # because cancellation error is proportional to the magnitude of the
-        # operands: doubling the occupancies quadruples the intensity (measured
-        # 3.93e6 -> 1.57e7 RMS) and the residual grows with it, while the ratio
-        # stays put. An absolute bound would encode this structure's scale --
-        # here the worst reflection is off by 16 against an intensity RMS of
-        # millions -- and would need rederiving for every structure, resolution
-        # and occupancy convention.
+        # intensity is small. The residual is measured against a global intensity
+        # scale, RMS to RMS, because cancellation error is proportional to the
+        # operands: doubling the occupancies quadruples the intensity (3.93e6 ->
+        # 1.57e7 RMS) and the residual with it, while the normalized value stays
+        # put. An absolute bound would encode this structure's scale -- the worst
+        # reflection here is off by 16 against an intensity RMS in the millions.
         #
-        # RMS to RMS, since both are dominated by the strongest reflections, so
-        # the ratio measures relative cancellation rather than mixing an absolute
-        # residual on the largest reflection against a mean intensity. Measured
-        # on 6B8X at 1.8 A: 8e-9 to 4.3e-8 across runs, i.e. float32 epsilon, and
-        # 3.1e-8 to 4.4e-8 on 1VME chain A before the structure changed. It varies
-        # run to run because the splat's reduction order does; the bound allows
-        # for that rather than pinning one value.
+        # Electron-count denominators were tried and measure worse. max|diffuse|
+        # over N_e^2 spreads 1.8x between 6B8X and 1VME chain A, and over
+        # (n_sym N_e)^2 spreads 4.9x, because symmetry mates add in phase only at
+        # h = 0, which is excluded: the achieved fraction of that bound falls with
+        # symmetry order (0.217 at n_sym 2, 0.068 at n_sym 6) and n_sym runs to
+        # 192. RMS to RMS shares its dominant reflections with the numerator,
+        # which is what keeps it insensitive to the reflection list.
+        #
+        # Measured on 6B8X at 1.8 A: 6e-9 to 4.3e-8 across runs, i.e. float32
+        # epsilon, and 3.1e-8 to 4.4e-8 on 1VME chain A before the structure
+        # changed. It varies run to run because the splat's reduction order does;
+        # the bound allows for that rather than pinning one value.
         intensity = np.abs(mean_f).astype(np.float64) ** 2
         rms_intensity = float(np.sqrt(np.mean(intensity**2)))
         rms_diffuse = float(np.sqrt(np.mean(diffuse.astype(np.float64) ** 2)))
         assert rms_intensity > 0, "degenerate <F>; the calculation produced nothing"
 
-        ratio = rms_diffuse / rms_intensity
-        print(f"\nidentical-ensemble diffuse/intensity RMS ratio: {ratio:.2e}")
-        assert ratio < 1e-6
+        normalized_residual = rms_diffuse / rms_intensity
+        print(f"\nidentical-ensemble diffuse residual, normalized: {normalized_residual:.2e}")
+        assert normalized_residual < 1e-6
 
     def test_single_configuration_matches_its_own_replication(
         self, polymer_6b8x, crystal_6b8x, cpu_device
@@ -199,7 +202,8 @@ class TestSelfConsistency:
         # float32 accumulation order (the mean over 3 members, and a splat kernel
         # specialized to a different batch size), which shows up as a handful of
         # weak reflections exceeding any fixed atol while the fields agree to
-        # ~1e-7 overall. Measured on 1VME chain A at 1.8 A: 2e-7.
+        # ~1e-7 overall. Measured on 6B8X at 1.8 A: 1.4e-7 to 1.5e-7 across runs,
+        # and 2e-7 on 1VME chain A before the structure changed.
         deviation = float(np.linalg.norm(single - replicated) / np.linalg.norm(single))
         print(f"\nsingle vs replicated relative deviation: {deviation:.2e}")
         assert deviation < 1e-5
@@ -265,8 +269,9 @@ class TestSelfConsistency:
 
         The consequence for guidance: diffuse-only scoring is NOT blind to the
         absolute position of the model in a real crystal -- packing against
-        symmetry mates makes it observable. Measured on 1VME chain A (P 1 21 1)
-        at 1.8 A: 99.9% of reflections move, relative deviation ~1.0.
+        symmetry mates makes it observable. Measured on 6B8X (P 31 2 1) at 1.8 A:
+        99.5% of reflections move by more than 1%, relative deviation 0.93; it was
+        99.9% and ~1.0 on 1VME chain A (P 1 21 1) before the structure changed.
 
         If this test ever starts passing, symmetry expansion has silently stopped
         happening, which the cross-engine test would not necessarily catch.
