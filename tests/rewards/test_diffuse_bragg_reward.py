@@ -64,8 +64,9 @@ def targets(ensemble, resources_dir: Path, tmp_path_factory):
     import gemmi
     from sampleworks.synthetic.generate_synthetic_sf_lunus import (
         compute_ensemble_amplitudes,
-        dataset_from_amplitudes,
-        dataset_from_intensities,
+        dataset_from_bragg_amplitudes,
+        dataset_from_diffuse_intensities,
+        save_mtz,
     )
 
     atom_array, coords = ensemble
@@ -78,10 +79,16 @@ def targets(ensemble, resources_dir: Path, tmp_path_factory):
 
     out = tmp_path_factory.mktemp("diffuse_bragg_targets")
     bragg_path, diffuse_path = out / "bragg.mtz", out / "diffuse.mtz"
-    dataset_from_amplitudes(
-        hkl, mean_f, cell, spacegroup, test_fraction=0.0, output_path=bragg_path
+    save_mtz(
+        dataset_from_bragg_amplitudes(hkl, mean_f, cell, spacegroup, test_fraction=0.0),
+        bragg_path,
+        "structure factors",
     )
-    dataset_from_intensities(hkl, diffuse, cell, spacegroup, output_path=diffuse_path)
+    save_mtz(
+        dataset_from_diffuse_intensities(hkl, diffuse, cell, spacegroup),
+        diffuse_path,
+        "diffuse intensities",
+    )
 
     assert diffuse.max() > 0, "a two-state ensemble must have nonzero diffuse"
     return bragg_path, diffuse_path, cell, spacegroup
