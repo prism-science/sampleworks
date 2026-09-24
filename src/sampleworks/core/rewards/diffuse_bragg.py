@@ -34,6 +34,7 @@ import reciprocalspaceship as rs
 import torch
 from jaxtyping import Float, Int
 from loguru import logger
+from lunus.sf import mean_and_diffuse
 from sampleworks.core.forward_models.xray import lunus_sf
 from sampleworks.core.rewards.protocol import RewardInputs
 from sampleworks.synthetic.synthetic_utils import resolve_mtz_column
@@ -113,6 +114,12 @@ class DiffuseBraggRewardFunction:
         self.current_time: float | None = None
 
         if isotropic_background is None:
+            # Deliberately inline, unlike this module's other lunus import:
+            # lunus.sf maps its exports to submodules and imports them on first
+            # access (PEP 562), and IsotropicBackground is the only name here
+            # from aniso_torch, so a caller injecting its own factory never
+            # loads it. mean_and_diffuse is at module scope because it shares
+            # structure_factor_torch with the splat, already loaded by lunus_sf.
             from lunus.sf import IsotropicBackground
 
             isotropic_background = IsotropicBackground
@@ -170,9 +177,7 @@ class DiffuseBraggRewardFunction:
 
         if self._scores_bragg:
             ds = rs.read_mtz(str(bragg_path))
-            column = resolve_mtz_column(
-                ds, rs.StructureFactorAmplitudeDtype(), column=bragg_column
-            )
+            column = resolve_mtz_column(ds, rs.StructureFactorAmplitudeDtype(), column=bragg_column)
             bragg_hkl, bragg_values = self._finite_column(ds, column)
             cell, spacegroup = ds.cell, ds.spacegroup
 
@@ -239,9 +244,7 @@ class DiffuseBraggRewardFunction:
         finite = np.isfinite(values)
         return hkl[finite].astype(np.int64), values[finite]
 
-    def prepare(
-        self, reward_inputs: RewardInputs, *, device: torch.device | str = "cpu"
-    ) -> None:
+    def prepare(self, reward_inputs: RewardInputs, *, device: torch.device | str = "cpu") -> None:
         """Build the scattering setup and the anisotropic transform on ``device``.
 
         Must be called with the inputs built for the sampled coordinates — model
@@ -386,12 +389,14 @@ class DiffuseBraggRewardFunction:
         n_configs = coordinates.shape[0]
         occupancies = occupancies * n_configs
 
-        f_configs = lunus_sf.structure_factors(self.setup, coordinates, occupancies, self._hkl_t)
-        from lunus.sf import mean_and_diffuse
+        # Before the splat and FFT, not after: _weight() raises for an unset
+        # current_time or a callable that returns a weight outside [0, 1], and
+        # there is no reason to pay for a forward pass first.
+        weight = self._weight()
 
+        f_configs = lunus_sf.structure_factors(self.setup, coordinates, occupancies, self._hkl_t)
         mean_f, diffuse = mean_and_diffuse(f_configs)
 
-        weight = self._weight()
         total = torch.zeros((), dtype=torch.float32, device=coordinates.device)
 
         # Zero-weight terms are skipped rather than multiplied by zero: 0 * nan
