@@ -6,232 +6,217 @@ import numpy as np
 import pytest
 import torch
 from atomworks.io.utils.io_utils import load_any
-from biotite.structure import AtomArrayStack, stack
+from biotite.structure import AtomArray, AtomArrayStack, stack
 from biotite.structure.io.pdbx import set_structure
-from biotite.structure.io.pdbx.cif import CIFCategory, CIFFile
+from biotite.structure.io.pdbx.cif import CIFBlock, CIFCategory, CIFFile
 from sampleworks.utils.cif_utils import carry_polymer_entity_categories
 from sampleworks.utils.guidance_script_arguments import GuidanceConfig
 from sampleworks.utils.guidance_script_utils import save_everything
 
 
-def _multi_model_cif(structure_path: Path) -> CIFFile:
-    """Build a two-model CIF from a structure path.
+# Deposited entity 1 (author chain P, label chain A), author-numbered from -3. Position 10 is
+# microheterogeneous (SER/SEP), and MSE/LYR are modified residues written as HETATM.
+_SEQUENCE = ["MET", "GLY", "HIS", "HIS", "HIS", "HIS", "MSE", "PRO", "LYR", "SER"]
+_AUTHOR_OFFSET = -4  # pdb_seq_num = seq_id + _AUTHOR_OFFSET
+_HETERO = {"MSE", "LYR", "HOH"}
+
+
+def _reference(chem_comp_ids: list[str] | None = None) -> CIFFile:
+    """Build an RCSB-style deposit with a second, unmodeled entity (author Q, label B).
 
     Parameters
     ----------
-    structure_path : Path
-        Input structure path.
+    chem_comp_ids : list[str] | None
+        Component ids to list in ``chem_comp``; omitted when ``None``.
 
     Returns
     -------
     CIFFile
-        Two-model CIF containing only structure categories.
+        Single-block deposit with polymer categories and ``pdbx_poly_seq_scheme``.
     """
-    atom_array = load_any(
-        structure_path,
-        altloc="first",
-        extra_fields=["occupancy", "b_factor", "atom_id"],
+    rows = [("1", "A", "P", i + 1, name) for i, name in enumerate(_SEQUENCE)]
+    rows.append(("1", "A", "P", len(_SEQUENCE), "SEP"))
+    rows += [("2", "B", "Q", i + 1, "GLY") for i in range(2)]
+    scheme = {
+        "asym_id": [asym for _, asym, _, _, _ in rows],
+        "entity_id": [entity for entity, _, _, _, _ in rows],
+        "seq_id": [str(seq) for _, _, _, seq, _ in rows],
+        "mon_id": [name for _, _, _, _, name in rows],
+        "pdb_seq_num": [str(seq + _AUTHOR_OFFSET) for _, _, _, seq, _ in rows],
+        "auth_seq_num": [str(seq + _AUTHOR_OFFSET) for _, _, _, seq, _ in rows],
+        "auth_mon_id": [name for _, _, _, _, name in rows],
+        "pdb_strand_id": [strand for _, _, strand, _, _ in rows],
+        "pdb_ins_code": ["."] * len(rows),
+    }
+    categories = {
+        "entity": {"id": ["1", "2"], "type": ["polymer", "polymer"]},
+        "entity_poly": {"entity_id": ["1", "2"], "pdbx_strand_id": ["P", "Q"]},
+        "entity_poly_seq": {
+            "entity_id": scheme["entity_id"],
+            "num": scheme["seq_id"],
+            "mon_id": scheme["mon_id"],
+        },
+        "struct_asym": {"id": ["A", "B"], "entity_id": ["1", "2"]},
+        "pdbx_poly_seq_scheme": scheme,
+    }
+    if chem_comp_ids is not None:
+        categories["chem_comp"] = {
+            "id": chem_comp_ids,
+            "name": [f"DEPOSITED {component_id}" for component_id in chem_comp_ids],
+        }
+    reference = CIFFile()
+    reference["deposit"] = CIFBlock(
+        {name: CIFCategory(columns) for name, columns in categories.items()}
     )
-    if isinstance(atom_array, AtomArrayStack):
-        atom_array = atom_array[0]
+    return reference
+
+
+def _output(positions: list[int], extra: tuple[tuple[str, int, str], ...] = ()) -> CIFFile:
+    """Write a two-model, one-CA-per-residue output in the deposit's author numbering.
+
+    Parameters
+    ----------
+    positions : list[int]
+        0-based positions in ``_SEQUENCE`` that the output models.
+    extra : tuple[tuple[str, int, str], ...]
+        Additional ``(chain, author number, name)`` residues, e.g. waters.
+
+    Returns
+    -------
+    CIFFile
+        Output as written by ``set_structure``: label ids hold author values.
+    """
+    residues = [("P", p + 1 + _AUTHOR_OFFSET, _SEQUENCE[p]) for p in positions] + list(extra)
+    atom_array = AtomArray(len(residues))
+    atom_array.chain_id[:] = [chain for chain, _, _ in residues]
+    atom_array.res_id[:] = [number for _, number, _ in residues]
+    atom_array.res_name[:] = [name for _, _, name in residues]
+    atom_array.hetero[:] = [name in _HETERO for _, _, name in residues]
+    atom_array.atom_name[:] = "CA"
+    atom_array.element[:] = "C"
     output = CIFFile()
     set_structure(output, stack([atom_array, atom_array]))
     return output
 
 
-def test_carry_polymer_entity_categories_aligns_multimodel_output(resources_dir, tmp_path):
-    """Carried categories align with every modeled residue after a round trip."""
-    output = _multi_model_cif(
-        resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
+def _column(output: CIFFile, category: str, column: str) -> list[str]:
+    """Return one output column as strings."""
+    return output.block[category][column].as_array(str).tolist()
+
+
+def test_carry_takes_label_ids_from_deposited_scheme():
+    """Author P/-2..6 maps to label A/2..10, modified residues included, across both models."""
+    positions = list(range(1, len(_SEQUENCE)))  # MET -3 is unmodeled
+    output = _output(positions)
+
+    categories = carry_polymer_entity_categories(output, _reference())
+
+    assert categories == (
+        "entity",
+        "entity_poly",
+        "entity_poly_seq",
+        "struct_asym",
+        "pdbx_poly_seq_scheme",
     )
-    reference = resources_dir / "1vme" / "1vme_final.cif"
+    assert set(_column(output, "atom_site", "auth_asym_id")) == {"P"}
+    assert set(_column(output, "atom_site", "label_asym_id")) == {"A"}
+    assert set(_column(output, "atom_site", "label_entity_id")) == {"1"}
+    assert _column(output, "atom_site", "label_seq_id") == [str(p + 1) for p in positions] * 2
+    assert _column(output, "entity", "id") == ["1"]
+    assert _column(output, "struct_asym", "id") == ["A"]
 
-    categories = carry_polymer_entity_categories(output, reference)
-    output_path = tmp_path / "carried.cif"
-    output.write(str(output_path))
-    reloaded = CIFFile.read(str(output_path)).block
-
-    assert categories == ("entity", "entity_poly", "entity_poly_seq", "struct_asym")
-    atom_site = reloaded["atom_site"]
-    assert set(atom_site["pdbx_PDB_model_num"].as_array(str)) == {"1", "2"}
-    assert set(atom_site["label_entity_id"].as_array(str)) == set(
-        reloaded["entity"]["id"].as_array(str)
-    )
-    assert set(reloaded["entity"]["type"].as_array(str)) == {"polymer"}
-
-    sequence = reloaded["entity_poly_seq"]
-    carried = set(
+    scheme_auth = dict(
         zip(
-            sequence["entity_id"].as_array(str),
-            sequence["num"].as_array(str),
-            sequence["mon_id"].as_array(str),
-            strict=True,
+            zip(
+                _column(output, "pdbx_poly_seq_scheme", "asym_id"),
+                _column(output, "pdbx_poly_seq_scheme", "seq_id"),
+            ),
+            _column(output, "pdbx_poly_seq_scheme", "auth_seq_num"),
         )
     )
-    modeled = set(
-        zip(
-            atom_site["label_entity_id"].as_array(str),
-            atom_site["label_seq_id"].as_array(str),
-            atom_site["label_comp_id"].as_array(str),
-            strict=True,
-        )
+    atom_rows = zip(
+        _column(output, "atom_site", "label_asym_id"),
+        _column(output, "atom_site", "label_seq_id"),
+        _column(output, "atom_site", "auth_seq_id"),
     )
-    assert modeled <= carried
+    assert all(scheme_auth[(asym, seq)] == auth for asym, seq, auth in atom_rows)
+    assert scheme_auth[("A", "1")] == "?"
 
 
-def test_carry_polymer_entity_categories_does_not_mutate_on_failed_match(resources_dir):
-    """An unmatched output sequence leaves entity categories absent."""
-    output = _multi_model_cif(
-        resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
-    )
-    output.block["atom_site"]["label_comp_id"] = np.full(output.block["atom_site"].row_count, "ZZZ")
+def test_carry_maps_gap_beside_repeat_by_number():
+    """A HIS missing from the tag is ambiguous by sequence but exact by author number."""
+    positions = [2, 3, 5, 6]  # HIS HIS _ HIS MSE
+    output = _output(positions)
 
-    with pytest.raises(ValueError, match="reference entity sequence match"):
-        carry_polymer_entity_categories(output, resources_dir / "1vme" / "1vme_final.cif")
+    carry_polymer_entity_categories(output, _reference())
 
+    assert _column(output, "atom_site", "label_seq_id") == ["3", "4", "6", "7"] * 2
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (("auth_seq_id", "99"), "no deposited pdbx_poly_seq_scheme row"),
+        (("label_comp_id", "TRP"), "disagree with the deposit"),
+    ],
+)
+def test_carry_does_not_mutate_on_failed_match(mutation, message):
+    """An unknown author number or a renamed residue fails before anything is written."""
+    output = _output([1, 2, 3])
+    atom_site = output.block["atom_site"]
+    column, value = mutation
+    values = atom_site[column].as_array(str)
+    values[0] = value
+    atom_site[column] = values
+    label_seq_ids = _column(output, "atom_site", "label_seq_id")
+
+    with pytest.raises(ValueError, match=message):
+        carry_polymer_entity_categories(output, _reference())
+
+    assert _column(output, "atom_site", "label_seq_id") == label_seq_ids
     for category in ("entity", "entity_poly", "entity_poly_seq", "struct_asym"):
         assert category not in output.block
 
 
-def test_carry_polymer_entity_categories_ignores_author_numbering(resources_dir):
-    """Align using label sequence despite unrelated author numbers and insertion codes."""
-    output = _multi_model_cif(
-        resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
-    )
-    atom_site = output.block["atom_site"]
-    atom_site["auth_seq_id"] = np.full(atom_site.row_count, "500")
-    atom_site["pdbx_PDB_ins_code"] = np.full(atom_site.row_count, "A")
-
-    carry_polymer_entity_categories(output, resources_dir / "1vme" / "1vme_final.cif")
-
-    carried = output.block["entity_poly_seq"]
-    modeled_numbers = sorted(set(atom_site["label_seq_id"].as_array(str)), key=int)
-    assert carried["num"].as_array(str).tolist() == modeled_numbers
-    modeled_sequence = output.block["entity_poly"]["pdbx_seq_one_letter_code"].as_item()
-    assert len(modeled_sequence) == carried.row_count
-
-
-def test_carry_polymer_entity_categories_rejects_ambiguous_alignment(resources_dir):
-    """Reject two possible ordered mappings without mutating the output."""
-    output = _multi_model_cif(
-        resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
-    )
-    reference = CIFFile.read(str(resources_dir / "1vme" / "1vme_final.cif"))
-    atom_site = output.block["atom_site"]
-    modeled = {}
-    for number, name in zip(
-        atom_site["label_seq_id"].as_array(str),
-        atom_site["label_comp_id"].as_array(str),
-        strict=True,
-    ):
-        modeled[int(number)] = str(name)
-    residue_names = [modeled[number] for number in sorted(modeled)]
-    entity_id = reference.block["entity_poly"]["entity_id"].as_item()
-    reference.block["entity_poly_seq"] = CIFCategory(
-        {
-            "entity_id": [entity_id] * (2 * len(residue_names)),
-            "num": [str(number) for number in range(1, 2 * len(residue_names) + 1)],
-            "mon_id": residue_names * 2,
-            "hetero": ["n"] * (2 * len(residue_names)),
-        }
-    )
-
-    with pytest.raises(ValueError, match="reference entity sequence match"):
-        carry_polymer_entity_categories(output, reference)
-
-    for category in ("entity", "entity_poly", "entity_poly_seq", "struct_asym"):
-        assert category not in output.block
-
-
-def test_carry_polymer_entity_categories_normalizes_selenomethionine(resources_dir):
-    """Accept deposited MSE only when the modeled residue is canonical MET."""
-    output = _multi_model_cif(
-        resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
-    )
+def test_carry_accepts_met_for_deposited_selenomethionine():
+    """A model that writes MET where the deposit has MSE still maps, and the deposit is kept."""
+    output = _output([5, 6, 7])
     atom_site = output.block["atom_site"]
     names = atom_site["label_comp_id"].as_array(str)
     atom_site["label_comp_id"] = np.where(names == "MSE", "MET", names)
 
-    carry_polymer_entity_categories(output, resources_dir / "1vme" / "1vme_final.cif")
+    carry_polymer_entity_categories(output, _reference())
 
-    carried_names = output.block["entity_poly_seq"]["mon_id"].as_array(str)
-    assert "MSE" not in carried_names
-    assert "MET" in carried_names
+    assert "MSE" in _column(output, "entity_poly_seq", "mon_id")
+    assert _column(output, "atom_site", "label_seq_id") == ["6", "7", "8"] * 2
 
 
-def test_carry_polymer_entity_categories_copies_deposited_chem_comp_rows(resources_dir):
-    """Carry complete deposited chemical-component rows required by modeled residues."""
-    output = _multi_model_cif(
-        resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
+def test_carry_copies_deposited_chem_comp_rows():
+    """Carry the deposited chemical-component rows the output uses."""
+    output = _output([1, 2, 8])
+
+    categories = carry_polymer_entity_categories(
+        output, _reference(chem_comp_ids=["GLY", "HIS", "LYR", "TRP"])
     )
-    reference = CIFFile.read(str(resources_dir / "1vme" / "1vme_final.cif"))
-    component_ids = sorted(set(output.block["atom_site"]["label_comp_id"].as_array(str)))
-    reference.block["chem_comp"] = CIFCategory(
-        {
-            "id": component_ids,
-            "type": ["L-peptide linking"] * len(component_ids),
-            "name": [f"DEPOSITED {component_id}" for component_id in component_ids],
-        }
-    )
-
-    categories = carry_polymer_entity_categories(output, reference)
 
     assert categories[-1] == "chem_comp"
-    carried = output.block["chem_comp"]
-    assert set(carried["id"].as_array(str)) == set(component_ids)
-    assert all(name.startswith("DEPOSITED ") for name in carried["name"].as_array(str))
+    assert sorted(_column(output, "chem_comp", "id")) == ["GLY", "HIS", "LYR"]
+    assert all(name.startswith("DEPOSITED ") for name in _column(output, "chem_comp", "name"))
 
 
-def test_carry_polymer_entity_categories_keeps_polymer_beside_non_polymer(resources_dir):
-    """A ligand or water entity does not stop the polymer entity from being carried."""
-    output = _multi_model_cif(
-        resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
-    )
-    atom_site = output.block["atom_site"]
-    entity_ids = atom_site["label_entity_id"].as_array(str)
-    polymer_id = entity_ids[0]
-    # Re-label the last row of each model as a water in its own entity and chain.
-    rows_per_model = atom_site.row_count // 2
-    water_rows = [rows_per_model - 1, atom_site.row_count - 1]
-    for column, value in (
-        ("label_entity_id", "9"),
-        ("label_asym_id", "Z"),
-        ("label_seq_id", "."),
-        ("label_comp_id", "HOH"),
-    ):
-        values = atom_site[column].as_array(str)
-        values[water_rows] = value
-        atom_site[column] = values
-    reference = CIFFile.read(str(resources_dir / "1vme" / "1vme_final.cif"))
+def test_carry_keeps_polymer_beside_non_polymer():
+    """A water outside the scheme keeps its labels and does not enter the carried categories."""
+    output = _output([1, 2, 3], extra=(("P", 101, "HOH"),))
+    water = [
+        i for i, name in enumerate(_column(output, "atom_site", "label_comp_id")) if name == "HOH"
+    ]
+    water_labels = [_column(output, "atom_site", "label_asym_id")[i] for i in water]
 
-    carry_polymer_entity_categories(output, reference)
+    carry_polymer_entity_categories(output, _reference())
 
-    assert output.block["entity"]["id"].as_array(str).tolist() == [polymer_id]
-    struct_asym = output.block["struct_asym"]
-    assert "Z" not in struct_asym["id"].as_array(str)
-    assert set(struct_asym["entity_id"].as_array(str)) == {polymer_id}
-
-
-def test_carry_polymer_entity_categories_reports_unconvertible_monomers(resources_dir):
-    """A monomer without a one-letter code fails as ValueError, not KeyError."""
-    output = _multi_model_cif(
-        resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
-    )
-    atom_site = output.block["atom_site"]
-    names = atom_site["label_comp_id"].as_array(str)
-    substituted = names[0]
-    atom_site["label_comp_id"] = np.where(names == substituted, "SEP", names)
-    # Relabel the same monomer in the deposit, so the sequence still matches and the only
-    # possible failure is the one-letter conversion.
-    reference = CIFFile.read(str(resources_dir / "1vme" / "1vme_final.cif"))
-    sequence = reference.block["entity_poly_seq"]
-    reference_names = sequence["mon_id"].as_array(str)
-    sequence["mon_id"] = np.where(reference_names == substituted, "SEP", reference_names)
-
-    with pytest.raises(ValueError, match="no one-letter representation"):
-        carry_polymer_entity_categories(output, reference)
-
-    assert "entity_poly_seq" not in output.block
+    assert [_column(output, "atom_site", "label_asym_id")[i] for i in water] == water_labels
+    assert _column(output, "struct_asym", "id") == ["A"]
+    assert _column(output, "entity", "id") == ["1"]
 
 
 def test_save_everything_writes_cifs_when_entity_carry_fails(
