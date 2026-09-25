@@ -90,6 +90,7 @@ def _populate(
         depth=4,
         target_filename="refined.cif",
         n_jobs=1,  # keep joblib in-process so test monkeypatches reach the work
+        selected_residues_only=False,  # matches the --selected-residues-only store_true default
         selections=tuple(selections),
     )
 
