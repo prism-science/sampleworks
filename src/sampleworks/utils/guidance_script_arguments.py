@@ -695,7 +695,6 @@ def reward_options_from_args(args: argparse.Namespace) -> dict[str, Any]:
 def add_generic_args(parser: argparse.ArgumentParser | GuidanceConfig):
     """Add CLI arguments shared by all models and guidance methods."""
     parser.add_argument("--structure", type=str, required=True, help="Input structure")
-    parser.add_argument("--density", type=str, required=True, help="Input density map")
     parser.add_argument(
         "--sequence",
         type=str,
