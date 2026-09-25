@@ -772,12 +772,13 @@ class TestSamplerStep:
         *,
         reward=None,
         reward_inputs: RewardInputs | None = None,
+        t: float = 1.0,
     ) -> StepParams:
         """Build deterministic step context with optional reward payload."""
         context = StepParams(
             step_index=0,
             total_steps=5,
-            t=torch.tensor([1.0]),
+            t=torch.tensor([t]),
             dt=torch.tensor([-0.1]),
             noise_scale=torch.tensor([0.0]),
         ).with_reconciler(reconciler, reference)
@@ -843,13 +844,20 @@ class TestSamplerStep:
 
         assert rmsd_aligned.item() < rmsd_unaligned.item()
 
-    def test_dps_gradient_flows_to_common_atoms(
+    def test_dps_guidance_steps_down_the_reward_gradient(
         self,
         mismatch_case: MismatchCase,
         sampler: AF3EDMSampler,
         mock_gradient_reward,
     ):
-        """Guided step changes common atom coordinates relative to unguided baseline."""
+        r"""A guided step shifts the state down the reward gradient by the DPS step size.
+
+        With ``noise_scale=0`` and no augmentation, both runs share :math:`\hat{x}_0`.
+        Their Euler updates differ only by :math:`s\,dt\,w\,g\,\lVert\delta\rVert/t`.
+        For ``MockGradientRewardFunction``, :math:`L(x)=\tfrac12\lVert x\rVert^2`, so
+        :math:`g=\nabla L(\hat{x}_0)=\hat{x}_0`. Choosing :math:`t\ne1` exposes the
+        :math:`1/t` factor.
+        """
         wrapper = MismatchCaseWrapper(mismatch_case)
         reconciler = AtomReconciler.from_arrays(
             mismatch_case.model_atom_array,
@@ -860,31 +868,54 @@ class TestSamplerStep:
         features = wrapper.featurize({"asym_unit": mismatch_case.struct_atom_array.copy()})
         state = torch.randn(1, mismatch_case.n_model, 3)
         reward_inputs = _model_space_reward_inputs(mismatch_case.n_model)
+        t = 2.0
         context = self._context_with_reference(
             reconciler,
             reference,
             reward=mock_gradient_reward,
             reward_inputs=reward_inputs,
+            t=t,
         )
+        step_size = 0.1
 
-        torch.manual_seed(7)
         baseline = sampler.step(state.clone(), wrapper, context, features=features)
-
-        torch.manual_seed(7)
         guided = sampler.step(
             state.clone(),
             wrapper,
             context,
-            scaler=DataSpaceDPSScaler(step_size=0.1),
+            scaler=DataSpaceDPSScaler(step_size=step_size),
             features=features,
         )
 
-        assert guided.loss is not None
-        assert torch.isfinite(torch.as_tensor(guided.loss)).all()
+        assert baseline.denoised is not None
+        assert guided.denoised is not None
+        torch.testing.assert_close(guided.denoised, baseline.denoised)
 
-        delta = guided.state - baseline.state
-        common_shift = delta[0, reconciler.model_indices].abs().sum()
-        assert common_shift.item() > 0.0
+        # (1, n_model, 3), aligned to the reference frame
+        x_hat_0 = baseline.denoised
+        reward_gradient = x_hat_0
+        torch.testing.assert_close(
+            torch.as_tensor(guided.loss), mock_gradient_reward(coordinates=x_hat_0)
+        )
+
+        # (1, n_model, 3); the unguided update is x + s * dt * delta with delta = (x - x_hat_0) / t,
+        # so baseline.state - x_hat_0 = (t + s * dt) * delta
+        step_scale = sampler.config.step_scale
+        dt = float(torch.as_tensor(context.dt))
+        diffusion_delta = (baseline.state - x_hat_0) / (t + step_scale * dt)
+
+        shift = guided.state - baseline.state
+        cosine = torch.nn.functional.cosine_similarity(
+            shift.flatten(), reward_gradient.flatten(), dim=0
+        )
+        assert cosine.item() < -0.999, (
+            f"guidance must move the state against the reward gradient, got cosine {cosine:.4f}"
+        )
+
+        expected_shift = (
+            step_scale * dt * step_size * torch.linalg.norm(diffusion_delta) * reward_gradient / t
+        )
+        torch.testing.assert_close(shift, expected_shift, rtol=1e-4, atol=1e-6)
 
     def test_denoised_is_model_space(self, mismatch_case: MismatchCase, sampler: AF3EDMSampler):
         """Denoised output tensor stays in model atom space."""
