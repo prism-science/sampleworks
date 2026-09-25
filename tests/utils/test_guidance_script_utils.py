@@ -3,11 +3,16 @@
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 import sampleworks.utils.guidance_script_utils as guidance_script_utils
 import torch
+from atomworks.io.utils.io_utils import load_any
+from biotite.structure import AtomArrayStack
+from biotite.structure.io.pdbx.cif import CIFFile
 from sampleworks.utils.guidance_script_arguments import GuidanceConfig, JobResult
 from sampleworks.utils.guidance_script_utils import (
+    _resolve_rcsb_id,
     _three_state_resolver,
     _write_job_metadata,
     get_model_and_device,
@@ -63,12 +68,21 @@ def test_get_model_and_device_forwards_preloaded_model_to_rf3(monkeypatch):
     assert wrapper.kwargs["model"] is preloaded_model
 
 
-def test_save_everything_uses_model_atom_array_for_mismatch(tmp_path: Path):
-    """Mismatch final_state should save with model template when provided."""
+def test_save_everything_uses_model_atom_array_for_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    """Mismatch output saves while a failed reference load emits a warning."""
     refined_structure = {"asym_unit": build_test_atom_array(n_atoms=3, with_occupancy=True)}
     model_atom_array = build_test_atom_array(n_atoms=5, with_occupancy=False)
 
     final_state = torch.zeros((1, 5, 3), dtype=torch.float32)
+    monkeypatch.setattr(
+        guidance_script_utils,
+        "_load_reference_cif",
+        MagicMock(side_effect=OSError("offline")),
+    )
 
     args = GuidanceConfig(
         protein="1l63",
@@ -92,6 +106,148 @@ def test_save_everything_uses_model_atom_array_for_mismatch(tmp_path: Path):
     )
 
     assert (tmp_path / "refined.cif").exists()
+    assert "without polymer entity categories" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("protein", "expected"),
+    [
+        ("1vme", "1vme"),
+        ("1VME_0.5occA_0.5occB", "1vme"),
+        ("pdb_00004HHB_run_2", "pdb_00004hhb"),
+    ],
+)
+def test_resolve_rcsb_id_handles_run_suffixes(protein: str, expected: str):
+    """Resolve legacy and extended deposited IDs without consuming run suffixes."""
+    assert _resolve_rcsb_id(protein) == expected
+
+
+def test_resolve_rcsb_id_rejects_non_deposited_name():
+    """Reject names that cannot identify a deposited RCSB structure."""
+    with pytest.raises(ValueError, match="Cannot resolve"):
+        _resolve_rcsb_id("example_run")
+
+
+def test_load_reference_cif_caches_atomically(
+    tmp_path: Path, resources_dir: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Populate the shared cache in one move and reuse it without fetching again."""
+    cache_dir = tmp_path / "rcsb-cache"
+    fetch_calls = []
+
+    def fetch_reference(pdb_id: str, *, format: str, target_path: str) -> str:
+        """Write one offline reference into the download directory, as RCSB fetch does.
+
+        Parameters
+        ----------
+        pdb_id : str
+            Deposited structure ID.
+        format : str
+            Requested structure format.
+        target_path : str
+            Download directory.
+
+        Returns
+        -------
+        str
+            Path of the written deposited CIF.
+        """
+        fetch_calls.append(Path(target_path))
+        downloaded = Path(target_path) / f"{pdb_id}.{format}"
+        downloaded.write_bytes((resources_dir / "1vme" / "1vme_final.cif").read_bytes())
+        return str(downloaded)
+
+    monkeypatch.setattr(guidance_script_utils, "fetch", fetch_reference)
+    monkeypatch.setattr(guidance_script_utils, "_RCSB_CACHE", cache_dir)
+
+    first = guidance_script_utils._load_reference_cif("1vme_0.5occA")
+    second = guidance_script_utils._load_reference_cif("1VME_1.0occB")
+
+    assert len(fetch_calls) == 1
+    # The download never lands in the shared cache directory itself, so a concurrent
+    # reader cannot observe a partially written entry.
+    assert fetch_calls[0].parent == cache_dir
+    assert fetch_calls[0] != cache_dir
+    assert [path.name for path in cache_dir.iterdir()] == ["1vme.cif"]
+    assert "entity_poly_seq" in first.block
+    assert "entity_poly_seq" in second.block
+
+
+def test_save_everything_writes_validated_metadata_to_all_cifs(
+    tmp_path: Path,
+    resources_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Fetch once and write unique IDs and carried entities to every output CIF."""
+    structure_path = resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
+    atom_array = load_any(
+        structure_path,
+        altloc="first",
+        extra_fields=["occupancy", "b_factor", "atom_id"],
+    )
+    if isinstance(atom_array, AtomArrayStack):
+        atom_array = atom_array[0]
+    coords = torch.from_numpy(np.stack([atom_array.coord, atom_array.coord])).float()
+    fetch_calls = []
+
+    def fetch_reference(pdb_id: str, *, format: str, target_path: str) -> str:
+        """Write one offline reference into the download directory, as RCSB fetch does.
+
+        Parameters
+        ----------
+        pdb_id : str
+            Deposited structure ID.
+        format : str
+            Requested structure format.
+        target_path : str
+            Download directory.
+
+        Returns
+        -------
+        str
+            Path of the written deposited CIF.
+        """
+        fetch_calls.append((pdb_id, format, target_path))
+        downloaded = Path(target_path) / f"{pdb_id}.{format}"
+        downloaded.write_bytes((resources_dir / "1vme" / "1vme_final.cif").read_bytes())
+        return str(downloaded)
+
+    monkeypatch.setattr(guidance_script_utils, "fetch", fetch_reference)
+    monkeypatch.setattr(guidance_script_utils, "_RCSB_CACHE", tmp_path / "rcsb-cache")
+    args = GuidanceConfig(
+        protein="1vme_0.5occA_0.5occB",
+        structure=structure_path,
+        density=Path("dummy"),
+        model_name="boltz2",
+        guidance_type="pure_guidance",
+        log_path="dummy",
+        output_dir=str(tmp_path),
+    )
+
+    save_everything(
+        args,
+        losses=[],
+        refined_structure={"asym_unit": atom_array},
+        traj_denoised=[coords],
+        traj_next_step=[coords],
+        scaler_type="pure_guidance",
+        final_state=coords,
+    )
+
+    assert len(fetch_calls) == 1
+    assert fetch_calls[0][0] == "1vme"
+    output_paths = [
+        tmp_path / "refined.cif",
+        tmp_path / "trajectory" / "denoised" / "trajectory_0.cif",
+        tmp_path / "trajectory" / "next_step" / "trajectory_0.cif",
+    ]
+    for output_path in output_paths:
+        block = CIFFile.read(str(output_path)).block
+        atom_site = block["atom_site"]
+        atom_ids = atom_site["id"].as_array(int)
+        assert np.array_equal(atom_ids, np.arange(1, len(atom_ids) + 1))
+        assert set(atom_site["pdbx_PDB_model_num"].as_array(str)) == {"1", "2"}
+        assert {"entity", "entity_poly", "entity_poly_seq", "struct_asym"} <= block.keys()
 
 
 def test_load_guidance_structure_keeps_original_structure_file(

@@ -7,10 +7,17 @@ from pathlib import Path
 import numpy as np
 import pytest
 from atomworks.io.utils.io_utils import load_any
-from biotite.structure import array, Atom, AtomArray, AtomArrayStack
+from biotite.structure import array, Atom, AtomArray, AtomArrayStack, stack
+from biotite.structure.io.pdbx import set_structure
 from biotite.structure.io.pdbx.cif import CIFColumn, CIFFile
 from sampleworks.utils.atom_array_utils import save_structure_to_cif
-from sampleworks.utils.cif_utils import add_category_to_cif, resolve_mixed_hetatm_atom_altlocs
+from sampleworks.utils.cif_utils import (
+    add_category_to_cif,
+    renumber_atom_site_ids,
+    resolve_mixed_hetatm_atom_altlocs,
+)
+
+from tests.utils.atom_array_builders import build_test_atom_array
 
 
 # ---------------------------------------------------------------------------
@@ -408,3 +415,30 @@ class TestAddCategoryToCif:
         category = block["test_category"]
         # Verify None was replaced (with "none" or "?" depending on implementation)
         assert "missing" in category
+
+
+def test_renumber_atom_site_ids_numbers_rows_across_models():
+    """Renumber atom-site rows once across a multi-model structure."""
+    atom_array = build_test_atom_array(n_atoms=3)
+    atom_array.set_annotation("atom_id", np.array([7, 8, 9]))
+    atom_array_stack = stack([atom_array, atom_array])
+    cif_file = CIFFile()
+    set_structure(cif_file, atom_array_stack)
+
+    renumber_atom_site_ids(cif_file)
+
+    category = cif_file.block["atom_site"]
+    assert category["id"] == CIFColumn([1, 2, 3, 4, 5, 6])
+    assert category["pdbx_PDB_model_num"] == CIFColumn([1, 1, 1, 2, 2, 2])
+
+
+def test_renumber_atom_site_ids_makes_repeated_ids_unique():
+    """Replace repeated atom IDs with sequential category keys."""
+    atom_array = build_test_atom_array(n_atoms=3)
+    atom_array.set_annotation("atom_id", np.array([1, 2, 2]))
+    cif_file = CIFFile()
+    set_structure(cif_file, atom_array)
+
+    renumber_atom_site_ids(cif_file)
+
+    assert cif_file.block["atom_site"]["id"] == CIFColumn([1, 2, 3])

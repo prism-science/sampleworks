@@ -7,8 +7,9 @@ from typing import Any
 
 import numpy as np
 from atomworks.io.utils.io_utils import load_any
+from biotite.sequence import ProteinSequence
 from biotite.structure import AtomArrayStack
-from biotite.structure.io.pdbx.cif import CIFCategory, CIFFile
+from biotite.structure.io.pdbx.cif import CIFBlock, CIFCategory, CIFFile
 from loguru import logger
 
 from sampleworks.utils.atom_array_utils import (
@@ -257,6 +258,194 @@ def resolve_mixed_hetatm_atom_altlocs(cif_path: Path | str) -> Path:
     return tmp_path
 
 
+def renumber_atom_site_ids(cif_file: CIFFile) -> None:
+    """Renumber ``_atom_site.id`` values across all models in place.
+
+    ``set_structure()`` copies and tiles an ``atom_id`` annotation for multi-model
+    structures, which can produce duplicate category keys. Call this function after
+    ``set_structure()`` on a single-block CIF file.
+
+    Parameters
+    ----------
+    cif_file : CIFFile
+        Single-block CIF file whose ``atom_site`` category is modified in place.
+    """
+    category = cif_file.block["atom_site"]
+    category["id"] = np.arange(1, category.row_count + 1)
+
+
+_POLYMER_ENTITY_CATEGORIES = ("entity", "entity_poly", "entity_poly_seq")
+
+
+def _single_block(cif_file: CIFFile) -> CIFBlock:
+    """Return the sole data block from a CIF file.
+
+    Parameters
+    ----------
+    cif_file : CIFFile
+        CIF file expected to contain exactly one data block.
+
+    Returns
+    -------
+    CIFBlock
+        The sole data block.
+
+    Raises
+    ------
+    ValueError
+        If the CIF file does not contain exactly one data block.
+    """
+    block_names = list(cif_file.keys())
+    if len(block_names) != 1:
+        raise ValueError(f"Expected one CIF block, found {len(block_names)}")
+    return cif_file[block_names[0]]
+
+
+def _canonical_monomer(name: str) -> str:
+    """Return the canonical name used for conservative sequence matching.
+
+    Parameters
+    ----------
+    name : str
+        Three-letter monomer name.
+
+    Returns
+    -------
+    str
+        Canonical monomer name, with selenomethionine normalized to methionine.
+    """
+    return "MET" if name == "MSE" else name
+
+
+def _unique_subsequence_indices(reference: list[str], modeled: list[str]) -> list[int] | None:
+    """Find a unique ordered embedding with the fewest deletion runs.
+
+    Parameters
+    ----------
+    reference : list[str]
+        Deposited monomer names.
+    modeled : list[str]
+        Modeled monomer names.
+
+    Returns
+    -------
+    list[int] | None
+        Reference indices for the unique optimal embedding, or ``None`` when absent or ambiguous.
+    """
+    reference = [_canonical_monomer(name) for name in reference]
+    modeled = [_canonical_monomer(name) for name in modeled]
+    states: dict[tuple[int, bool], tuple[int, tuple[int, ...] | None, int]] = {
+        (0, False): (0, (), 1)
+    }
+
+    def update(
+        target: dict[tuple[int, bool], tuple[int, tuple[int, ...] | None, int]],
+        key: tuple[int, bool],
+        cost: int,
+        path: tuple[int, ...] | None,
+        count: int,
+    ) -> None:
+        """Keep minimum-cost paths and mark equally optimal alternatives.
+
+        Parameters
+        ----------
+        target : dict
+            Dynamic-programming states for the next reference residue.
+        key : tuple[int, bool]
+            Modeled position and whether the path is deleting reference residues.
+        cost : int
+            Number of deletion runs in the candidate path.
+        path : tuple[int, ...] | None
+            Matched reference indices, or ``None`` for an ambiguous path.
+        count : int
+            Number of equally optimal paths, capped at two.
+        """
+        current = target.get(key)
+        if current is None or cost < current[0]:
+            target[key] = (cost, path, count)
+        elif cost == current[0]:
+            target[key] = (cost, None, min(2, current[2] + count))
+
+    for reference_index, reference_name in enumerate(reference):
+        next_states: dict[tuple[int, bool], tuple[int, tuple[int, ...] | None, int]] = {}
+        for (modeled_index, deleting), (cost, path, count) in states.items():
+            update(next_states, (modeled_index, True), cost + (not deleting), path, count)
+            if modeled_index < len(modeled) and reference_name == modeled[modeled_index]:
+                matched_path = None if path is None else (*path, reference_index)
+                update(next_states, (modeled_index + 1, False), cost, matched_path, count)
+        states = next_states
+
+    candidates = [value for (index, _), value in states.items() if index == len(modeled)]
+    if not candidates:
+        return None
+    minimum_cost = min(value[0] for value in candidates)
+    optimal = [value for value in candidates if value[0] == minimum_cost]
+    if sum(value[2] for value in optimal) != 1 or optimal[0][1] is None:
+        return None
+    return list(optimal[0][1])
+
+
+def _matching_entity(reference_block: CIFBlock, residue_names: list[str]) -> tuple[str, list[int]]:
+    """Find one deposited entity with a unique ordered modeled sequence match.
+
+    Parameters
+    ----------
+    reference_block : CIFBlock
+        Deposited CIF block containing polymer entity categories.
+    residue_names : list[str]
+        Output residue names in ``label_seq_id`` order.
+
+    Returns
+    -------
+    tuple[str, list[int]]
+        Reference entity ID and aligned row indices within its polymer sequence.
+
+    Raises
+    ------
+    ValueError
+        If the output is empty, unmatched, or ambiguously matched.
+    """
+    if not residue_names:
+        raise ValueError("Output entity has no polymer residues")
+    sequence = reference_block["entity_poly_seq"]
+    sequence_ids = np.asarray(sequence["entity_id"].as_array(str))
+    sequence_names = np.asarray(sequence["mon_id"].as_array(str))
+    matches: list[tuple[str, list[int]]] = []
+    for entity_id in reference_block["entity_poly"]["entity_id"].as_array(str):
+        reference_names = list(sequence_names[sequence_ids == entity_id])
+        indices = _unique_subsequence_indices(reference_names, residue_names)
+        if indices is not None:
+            matches.append((str(entity_id), indices))
+    if len(matches) != 1:
+        raise ValueError(f"Expected one reference entity sequence match, found {len(matches)}")
+    return matches[0]
+
+
+def _select_category_rows(
+    category: CIFCategory,
+    column_name: str,
+    value: str,
+) -> dict[str, list[str]]:
+    """Select category rows whose key column equals a value.
+
+    Parameters
+    ----------
+    category : CIFCategory
+        Source CIF category.
+    column_name : str
+        Name of the column used to select rows.
+    value : str
+        Value to match.
+
+    Returns
+    -------
+    dict[str, list[str]]
+        Selected rows represented as column lists.
+    """
+    mask = np.asarray(category[column_name].as_array(str)) == value
+    return {name: list(np.asarray(category[name].as_array(str))[mask]) for name in category}
+
+
 def add_category_to_cif(
     ciffile: CIFFile,
     data: dict[str, Any],
@@ -340,3 +529,207 @@ def _normalize_nulls(value: Any) -> Any:
     if isinstance(value, Iterable) and not isinstance(value, str | bytes):
         return ["?" if item is None else item for item in value]
     return "?" if value is None else value
+
+
+def _output_polymer_entities(
+    output_block: CIFBlock,
+) -> list[tuple[str, set[str], list[int], list[str]]]:
+    """Extract each output entity's unique polymer residue sequence.
+
+    Parameters
+    ----------
+    output_block : CIFBlock
+        Output CIF block containing ``atom_site``.
+
+    Returns
+    -------
+    list[tuple[str, set[str], list[int], list[str]]]
+        Entity ID, label chain IDs, residue numbers, and residue names. Entities without
+        polymer residues (ligands, waters) are omitted.
+
+    Raises
+    ------
+    ValueError
+        If no entity has polymer residues, or an entity has conflicting residue names.
+    """
+    atom_site = output_block["atom_site"]
+    entity_ids = atom_site["label_entity_id"].as_array(str)
+    chain_ids = atom_site["label_asym_id"].as_array(str)
+    sequence_ids = atom_site["label_seq_id"].as_array(str)
+    residue_names = atom_site["label_comp_id"].as_array(str)
+    entities: list[tuple[str, set[str], list[int], list[str]]] = []
+    for entity_id in dict.fromkeys(entity_ids):
+        residues: dict[int, str] = {}
+        chains: set[str] = set()
+        for row_entity, chain_id, sequence_id, residue_name in zip(
+            entity_ids, chain_ids, sequence_ids, residue_names, strict=True
+        ):
+            if row_entity != entity_id:
+                continue
+            chains.add(str(chain_id))
+            if sequence_id in (".", "?", ""):
+                continue
+            number = int(sequence_id)
+            if number in residues and residues[number] != residue_name:
+                raise ValueError(
+                    f"Output entity {entity_id} has conflicting names for residue {number}"
+                )
+            residues[number] = str(residue_name)
+        numbers = sorted(residues)
+        if not numbers:
+            # Ligands and waters have no entity_poly* rows to carry; the polymer entities
+            # alongside them still do.
+            continue
+        entities.append((str(entity_id), chains, numbers, [residues[number] for number in numbers]))
+    if not entities:
+        raise ValueError("Output has no polymer entities")
+    return entities
+
+
+def _one_letter_sequence(residue_names: list[str]) -> str:
+    """Convert three-letter residue names to a one-letter sequence.
+
+    Parameters
+    ----------
+    residue_names : list[str]
+        Three-letter residue names in sequence order.
+
+    Returns
+    -------
+    str
+        One-letter sequence.
+
+    Raises
+    ------
+    ValueError
+        If any name has no one-letter representation, for example a nucleotide or a
+        modified residue. ``ProteinSequence`` raises ``KeyError`` for those, which would
+        otherwise escape the callers that degrade on ``ValueError``.
+    """
+    letters: list[str] = []
+    for name in residue_names:
+        try:
+            letters.append(ProteinSequence.convert_letter_3to1(name))
+        except KeyError:
+            raise ValueError(f"Residue {name} has no one-letter representation") from None
+    return "".join(letters)
+
+
+def _concatenate_category_rows(rows: list[dict[str, list[str]]]) -> dict[str, list[str]]:
+    """Concatenate compatible CIF category row dictionaries.
+
+    Parameters
+    ----------
+    rows : list[dict[str, list[str]]]
+        Row dictionaries sharing the same columns.
+
+    Returns
+    -------
+    dict[str, list[str]]
+        Concatenated category columns.
+    """
+    columns = {name: [] for name in rows[0]}
+    for row in rows:
+        for name, values in row.items():
+            columns[name].extend(values)
+    return columns
+
+
+def carry_polymer_entity_categories(
+    output: CIFFile,
+    reference: str | Path | CIFFile,
+) -> tuple[str, ...]:
+    """Carry consistent deposited polymer entity categories into an output CIF.
+
+    The output's residue sequence is matched to the deposited sequence for each
+    entity. Deposited numbering is shifted only when needed to match the output's
+    ``label_seq_id`` values. The output is modified only after every entity has
+    matched and validated successfully.
+
+    Parameters
+    ----------
+    output : CIFFile
+        Single-block output CIF containing ``atom_site``.
+    reference : str | Path | CIFFile
+        Deposited reference CIF or its path.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Names of the categories written to ``output``.
+
+    Raises
+    ------
+    ValueError
+        If required categories are absent or any output entity cannot be matched.
+    """
+    output_block = _single_block(output)
+    reference_file = reference if isinstance(reference, CIFFile) else CIFFile.read(str(reference))
+    reference_block = _single_block(reference_file)
+    missing = [name for name in _POLYMER_ENTITY_CATEGORIES if name not in reference_block]
+    if missing:
+        raise ValueError(f"Reference CIF lacks required categories: {missing}")
+
+    entity_rows: list[dict[str, list[str]]] = []
+    entity_poly_rows: list[dict[str, list[str]]] = []
+    sequence_rows: list[dict[str, list[str]]] = []
+    struct_asym = {"id": [], "entity_id": []}
+    for output_id, chains, numbers, names in _output_polymer_entities(output_block):
+        reference_id, matched_indices = _matching_entity(reference_block, names)
+        entity_row = _select_category_rows(reference_block["entity"], "id", reference_id)
+        entity_row["id"] = [output_id]
+        entity_rows.append(entity_row)
+
+        entity_poly_row = _select_category_rows(
+            reference_block["entity_poly"], "entity_id", reference_id
+        )
+        entity_poly_row["entity_id"] = [output_id]
+        if "pdbx_strand_id" in entity_poly_row:
+            entity_poly_row["pdbx_strand_id"] = [",".join(sorted(chains))]
+        modeled_sequence = _one_letter_sequence(names)
+        for column in ("pdbx_seq_one_letter_code", "pdbx_seq_one_letter_code_can"):
+            if column in entity_poly_row:
+                entity_poly_row[column] = [modeled_sequence]
+        entity_poly_rows.append(entity_poly_row)
+
+        sequence_row = _select_category_rows(
+            reference_block["entity_poly_seq"], "entity_id", reference_id
+        )
+        sequence_row = {
+            column: [values[index] for index in matched_indices]
+            for column, values in sequence_row.items()
+        }
+        sequence_row["entity_id"] = [output_id] * len(numbers)
+        sequence_row["num"] = [str(number) for number in numbers]
+        sequence_row["mon_id"] = names
+        carried_residues = dict(
+            zip(map(int, sequence_row["num"]), sequence_row["mon_id"], strict=True)
+        )
+        output_residues = zip(numbers, names, strict=True)
+        if any(carried_residues.get(number) != name for number, name in output_residues):
+            raise ValueError(f"Carried sequence does not align with output entity {output_id}")
+        sequence_rows.append(sequence_row)
+        struct_asym["id"].extend(sorted(chains))
+        struct_asym["entity_id"].extend([output_id] * len(chains))
+
+    categories = {
+        "entity": _concatenate_category_rows(entity_rows),
+        "entity_poly": _concatenate_category_rows(entity_poly_rows),
+        "entity_poly_seq": _concatenate_category_rows(sequence_rows),
+        "struct_asym": struct_asym,
+    }
+    if "chem_comp" in reference_block:
+        modeled_components = set(output_block["atom_site"]["label_comp_id"].as_array(str))
+        chem_comp = reference_block["chem_comp"]
+        reference_components = np.asarray(chem_comp["id"].as_array(str))
+        component_mask = np.isin(reference_components, list(modeled_components))
+        missing_components = modeled_components - set(reference_components[component_mask])
+        if missing_components:
+            raise ValueError(f"Reference CIF lacks chem_comp rows for {sorted(missing_components)}")
+        categories["chem_comp"] = {
+            column: list(np.asarray(chem_comp[column].as_array(str))[component_mask])
+            for column in chem_comp
+        }
+    for name, data in categories.items():
+        add_category_to_cif(output, data, name, overwrite=True)
+    return tuple(categories)
