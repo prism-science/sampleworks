@@ -7,8 +7,10 @@ from typing import cast
 import pytest
 from sampleworks.metrics.lddt import AllAtomLDDT, SelectedLDDT
 
+
 # These tests are currently too high level, but they will serve for now to demonstrate
 # the expected behavior and make sure nothing gets broken.
+
 
 @pytest.mark.gpu
 def test_all_atom_lddt_end_to_end(altlocA_backbone, altlocB_backbone):
@@ -122,17 +124,21 @@ def test_selected_lddt_end_to_end(altlocA_backbone, altlocB_backbone):
                 f"{expected_score}"
             )
 
+
 # Unit tests for sampleworks.metrics.lddt._calc_lddt
 
 import torch
 from sampleworks.metrics.lddt import _calc_lddt
 
+
 # These tests originated in RosettaCommons/foundry/models/rf3 and is licensed under BSD-3-Clause.
 # For each case, added test for expected token-level outputs (where in this case, token = atom)
+
 
 def _coords(points: list[list[float]]) -> torch.Tensor:
     """One model with the given atom coordinates → shape (1, L, 3)."""
     return torch.tensor([points], dtype=torch.float32)
+
 
 def test_perfect_prediction_scores_one():
     """All distance differences are 0 -> lDDT of 1 expected"""
@@ -148,13 +154,14 @@ def test_perfect_prediction_scores_one():
     # token-level
     assert len(lddt_residues) == 4
     for token_name in lddt_residues:
-        token_score = lddt_residues[token_name][0] #take first value, since batch dim size = 1
+        token_score = lddt_residues[token_name][0]  # take first value, since batch dim size = 1
         assert token_score == pytest.approx(1, abs=1e-4), (
-            f'Score mismatch for {token_name}: got {token_score}, expected 1'
+            f"Score mismatch for {token_name}: got {token_score}, expected 1"
         )
 
+
 def test_large_error_scores_zero():
-    """All distance differences are greater than 4Å (largest threshold) -> lDDT of 0 expected"""""
+    """All distance differences are greater than 4Å (largest threshold) -> lDDT of 0 expected""" ""
     gt = _coords([[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]])
     pred = gt * 10.0  # every pairwise distance off by far more than 4 Å
     mask = torch.ones(1, 4, dtype=torch.bool)
@@ -166,10 +173,11 @@ def test_large_error_scores_zero():
 
     # token-level
     for token_name in lddt_residues:
-        token_score = lddt_residues[token_name][0] 
+        token_score = lddt_residues[token_name][0]
         assert token_score == pytest.approx(0, abs=1e-4), (
-            f'Score mismatch for {token_name}: got {token_score}, expected 0'
+            f"Score mismatch for {token_name}: got {token_score}, expected 0"
         )
+
 
 def test_unresolved_atoms_are_masked_out():
     """Test whether unresolved atoms are correctly masked out"""
@@ -187,20 +195,20 @@ def test_unresolved_atoms_are_masked_out():
     # token-level
     # This simulates the case where selected_token_ids tries to select a token (residue) for which
     # all atoms are invalid, which may(?) happen since crd_mask_L and selected_token_ids
-    # do not check against each other. In this case, output is 0 (to match the global lDDT) 
+    # do not check against each other. In this case, output is 0 (to match the global lDDT)
     # but may want to be NaN instead.
     for token_name in lddt_residues:
-        token_score = lddt_residues[token_name][0] 
+        token_score = lddt_residues[token_name][0]
 
         # atom 3 should score 0
         if token_name == 3:
             assert token_score == pytest.approx(0, abs=1e-4), (
-                f'Score mismatch for {token_name}: got {token_score}, expected 0'
+                f"Score mismatch for {token_name}: got {token_score}, expected 0"
             )
         else:
             # valid residues should score 1
             assert token_score == pytest.approx(1, abs=1e-4), (
-                f'Score mismatch for {token_name}: got {token_score}, expected 1'
+                f"Score mismatch for {token_name}: got {token_score}, expected 1"
             )
 
 
@@ -212,26 +220,22 @@ def test_same_token_pairs_excluded():
 
     # Distinct tokens: the single 1 Å pair is scored → 1.0.
     lddt, lddt_residues = _calc_lddt(pred, gt, mask, torch.tensor([0, 1]))
-    assert torch.allclose(
-        lddt, torch.ones(1), atol=1e-4
-    )
+    assert torch.allclose(lddt, torch.ones(1), atol=1e-4)
     assert len(lddt_residues) == 2
     for token_name in lddt_residues:
-        token_score = lddt_residues[token_name][0] 
+        token_score = lddt_residues[token_name][0]
         assert token_score == pytest.approx(1, abs=1e-4), (
-            f'Score mismatch for {token_name}: got {token_score}, expected 1'
+            f"Score mismatch for {token_name}: got {token_score}, expected 1"
         )
 
     # Same token: the only pair is excluded → no valid pairs → 0.0.
     lddt, lddt_residues = _calc_lddt(pred, gt, mask, torch.tensor([0, 0]))
-    assert torch.allclose(
-        lddt, torch.zeros(1), atol=1e-4
-    )
+    assert torch.allclose(lddt, torch.zeros(1), atol=1e-4)
     assert len(lddt_residues) == 1
     for token_name in lddt_residues:
-        token_score = lddt_residues[token_name][0] 
+        token_score = lddt_residues[token_name][0]
         assert token_score == pytest.approx(0, abs=1e-4), (
-            f'Score mismatch for {token_name}: got {token_score}, expected 0'
+            f"Score mismatch for {token_name}: got {token_score}, expected 0"
         )
 
 
@@ -247,21 +251,19 @@ def test_distance_cutoff_excludes_far_pairs():
     assert torch.allclose(lddt, torch.zeros(1), atol=1e-4)
     assert len(lddt_residues) == 2
     for token_name in lddt_residues:
-        token_score = lddt_residues[token_name][0] 
+        token_score = lddt_residues[token_name][0]
         assert token_score == pytest.approx(0, abs=1e-4), (
-            f'Score mismatch for {token_name}: got {token_score}, expected 0'
+            f"Score mismatch for {token_name}: got {token_score}, expected 0"
         )
 
     # Cutoff 30 Å → pair is in range and perfect → 1.0.
     lddt, lddt_residues = _calc_lddt(pred, gt, mask, tok, distance_cutoff=30.0)
-    assert torch.allclose(
-        lddt, torch.ones(1), atol=1e-4
-    )
+    assert torch.allclose(lddt, torch.ones(1), atol=1e-4)
     assert len(lddt_residues) == 2
     for token_name in lddt_residues:
-        token_score = lddt_residues[token_name][0] 
+        token_score = lddt_residues[token_name][0]
         assert token_score == pytest.approx(1, abs=1e-4), (
-            f'Score mismatch for {token_name}: got {token_score}, expected 1'
+            f"Score mismatch for {token_name}: got {token_score}, expected 1"
         )
 
 
@@ -278,30 +280,29 @@ def test_batched_models():
     # single
     assert lddt.shape == (2,)
     assert torch.allclose(lddt[0], torch.tensor(1.0), atol=1e-4)
-    assert torch.allclose(lddt[1], torch.tensor(1/3), atol=1e-4)
+    assert torch.allclose(lddt[1], torch.tensor(1 / 3), atol=1e-4)
 
     # token-level
-    assert len(lddt_residues) == 3 # n tokens
+    assert len(lddt_residues) == 3  # n tokens
     for token_name in lddt_residues:
         token_scores = lddt_residues[token_name]
-        assert len(token_scores) == 2 # batch size
+        assert len(token_scores) == 2  # batch size
 
         for i, token_score in enumerate(token_scores):
-
             # First model is perfect
             if i == 0:
                 assert token_score == pytest.approx(1, abs=1e-4), (
-                    f'Score mismatch for {token_name}: got {token_score}, expected 1'
+                    f"Score mismatch for {token_name}: got {token_score}, expected 1"
                 )
 
             # Second model, first two tokens have one bad pair, one perfect pair
             elif token_name in (0, 1):
                 assert token_score == pytest.approx(0.5, abs=1e-4), (
-                    f'Score mismatch for {token_name}: got {token_score}, expected 0.5'
+                    f"Score mismatch for {token_name}: got {token_score}, expected 0.5"
                 )
 
             # Second model, last token is bad
             else:
                 assert token_score == pytest.approx(0, abs=1e-4), (
-                    f'Score mismatch for {token_name}: got {token_score}, expected 0'
+                    f"Score mismatch for {token_name}: got {token_score}, expected 0"
                 )
