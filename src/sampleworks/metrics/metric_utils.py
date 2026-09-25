@@ -238,9 +238,9 @@ def spread_batch_into_dictionary(batch: Float[torch.Tensor, "B"]) -> dict[int, f
     assert len(batch.shape) == 1, f"Batch should be a 1d tensor, {batch}"
     return {i: data.item() for i, data in enumerate(batch)}
 
+
 def pad_ragged(
-    arrays: list[torch.Tensor],
-    pad_value: float = 0
+    arrays: list[torch.Tensor], pad_value: float = 0
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Given a list of tensors of different lengths, pad to the length
     of the longest tensor in order to construct a rectangular array.
@@ -251,11 +251,11 @@ def pad_ragged(
         Python list of 1D tensors of varying lengths
     pad_value: float
         Value to pad arrays with.
-    
+
     Returns
     -------
     padded: Tensor
-        Padded rectangular tensor of shape [len(arrays), len(longest array)] 
+        Padded rectangular tensor of shape [len(arrays), len(longest array)]
     valid_mask: Tensor
         Mask indicating which padded_array values are valid (versus padded).
     """
@@ -271,18 +271,11 @@ def pad_ragged(
         "Input arrays are placed on different devices"
     )
     padded = torch.full(
-        (len(arrays), max_len),
-        pad_value,
-        dtype=arrays[0].dtype,
-        device=arrays[0].device
+        (len(arrays), max_len), pad_value, dtype=arrays[0].dtype, device=arrays[0].device
     )
 
     # Track which elements are valid
-    valid_mask = torch.zeros(
-        len(arrays), max_len,
-        dtype=torch.bool,
-        device=arrays[0].device
-    )
+    valid_mask = torch.zeros(len(arrays), max_len, dtype=torch.bool, device=arrays[0].device)
 
     # Fill in real values
     for i, array in enumerate(arrays):

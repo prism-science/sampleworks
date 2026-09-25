@@ -20,8 +20,8 @@ from jaxtyping import Bool, Float, Int
 from loguru import logger
 
 from sampleworks.metrics.metric import Metric
-from sampleworks.utils.atom_array_utils import filter_to_common_atoms
 from sampleworks.metrics.metric_utils import pad_ragged
+from sampleworks.utils.atom_array_utils import filter_to_common_atoms
 
 
 # This method is copied from RosettaCommons/foundry/models/rf3/metrics/lddt.py, but
@@ -77,55 +77,54 @@ def _calc_lddt(
 
     # Calculate delta distances for valid pairs from each model in batch
     delta_distances, first_index_valid, second_index_valid, valid_mask = find_valid_distances(
-        X_L,
-        X_gt_L,
-        first_index,
-        second_index,
-        crd_mask_L,
-        tok_idx,
-        distance_cutoff
-    ) # all are (D, N)
+        X_L, X_gt_L, first_index, second_index, crd_mask_L, tok_idx, distance_cutoff
+    )  # all are (D, N)
 
     # Pre-calculate threshold passes for each pair
     # (To be used by both global and residue-level lDDT calculation)
-    threshold_passes = torch.stack([
-        delta_distances < 0.5, # 0.5Å threshold
-        delta_distances < 1.0,  # 1.0Å threshold
-        delta_distances < 2.0, # 2.0Å threshold
-        delta_distances < 4.0 # 4.0Å threshold
-    ], dim=-1) #(D, N, 4)
+    threshold_passes = torch.stack(
+        [
+            delta_distances < 0.5,  # 0.5Å threshold
+            delta_distances < 1.0,  # 1.0Å threshold
+            delta_distances < 2.0,  # 2.0Å threshold
+            delta_distances < 4.0,  # 4.0Å threshold
+        ],
+        dim=-1,
+    )  # (D, N, 4)
 
     # Remove contributions of padding elements
-    threshold_passes &= valid_mask[..., None] #(D, N, 4)
-    threshold_passes = threshold_passes.sum(dim=-1) # Flatten alongst threshold dimension
+    threshold_passes &= valid_mask[..., None]  # (D, N, 4)
+    threshold_passes = threshold_passes.sum(dim=-1)  # Flatten alongst threshold dimension
 
     # Calculate global lDDT score
     lddt_score = (
-        0.25 * threshold_passes.sum(dim=-1) # For global, sum over pairs
+        0.25
+        * threshold_passes.sum(dim=-1)  # For global, sum over pairs
         # Adding eps to denominator here makes having no valid pairs return 0 instead of NaN
         / (valid_mask.sum(dim=-1) + eps)  # Normalize by number of valid pairs
     )
 
     # Construct selected_token_ids if not provided
     if selected_token_ids is None:
-        selected_token_ids_tensor = tok_idx.unique() 
+        selected_token_ids_tensor = tok_idx.unique()
     else:
         # convert type to match above case
-        selected_token_ids_tensor = torch.as_tensor(selected_token_ids, device=X_L.device)
+        selected_token_ids_tensor = torch.as_tensor(
+            selected_token_ids, dtype=tok_idx.dtype, device=X_L.device
+        )
 
     # Calculate residue level lDDT scores
     residue_level_lddt_scores = torch.vmap(
-        residue_level_lddt_single,
-        in_dims=(0, 0, 0, 0, None, None, None)
+        residue_level_lddt_single, in_dims=(0, 0, 0, 0, None, None, None)
     )(
-        threshold_passes, # vectorize over batch
-        first_index_valid, # vectorize over batch
-        second_index_valid, # vectorize over batch
-        valid_mask, # vectorize over batch
-        tok_idx, # pass directly
-        selected_token_ids_tensor, # pass directly, needs to be tensor for vmap
-        eps
-    ) #(D, n_tokens)
+        threshold_passes,  # vectorize over batch
+        first_index_valid,  # vectorize over batch
+        second_index_valid,  # vectorize over batch
+        valid_mask,  # vectorize over batch
+        tok_idx,  # pass directly
+        selected_token_ids_tensor,  # pass directly, needs to be tensor for vmap
+        eps,
+    )  # (D, n_tokens)
 
     # Reformat into dictionary of lists
     residue_level_lddt_scores = {
@@ -135,7 +134,8 @@ def _calc_lddt(
 
     # return the token indices of the first axis of the distance diff matrix so that we
     # can use them to compute per-token DDT later.
-    return lddt_score, residue_level_lddt_scores   
+    return lddt_score, residue_level_lddt_scores
+
 
 def find_valid_distances(
     X_L: Float[torch.Tensor, "D L 3"],
@@ -144,12 +144,12 @@ def find_valid_distances(
     second_index: Int[torch.Tensor, "n_pairs"],
     crd_mask_L: Bool[torch.Tensor, "D L"],
     tok_idx: Int[torch.Tensor, "L"],
-    distance_cutoff: float
+    distance_cutoff: float,
 ) -> tuple[
     Float[torch.Tensor, "D len_longest_array"],
     Int[torch.Tensor, "D len_longest_array"],
     Int[torch.Tensor, "D len_longest_array"],
-    Bool[torch.Tensor, "D len_longest_array"]
+    Bool[torch.Tensor, "D len_longest_array"],
 ]:
     """
     Calculate delta distances for valid pairs from each model in batch.
@@ -217,7 +217,7 @@ def find_valid_distances(
 
         # Filter ground truth distances to only valid pairs
         ground_truth_distances_valid = ground_truth_distances[valid_pairs]
-        del ground_truth_distances #since this is (n_pairs,)
+        del ground_truth_distances  # since this is (n_pairs,)
 
         # Calculate predicted distances for only valid pairs
         first_index_valid: Int[torch.Tensor, "n_valid_pairs"] = first_index[  # noqa F821
@@ -246,6 +246,7 @@ def find_valid_distances(
 
     return delta_distances, first_index_valid, second_index_valid, valid_mask
 
+
 def residue_level_lddt_single(
     threshold_passes: Int[torch.Tensor, "N"],
     first_index_valid: Int[torch.Tensor, "N"],
@@ -253,7 +254,7 @@ def residue_level_lddt_single(
     valid_mask: Bool[torch.Tensor, "N"],
     tok_idx: Int[torch.Tensor, "L"],  # noqa F821
     selected_token_ids: Int[torch.Tensor, "*"],
-    eps: float
+    eps: float,
 ) -> Float[torch.Tensor, "n_tokens"]:
     """Calculates residue-level lDDT for a single batch item
     (Helper function for _calc_lddt)
@@ -278,6 +279,7 @@ def residue_level_lddt_single(
     Float[torch.Tensor, "n_tokens"]
         Residue-level lDDT scores.
     """
+
     # Calculate for single residue
     def residue_level_lddt_single_residue(
         threshold_passes: Int[torch.Tensor, "N"],
@@ -286,7 +288,7 @@ def residue_level_lddt_single(
         valid_mask: Bool[torch.Tensor, "N"],
         tok_idx: Int[torch.Tensor, "L"],  # noqa F821
         token_id: int,
-        eps: float = 1e-6
+        eps: float = 1e-6,
     ) -> Float[torch.Tensor, ""]:
         """Calculate residue-level lDDT for single residue
 
@@ -295,20 +297,21 @@ def residue_level_lddt_single(
         (see residue_level_lddt_single)
         token_id : int
             Token ID to compute residue-level score for.
-        
+
         Returns
         -------
         torch.Float
             lDDT for only atoms in this residue.
         """
         # Filtering is simplified since same token pairs were already removed upstream from delta_distances
-        idxu = (tok_idx[first_index_valid] == token_id) & valid_mask # upper triangle
-        idxl = (tok_idx[second_index_valid] == token_id) & valid_mask # lower triangle
-        idx = (idxu | idxl) #(N, )
+        idxu = (tok_idx[first_index_valid] == token_id) & valid_mask  # upper triangle
+        idxl = (tok_idx[second_index_valid] == token_id) & valid_mask  # lower triangle
+        idx = idxu | idxl  # (N, )
 
         # Compute score
         return (
-            0.25 * (threshold_passes * idx).sum() # sum over pairs involving this residue only
+            0.25
+            * (threshold_passes * idx).sum()  # sum over pairs involving this residue only
             / (idx.sum() + eps)
         )
 
@@ -322,9 +325,10 @@ def residue_level_lddt_single(
         second_index_valid,
         valid_mask,
         tok_idx,
-        selected_token_ids, # vectorize over tokens
-        eps
+        selected_token_ids,  # vectorize over tokens
+        eps,
     )
+
 
 def extract_lddt_features_from_atom_arrays(
     predicted_atom_array_stack: AtomArrayStack | AtomArray,
