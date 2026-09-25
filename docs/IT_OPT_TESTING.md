@@ -41,6 +41,8 @@ pixi run -e protenix-dev python -m pytest tests/models/test_latent_adapter.py -q
 
 ### Level 0 — Does the gradient reach the latent? (the #1 failure mode)
 
+<!-- TODO(#422): make this a GPU test once we can run checkpoint-dependent tests in CI. -->
+
 Needs no reward; confirms precondition (a). Inject a `requires_grad` leaf as `z_trunk` (or
 `s_trunk`), run one differentiable denoiser forward, and check the leaf received a gradient:
 

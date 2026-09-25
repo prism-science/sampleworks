@@ -158,18 +158,14 @@ than the reference's Frobenius norm (shape-agnostic, so `w_s`/`w_z` are comparab
 - **On-manifold discipline.** Pushing `z` hard buys density fit with broken geometry; the anchor and
   `BondGeometryReward` are the counter-pressure. Efficacy must be judged on held-out fit against
   matched-compute baselines, not train-set loss (see [IT_OPT_TESTING.md](IT_OPT_TESTING.md)).
+- **`s`/`z` are the only post-trunk levers.** In the AF2/OpenFold tradition you could optimize the
+  MSA representation `m`, but AF3-family models have no persistent MSA latent at the featurize→step
+  boundary: the MSA module writes only into `z`, and `s` is updated inside the Pairformer via
+  pair-biased attention, seeded from `s_inputs` rather than an MSA row. `m` is upstream of featurize,
+  rebuilt each recycle, and the trunk runs under `no_grad`, so optimizing it would need backprop
+  through the trunk (ColabDesign/AfDesign territory) — out of scope.
 
-## 7. Why `s`/`z` and not the MSA
-
-In the AF2/OpenFold tradition you could optimize the MSA representation `m`. The AF3-family models
-(Protenix, Boltz) have **no persistent MSA latent** at the featurize→step boundary: the MSA module
-writes only into `z`, and `s` is updated inside the Pairformer via pair-biased attention, seeded from
-`s_inputs` rather than from an MSA row. So the post-trunk optimization levers are exactly `s_trunk`
-(≈ the single rep) and `z_trunk` (≈ where the MSA information now lives). `m` is upstream of
-featurize, rebuilt each recycle, and the trunk runs under `no_grad` — optimizing it would require
-backprop through the trunk (ColabDesign/AfDesign territory) and is out of scope.
-
-## 8. Running it
+## 7. Running it
 
 CLI: `sampleworks-guidance --model <protenix|rf3|boltz1> --guidance-type latent_opt …` with
 `--which-latent {single,pair,both}` (default `pair`), `--learning-rate` (0.05), `--outer-steps` (2),

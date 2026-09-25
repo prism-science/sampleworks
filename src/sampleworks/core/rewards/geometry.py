@@ -44,6 +44,7 @@ from torch import Tensor
 # -------------------------------------------------------------------------------
 
 
+# TODO(#421): move into utils/elements.py, the per-element lookup module.
 def _covalent_radius(element: str) -> float:
     """Covalent radius of an element (Å).
 
@@ -59,6 +60,7 @@ def _covalent_radius(element: str) -> float:
     return float(gemmi.Element(element).covalent_r)
 
 
+# TODO(#420): this loss has no test coverage.
 class BondGeometryReward:
     """Penalize distorted bonds and steric clashes in the denoised structure.
 
