@@ -1,13 +1,28 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import json
 import os
-from dataclasses import dataclass
+import sys
+import typing
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from sampleworks.utils.guidance_constants import GuidanceType, StructurePredictor
+from sampleworks.core.rewards.config import REWARD_OPTIONS_KEY, RewardConfig
+from sampleworks.core.rewards.options import option_type
+from sampleworks.core.rewards.registry import get_reward_spec, reward_type_names
+from sampleworks.utils.guidance_constants import GuidanceType, Rewards, StructurePredictor
 
+
+# Reward used when a run does not say which one it wants. Keeps every command
+# line written before rewards were selectable working unchanged.
+DEFAULT_REWARD_TYPE = Rewards.REAL_SPACE_DENSITY
+
+# Namespace prefix for generated reward-option flags, so they cannot collide with
+# a model or guidance argument of the same name.
+_REWARD_OPTION_PREFIX = "reward_option_"
 
 # Baked-in checkpoint paths (Docker image), ACTL shared-storage paths, and
 # legacy fallbacks. Environment variables win when present.
@@ -215,7 +230,7 @@ class GuidanceConfig:
     # add basic arguments by default.
     protein: str
     structure: Path | str  # actually a path to a structure file
-    density: Path | str
+    density: Path | str | None
     model_name: str | StructurePredictor
     guidance_type: str | GuidanceType
     log_path: str
@@ -232,6 +247,13 @@ class GuidanceConfig:
     alignment_reverse_diffusion: bool | None = None
     recycling_steps: int | None = None
     num_diffusion_steps: int = 200
+    # Rewards this run scores against, as the {reward: {weight, reward_options}}
+    # mapping of issue #358. Kept as plain primitives, not a RewardConfig: these
+    # configs are pickled into job queues and read back by workers that may be
+    # running a different sampleworks build. Left empty, __post_init__ fills it
+    # in from the density fields below, which is how grid search and older
+    # pickles keep working.
+    reward_config: dict[str, Any] = field(default_factory=dict)
 
     # DO NOT remove the **kwargs, it is for compatibility with argparse.
     def add_argument(self, name: str, default: Any = None, **kwargs):
@@ -262,29 +284,31 @@ class GuidanceConfig:
         if guidance_preset and guidance_type not in guidance_choices:
             raise ValueError(f"Unknown guidance type: {guidance_type}")
 
-        # -- first pass: resolve model & guidance_type if not pre-set --------
-        if not model_preset or not guidance_preset:
-            pre = argparse.ArgumentParser(add_help=False)
-            if not model_preset:
-                pre.add_argument(
-                    "--model",
-                    dest="model_name",
-                    type=str,
-                    required=True,
-                    choices=model_choices,
-                    help="Structure prediction model",
-                )
-            if not guidance_preset:
-                pre.add_argument(
-                    "--guidance-type",
-                    type=str,
-                    required=True,
-                    choices=guidance_choices,
-                    help="Guidance method",
-                )
-            pre_args, _ = pre.parse_known_args(argv)
-            model_name = model_name or pre_args.model_name
-            guidance_type = guidance_type or pre_args.guidance_type
+        # -- first pass: resolve model, guidance_type, and the reward selection --
+        # The reward decides which option flags exist, so it has to be known before
+        # the real parser is built, exactly like the model and the guidance type.
+        pre = argparse.ArgumentParser(add_help=False)
+        if not model_preset:
+            pre.add_argument(
+                "--model",
+                dest="model_name",
+                type=str,
+                required=True,
+                choices=model_choices,
+                help="Structure prediction model",
+            )
+        if not guidance_preset:
+            pre.add_argument(
+                "--guidance-type",
+                type=str,
+                required=True,
+                choices=guidance_choices,
+                help="Guidance method",
+            )
+        add_reward_selection_args(pre)
+        pre_args, _ = pre.parse_known_args(argv)
+        model_name = model_name or pre_args.model_name
+        guidance_type = guidance_type or pre_args.guidance_type
 
         if model_name is None or guidance_type is None:
             raise RuntimeError("CLI parsing did not resolve a model name and guidance type")
@@ -315,10 +339,29 @@ class GuidanceConfig:
             help="Protein identifier (must match naming used in grid search / evaluation)",
         )
         add_generic_args(parser)
+        add_reward_selection_args(parser)
+        # A configuration file names its own rewards, so the per-option flags of a
+        # single reward would be ambiguous next to it: registering none of them
+        # keeps --help honest about what this invocation accepts.
+        if pre_args.reward_config is None:
+            add_reward_args(parser, pre_args.reward_type)
         _MODEL_ARG_ADDERS[model_name](parser)
         _GUIDANCE_ARG_ADDERS[guidance_type](parser)
 
         args = parser.parse_args(argv)
+
+        # The file names its own rewards; taking a --reward-type alongside it would
+        # mean silently ignoring one of the two. --reward-type always has a default,
+        # so "was it passed" has to be answered from the command line itself.
+        given = argv if argv is not None else sys.argv[1:]
+        if args.reward_config is not None and any(
+            token.split("=", 1)[0] == "--reward-type" for token in given
+        ):
+            parser.error(
+                "--reward-type and --reward-config are alternatives: the configuration "
+                "file already names the rewards it configures."
+            )
+        reward_config = cls._reward_config_from_args(parser, args)
 
         if model_preset and args.model_name != model_name:
             parser.error(
@@ -334,21 +377,19 @@ class GuidanceConfig:
         config = cls(
             protein=args.protein,
             structure=args.structure,
-            density=args.density,
+            density=None,  # mirrored from the reward configuration in __post_init__
             model_name=model_name,
             guidance_type=guidance_type,
             log_path=getattr(args, "log_path", None) or "",
             output_dir=args.output_dir,
             partial_diffusion_step=args.partial_diffusion_step,
-            loss_order=args.loss_order,
-            resolution=args.resolution,
             device=getattr(args, "device", "") or "",
             gradient_normalization=args.gradient_normalization,
-            em=args.em,
             guidance_start=args.guidance_start,
             augmentation=args.augmentation,
             align_to_input=args.align_to_input,
             alignment_reverse_diffusion=args.alignment_reverse_diffusion,
+            reward_config=reward_config.to_mapping(),
         )
 
         # __post_init__ already set defaults for model/guidance-specific
@@ -357,6 +398,48 @@ class GuidanceConfig:
             val = getattr(args, attr, None)
             if val is not None:
                 setattr(config, attr, val)
+
+        return config
+
+    @staticmethod
+    def _reward_config_from_args(
+        parser: argparse.ArgumentParser, args: argparse.Namespace
+    ) -> RewardConfig:
+        """Resolve the run's rewards from either CLI surface.
+
+        Parameters
+        ----------
+        parser : argparse.ArgumentParser
+            Parser to report user errors through, so they read as usage errors.
+        args : argparse.Namespace
+            Parsed arguments.
+
+        Returns
+        -------
+        RewardConfig
+            The rewards this run scores against.
+        """
+        if args.reward_config is None:
+            config = RewardConfig.single(
+                args.reward_type, **reward_options_from_args(args)
+            ).with_effective_options()
+        else:
+            try:
+                config = RewardConfig.from_file(args.reward_config).with_effective_options()
+            except (OSError, ValueError) as error:
+                parser.error(f"--reward-config {args.reward_config}: {error}")
+
+        # Report a missing input as a usage error now, rather than after a model
+        # has been loaded. The reward builders check this too.
+        missing = config.missing_required_options()
+        if missing:
+            parser.error(
+                "; ".join(
+                    f"the {reward} reward requires "
+                    + ", ".join("--" + option.replace("_", "-") for option in options)
+                    for reward, options in missing.items()
+                )
+            )
 
         return config
 
@@ -371,6 +454,50 @@ class GuidanceConfig:
             _MODEL_ARG_ADDERS[self.model_name](self)
         except KeyError:
             raise ValueError(f"Unknown model type: {self.model_name}")
+
+        self._reconcile_reward_config()
+
+    def _reconcile_reward_config(self):
+        """Keep ``reward_config`` and the flat density fields agreeing with each other.
+
+        The density reward's options predate the reward configuration and are still
+        the shape grid search builds configs in, ``job_metadata.json`` records, and
+        the evaluation scripts read back. So the two representations are kept in
+        sync in one place, in whichever direction has the information: a config
+        built without ``reward_config`` (grid search, an older pickle) derives it
+        from the flat fields, and one built with it mirrors the density options
+        back out.
+        """
+        if not self.reward_config:
+            options = {
+                "density": None if self.density is None else str(self.density),
+                "resolution": self.resolution,
+                "loss_order": self.loss_order,
+                "em": self.em,
+            }
+            self.reward_config = RewardConfig.single(
+                DEFAULT_REWARD_TYPE,
+                **{name: value for name, value in options.items() if value is not None},
+            ).to_mapping()
+            return
+
+        density_options = self.reward_config.get(DEFAULT_REWARD_TYPE.value, {}).get(
+            REWARD_OPTIONS_KEY, {}
+        )
+        self.density = density_options.get("density")
+        self.resolution = density_options.get("resolution")
+        self.loss_order = density_options.get("loss_order", 2)
+        self.em = density_options.get("em", False)
+
+    def resolved_reward_config(self) -> RewardConfig:
+        """Return this run's rewards as a validated :class:`RewardConfig`.
+
+        Returns
+        -------
+        RewardConfig
+            Parsed from the stored mapping.
+        """
+        return RewardConfig.from_mapping(self.reward_config)
 
     def populate_config_for_guidance_type(self, job: JobConfig, args: argparse.Namespace):
         """Apply per-job grid-search values onto this guidance configuration."""
@@ -407,26 +534,143 @@ class GuidanceConfig:
         When host-path env vars are set, container-internal paths are remapped
         to their host equivalents so that
         ``job_metadata.json`` is reproducible outside the container.
+
+        ``reward_config`` is emitted as a JSON string rather than a nested
+        mapping: this dictionary is also written into the output CIF as the
+        ``sampleworks`` category, where a nested value would be read as a column
+        of rows and produce a broken category.
         """
         output = self.__dict__.copy()
-        output["density"] = _remap_container_path(str(self.density))
+        output["density"] = (
+            None if self.density is None else _remap_container_path(str(self.density))
+        )
         output["structure"] = _remap_container_path(str(self.structure))
         output["output_dir"] = _remap_container_path(str(self.output_dir))
         output["log_path"] = _remap_container_path(str(self.log_path))
+        output["reward_type"] = ",".join(self.reward_config)
+        output["reward_config"] = json.dumps(
+            self.resolved_reward_config().remapped_paths(_remap_container_path)
+        )
         return output
 
     def __setstate__(self, state: dict[str, Any]) -> None:
-        """Restore state while migrating legacy pickles from ``model``."""
+        """Restore state, migrating pickles written before ``model_name`` and rewards.
+
+        Job queues are pickled by whichever build submitted them and unpickled by
+        the worker, so a config from an older build has to keep working: it names
+        the model ``model``, and has no ``reward_config`` -- only the flat density
+        fields the reward configuration is reconciled with.
+        """
         migrated = state.copy()
         if "model" in migrated:
             migrated.setdefault("model_name", migrated.pop("model"))
+        migrated.setdefault("reward_config", {})
         self.__dict__.update(migrated)
+        self._reconcile_reward_config()
+
+
+def add_reward_selection_args(parser: argparse.ArgumentParser):
+    """Add the two ways of choosing rewards: one by name, or several from a file.
+
+    Parameters
+    ----------
+    parser : argparse.ArgumentParser
+        Parser to add ``--reward-type`` and ``--reward-config`` to.
+    """
+    parser.add_argument(
+        "--reward-type",
+        type=str,
+        default=DEFAULT_REWARD_TYPE.value,
+        choices=reward_type_names(),
+        help=f"Reward to guide with (default: {DEFAULT_REWARD_TYPE.value}). Its options are "
+        "listed below. Use --reward-config to combine several rewards.",
+    )
+    parser.add_argument(
+        "--reward-config",
+        type=str,
+        default=None,
+        help="Reward configuration file (.yaml/.json/.toml) mapping each reward to its "
+        "weight and reward_options. Takes the place of --reward-type and the "
+        "per-reward flags, and is the only way to combine rewards.",
+    )
+
+
+def add_reward_args(parser: argparse.ArgumentParser, reward: Rewards | str):
+    """Add the CLI flags for one reward's options, derived from its option schema.
+
+    Only the selected reward's flags are registered, so a flag belonging to a
+    different reward is rejected by argparse rather than silently ignored. Every
+    flag defaults to None here: the option schema owns the real defaults, and
+    "not passed" has to stay distinguishable from "passed the default" so a
+    configuration file can be layered underneath.
+
+    Parameters
+    ----------
+    parser : argparse.ArgumentParser
+        Parser to add the reward's flags to.
+    reward : Rewards | str
+        The selected reward type.
+    """
+    spec = get_reward_spec(reward)
+    group = parser.add_argument_group(f"{spec.name.value} reward options", spec.description)
+
+    for option in dataclasses.fields(spec.options_cls):
+        value_type = option_type(spec.options_cls, option.name)
+        metadata = option.metadata
+        help_text = metadata["help"]
+        if option.default is not None:
+            help_text = f"{help_text} (default: {option.default})"
+
+        kwargs: dict[str, Any] = {
+            "dest": f"{_REWARD_OPTION_PREFIX}{option.name}",
+            "default": None,
+            "help": help_text,
+        }
+        if value_type is bool:
+            kwargs["action"] = argparse.BooleanOptionalAction
+        else:
+            if not metadata["choices"]:
+                # Otherwise the prefixed dest becomes the metavar and --help reads
+                # "--mtzfile REWARD_OPTION_MTZFILE". Options with choices are left
+                # alone so argparse can show the choices in their place.
+                kwargs["metavar"] = option.name.upper()
+            if metadata["json_arg"]:
+                kwargs["type"] = json.loads
+            elif typing.get_origin(value_type) is list:
+                kwargs["type"] = typing.get_args(value_type)[0]
+                kwargs["nargs"] = "+"
+            else:
+                kwargs["type"] = value_type
+
+        if metadata["choices"] and value_type is not bool:
+            kwargs["choices"] = list(metadata["choices"])
+
+        group.add_argument("--" + option.name.replace("_", "-"), **kwargs)
+
+
+def reward_options_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    """Collect the reward options that were actually passed on the command line.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed arguments.
+
+    Returns
+    -------
+    dict[str, Any]
+        Option name to value, omitting everything left unset.
+    """
+    return {
+        name.removeprefix(_REWARD_OPTION_PREFIX): value
+        for name, value in vars(args).items()
+        if name.startswith(_REWARD_OPTION_PREFIX) and value is not None
+    }
 
 
 def add_generic_args(parser: argparse.ArgumentParser | GuidanceConfig):
     """Add CLI arguments shared by all models and guidance methods."""
     parser.add_argument("--structure", type=str, required=True, help="Input structure")
-    parser.add_argument("--density", type=str, required=True, help="Input density map")
     parser.add_argument("--output-dir", type=str, default="output", help="Output directory")
     parser.add_argument(
         "--log-path", type=str, default=None, help="Log file path (default: output-dir/run.log)"
@@ -437,20 +681,12 @@ def add_generic_args(parser: argparse.ArgumentParser | GuidanceConfig):
         default=0,
         help="Diffusion step to start from",
     )
-    parser.add_argument("--loss-order", type=int, default=2, choices=[1, 2], help="L1 or L2 loss")
-    parser.add_argument(
-        "--resolution",
-        type=float,
-        required=True,
-        help="Map resolution in Angstroms (required for CCP4/MRC/MAP)",
-    )
     parser.add_argument("--device", type=str, default=None, help="Device (cuda/cpu, auto-detect)")
     parser.add_argument(
         "--gradient-normalization",
         action="store_true",
         help="Enable gradient normalization",
     )
-    parser.add_argument("--em", action="store_true", help="Use EM scattering factors")
     parser.add_argument(
         "--guidance-start",
         type=int,

@@ -16,11 +16,8 @@ from biotite.structure import AtomArray, AtomArrayStack, stack
 from biotite.structure.io import save_structure
 from loguru import logger
 
-from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.volume import XMap
-from sampleworks.core.rewards.real_space_density import (
-    RealSpaceRewardFunction,
-    setup_scattering_params,
-)
+from sampleworks.core.rewards.config import build_reward
+from sampleworks.core.rewards.registry import RewardBuildContext
 from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
 from sampleworks.core.scalers.fk_steering import FKSteering
 from sampleworks.core.scalers.pure_guidance import PureGuidance
@@ -264,16 +261,23 @@ def get_model_and_device(
     return device, model_wrapper
 
 
-# TODO: further atomize for easier testing.
-def get_reward_function_and_structure(
-    density: str | Path,
-    device: torch.device,
-    em,
-    loss_order,
-    resolution,
-    structure_path: str | Path,
-) -> tuple[RealSpaceRewardFunction, dict[str, Any]]:
-    """Load structure and density inputs and build the real-space reward function."""
+def load_guidance_structure(structure_path: str | Path) -> dict[str, Any]:
+    """Parse the input structure for a guidance run.
+
+    Reward-agnostic: every reward in a run scores the same structure, so it is
+    loaded once here and handed to the reward builders through
+    :class:`~sampleworks.core.rewards.registry.RewardBuildContext`.
+
+    Parameters
+    ----------
+    structure_path : str | Path
+        Path to the structure file (``.cif`` / ``.pdb``) to sample around.
+
+    Returns
+    -------
+    dict[str, Any]
+        Atomworks-parsed structure dictionary.
+    """
     logger.debug(f"Loading structure from {structure_path}")
     structure_path = Path(structure_path)
     safe_structure_path = resolve_mixed_hetatm_atom_altlocs(structure_path)
@@ -289,28 +293,7 @@ def get_reward_function_and_structure(
             except OSError as error:
                 logger.warning(f"Failed to remove temporary CIF: {safe_structure_path}: {error}")
 
-    logger.debug(f"Loading density map from {density}")
-    xmap = XMap.fromfile(density, resolution=resolution)
-
-    logger.debug("Setting up scattering parameters")
-
-    atom_array = structure["asym_unit"]
-    scattering_params = setup_scattering_params(em_mode=em, device=device)
-
-    selection_mask = atom_array.occupancy > 0
-    n_selected = selection_mask.sum()
-    logger.info(f"Selected {n_selected} atoms with occupancy > 0")
-
-    logger.info("Creating reward function")
-    reward_function = RealSpaceRewardFunction(
-        xmap,
-        scattering_params,
-        selection_mask,
-        em=em,
-        loss_order=loss_order,
-        device=device,
-    )
-    return reward_function, structure
+    return structure
 
 
 def save_everything(
@@ -476,13 +459,12 @@ def _three_state_resolver(value: str | bool | None, default: bool) -> bool:
 # "guidance_type" is also called "scaler" in many places
 def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, device):
     """Run one configured guidance trajectory and save its outputs."""
-    reward_function, structure = get_reward_function_and_structure(
-        args.density,  # str/path to a map file.
-        device,  # this needs to come from the global context, not the args object.
-        args.em,
-        args.loss_order,
-        args.resolution,
-        args.structure,  # path/string to a structure file.
+    structure = load_guidance_structure(args.structure)
+    logger.info("Creating reward function")
+    reward_function = build_reward(
+        args.resolved_reward_config(),
+        # device comes from the global context, not the args object.
+        RewardBuildContext(structure=structure, device=device),
     )
 
     # Determine model type from wrapper class name

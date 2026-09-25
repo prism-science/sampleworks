@@ -53,6 +53,7 @@ class Rewards(StrEnum):
     """Enum for all RewardFunctionProtocol implementations."""
 
     REAL_SPACE_DENSITY = "real_space_density"
+    STRUCTURE_FACTOR = "structure_factor"
 
 
 class Boltz2Method(StrEnum):

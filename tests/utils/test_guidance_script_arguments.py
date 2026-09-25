@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import pickle
 from argparse import Namespace
 from pathlib import Path
@@ -376,3 +377,110 @@ def test_job_result_migrates_legacy_model_pickle() -> None:
     assert restored.model_name == "boltz2"
     assert "model" not in restored.__dict__
     assert "model" not in restored.as_dict()
+
+
+# ============================================================================
+# Reward configuration on GuidanceConfig
+# ============================================================================
+
+
+def _density_config(
+    density: str | None = "/data/inputs/1abc.ccp4",
+    resolution: float | None = 1.8,
+    loss_order: int = 2,
+    em: bool = False,
+    reward_config: dict | None = None,
+) -> GuidanceConfig:
+    """A config built the way grid search builds one: flat density fields only."""
+    return GuidanceConfig(
+        protein="1abc",
+        structure="/data/inputs/1abc.cif",
+        density=density,
+        model_name=StructurePredictor.BOLTZ_2,
+        guidance_type=GuidanceType.PURE_GUIDANCE,
+        log_path="/data/results/run.log",
+        resolution=resolution,
+        loss_order=loss_order,
+        em=em,
+        reward_config=reward_config or {},
+    )
+
+
+def test_flat_density_fields_become_a_reward_configuration():
+    """Grid search builds configs field by field and never sets reward_config."""
+    config = _density_config(loss_order=1, em=True)
+
+    assert config.reward_config == {
+        "real_space_density": {
+            "reward_options": {
+                "density": "/data/inputs/1abc.ccp4",
+                "resolution": 1.8,
+                "loss_order": 1,
+                "em": True,
+            }
+        }
+    }
+
+
+def test_a_reward_configuration_mirrors_back_onto_the_flat_density_fields():
+    """The evaluation scripts read density and resolution out of job_metadata.json."""
+    config = _density_config(
+        density=None,
+        resolution=None,
+        reward_config={
+            "real_space_density": {
+                "reward_options": {"density": "/data/x.ccp4", "resolution": 2.4, "loss_order": 1}
+            }
+        },
+    )
+
+    assert (config.density, config.resolution, config.loss_order) == ("/data/x.ccp4", 2.4, 1)
+
+
+def test_a_legacy_pickle_without_a_reward_configuration_still_loads():
+    """Job queues are pickled by one build and unpickled by another."""
+    config = _density_config()
+    state = config.__dict__.copy()
+    del state["reward_config"]
+
+    restored = GuidanceConfig.__new__(GuidanceConfig)
+    restored.__setstate__(state)
+
+    assert restored.resolved_reward_config().entries[0].options["density"] == (
+        "/data/inputs/1abc.ccp4"
+    )
+
+
+def test_as_dict_serializes_the_reward_configuration_as_a_string(monkeypatch):
+    """job_metadata.json also becomes a CIF category, which cannot hold nested values."""
+    monkeypatch.setenv("SAMPLEWORKS_HOST_INPUT_DIR", "/host/data")
+    config = _density_config(density="/data/inputs/1abc.ccp4")
+
+    serialized = config.as_dict()
+
+    assert serialized["reward_type"] == "real_space_density"
+    assert isinstance(serialized["reward_config"], str)
+    options = json.loads(serialized["reward_config"])["real_space_density"]["reward_options"]
+    assert options["density"] == "/host/data/1abc.ccp4"
+
+
+def test_run_metadata_survives_a_round_trip_through_the_output_cif(tmp_path):
+    """add_category_to_cif reads any non-string iterable as a column of rows."""
+    import numpy as np
+    from biotite.structure import AtomArray
+    from biotite.structure.io.pdbx import CIFFile, set_structure
+    from sampleworks.utils.cif_utils import add_category_to_cif
+
+    config = _density_config()
+    atom_array = AtomArray(1)
+    atom_array.coord = np.zeros((1, 3), dtype=np.float32)
+
+    cif = CIFFile()
+    set_structure(cif, atom_array)
+    add_category_to_cif(cif, config.as_dict(), category_name="sampleworks")
+    written = tmp_path / "refined.cif"
+    cif.write(str(written))
+
+    reread = CIFFile.read(str(written)).block["sampleworks"]
+    stored = json.loads(reread["reward_config"].as_item())
+    assert stored["real_space_density"]["reward_options"]["resolution"] == 1.8

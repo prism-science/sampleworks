@@ -607,3 +607,205 @@ class TestAlignmentReverseDiffusion:
         """--no-alignment-reverse-diffusion must be able to force the feature off."""
         config = GuidanceConfig.from_cli(self.BASE + ["--no-alignment-reverse-diffusion"])
         assert config.alignment_reverse_diffusion is False
+
+
+class TestRewardSelection:
+    """--reward-type picks a reward and brings that reward's options with it."""
+
+    MODEL_ARGS = ["--model", "boltz2", "--guidance-type", "pure_guidance"]
+    STRUCTURE_ARGS = ["--protein", "1VME", "--structure", "test.cif"]
+
+    def test_density_is_the_default_reward(self):
+        """Every command line written before rewards were selectable still means density."""
+        config = GuidanceConfig.from_cli(self.MODEL_ARGS + COMMON_ARGS)
+
+        assert list(config.reward_config) == ["real_space_density"]
+        # Defaults are written out, so the run records what it actually used.
+        assert config.reward_config["real_space_density"]["reward_options"] == {
+            "density": "test.ccp4",
+            "resolution": 1.8,
+            "loss_order": 2,
+            "em": False,
+        }
+
+    def test_density_options_still_reach_the_flat_config_fields(self):
+        """Grid search and the evaluation scripts read these; they must keep working."""
+        config = GuidanceConfig.from_cli(
+            self.MODEL_ARGS + COMMON_ARGS + ["--loss-order", "1", "--em"]
+        )
+
+        assert (config.density, config.resolution, config.loss_order, config.em) == (
+            "test.ccp4",
+            1.8,
+            1,
+            True,
+        )
+
+    def test_structure_factor_reward_takes_its_own_options(self):
+        config = GuidanceConfig.from_cli(
+            self.MODEL_ARGS
+            + self.STRUCTURE_ARGS
+            + [
+                "--reward-type",
+                "structure_factor",
+                "--mtzfile",
+                "1vme.mtz",
+                "--bulk-solvent",
+                "combined",
+                "--expcolumns",
+                "FP",
+                "SIGFP",
+                "--normalize-amplitude",
+            ]
+        )
+
+        assert list(config.reward_config) == ["structure_factor"]
+        options = config.reward_config["structure_factor"]["reward_options"]
+        assert options["mtzfile"] == "1vme.mtz"
+        assert options["expcolumns"] == ["FP", "SIGFP"]
+        assert options["bulk_solvent"] == "combined"
+        assert options["normalize_amplitude"] is True
+        assert options["batch_partition"] == 10  # defaulted, and recorded as such
+
+    def test_options_of_another_reward_are_rejected(self):
+        """--density means nothing to the structure-factor reward, so it must not be accepted."""
+        argv = (
+            self.MODEL_ARGS
+            + self.STRUCTURE_ARGS
+            + [
+                "--reward-type",
+                "structure_factor",
+                "--mtzfile",
+                "1vme.mtz",
+                "--density",
+                "test.ccp4",
+            ]
+        )
+
+        with pytest.raises(SystemExit):
+            GuidanceConfig.from_cli(argv)
+
+    def test_an_unknown_reward_type_is_rejected(self):
+        argv = self.MODEL_ARGS + COMMON_ARGS + ["--reward-type", "diffuse_scattering"]
+
+        with pytest.raises(SystemExit):
+            GuidanceConfig.from_cli(argv)
+
+    def test_a_reward_missing_a_required_input_fails_before_anything_is_loaded(self):
+        argv = self.MODEL_ARGS + self.STRUCTURE_ARGS + ["--reward-type", "structure_factor"]
+
+        with pytest.raises(SystemExit):
+            GuidanceConfig.from_cli(argv)
+
+    def test_help_lists_the_selected_reward_s_options(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "sampleworks.cli.guidance",
+                "--model",
+                "boltz1",
+                "--guidance-type",
+                "pure_guidance",
+                "--reward-type",
+                "structure_factor",
+                "--help",
+            ],
+            capture_output=True,
+        )
+
+        assert result.returncode == 0
+        assert b"--mtzfile" in result.stdout
+        assert b"--density" not in result.stdout
+
+
+class TestRewardConfigFile:
+    """--reward-config is the same configuration, from a file, and the only way to compose."""
+
+    BASE = [
+        "--model",
+        "boltz2",
+        "--guidance-type",
+        "pure_guidance",
+        "--protein",
+        "1VME",
+        "--structure",
+        "test.cif",
+    ]
+
+    def write_config(self, tmp_path, text: str) -> str:
+        config_file = tmp_path / "rewards.yaml"
+        config_file.write_text(text)
+        return str(config_file)
+
+    def test_file_and_flags_describe_the_same_run(self, tmp_path):
+        from_file = GuidanceConfig.from_cli(
+            self.BASE
+            + [
+                "--reward-config",
+                self.write_config(
+                    tmp_path,
+                    "real_space_density:\n"
+                    "  reward_options:\n"
+                    "    density: test.ccp4\n"
+                    "    resolution: 1.8\n"
+                    "    loss_order: 1\n",
+                ),
+            ]
+        )
+        from_flags = GuidanceConfig.from_cli(
+            self.BASE + ["--density", "test.ccp4", "--resolution", "1.8", "--loss-order", "1"]
+        )
+
+        assert from_file.reward_config == from_flags.reward_config
+
+    def test_several_weighted_rewards_can_be_configured(self, tmp_path):
+        config = GuidanceConfig.from_cli(
+            self.BASE
+            + [
+                "--reward-config",
+                self.write_config(
+                    tmp_path,
+                    "real_space_density:\n"
+                    "  weight: 0.4\n"
+                    "  reward_options: {density: test.ccp4, resolution: 1.8}\n"
+                    "structure_factor:\n"
+                    "  weight: 0.6\n"
+                    "  reward_options: {mtzfile: test.mtz}\n",
+                ),
+            ]
+        )
+
+        assert config.resolved_reward_config().resolved_weights() == (0.4, 0.6)
+        assert config.density == "test.ccp4"  # the density term still mirrors out
+
+    def test_a_config_file_and_a_reward_type_together_are_rejected(self, tmp_path):
+        argv = self.BASE + [
+            "--reward-config",
+            self.write_config(tmp_path, "real_space_density: {}\n"),
+            "--reward-type",
+            "real_space_density",
+        ]
+
+        with pytest.raises(SystemExit):
+            GuidanceConfig.from_cli(argv)
+
+    def test_per_reward_flags_are_not_accepted_alongside_a_config_file(self, tmp_path):
+        argv = self.BASE + [
+            "--reward-config",
+            self.write_config(tmp_path, "real_space_density: {}\n"),
+            "--loss-order",
+            "1",
+        ]
+
+        with pytest.raises(SystemExit):
+            GuidanceConfig.from_cli(argv)
+
+    def test_a_broken_config_file_is_a_usage_error(self, tmp_path):
+        argv = self.BASE + [
+            "--reward-config",
+            self.write_config(tmp_path, "real_space_density:\n  reward_options: {looss: 1}\n"),
+        ]
+
+        with pytest.raises(SystemExit):
+            GuidanceConfig.from_cli(argv)

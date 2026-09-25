@@ -184,6 +184,43 @@ pixi run -e boltz sampleworks-guidance \
 
 Run `sampleworks-guidance --model <model> --guidance-type <type> --help` to see all available options.
 
+### Choosing rewards
+
+`--reward-type` selects which reward guides the run (default `real_space_density`), and the
+options listed under it in `--help` are that reward's own — `--density`/`--resolution` above
+belong to the density reward, while `--reward-type structure_factor` takes `--mtzfile` and
+friends instead. Passing one reward's option to another is an error rather than a silent
+no-op.
+
+To combine rewards, or to keep a run's reward settings in version control, pass a
+configuration file instead (YAML, JSON, or TOML; `${oc.env:VAR}` interpolation works in YAML):
+
+```yaml
+# rewards.yaml -- sampleworks-guidance ... --reward-config rewards.yaml
+real_space_density:
+  weight: 0.4
+  reward_options:
+    density: /data/1vme.ccp4
+    resolution: 1.8
+structure_factor:
+  weight: 0.6
+  reward_options:
+    mtzfile: /data/1vme.mtz
+    bulk_solvent: combined
+```
+
+Weights default to `1/N`, so combining rewards does not change what the guidance step size
+means. Omit them all or give them all; a partly-weighted configuration is an error.
+
+**Adding a reward type** is three things and no argparse edits: implement the reward in
+`core/rewards/`, declare its options as a frozen dataclass in `core/rewards/options.py`, and
+register it in `core/rewards/registry.py` with a `build_*` function that raises its own
+errors for inputs it cannot do without. CLI flags, configuration-file schema, validation
+messages, and run metadata all follow from that one declaration. A reward that needs the
+model's atom ordering (structure factors, anything with a topology) implements
+`prepare(atom_array, *, device)` from `PreparableRewardFunctionProtocol`; the trajectory
+scalers call it once the model atom array exists.
+
 The `run_guidance()` function in `utils/guidance_script_utils.py` is the central orchestrator. It wires together the model wrapper, sampler (`AF3EDMSampler`), step scaler (`DataSpaceDPSScaler` or `NoiseSpaceDPSScaler`), trajectory scaler (`PureGuidance` or `FKSteering`), and reward function. When adding a new model or guidance strategy, this is the best reference for how components compose in practice.
 
 ## Development Environment
@@ -479,7 +516,7 @@ Proteins exist as thermodynamic ensembles, not static structures. Current genera
 Currently planned:
 - Real-space electron density (X-ray crystallography) *implemented*
 - Cryo-EM density *implemented*
-- Structure factors (reciprocal space)
+- Structure factors (reciprocal space) *implemented*
 - Diffuse scattering
 - Cryo-EM image stacks
 
