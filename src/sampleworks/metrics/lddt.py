@@ -140,10 +140,10 @@ def _calc_lddt(
 def find_valid_distances(
     X_L: Float[torch.Tensor, "D L 3"],
     X_gt_L: Float[torch.Tensor, "D L 3"],
-    first_index: Int[torch.Tensor, "n_pairs"], # noqa F821
-    second_index: Int[torch.Tensor, "n_pairs"], # noqa F821
+    first_index: Int[torch.Tensor, "n_pairs"],  # noqa F821
+    second_index: Int[torch.Tensor, "n_pairs"],  # noqa F821
     crd_mask_L: Bool[torch.Tensor, "D L"],
-    tok_idx: Int[torch.Tensor, "L"], # noqa F821
+    tok_idx: Int[torch.Tensor, "L"],  # noqa F821
     distance_cutoff: float,
 ) -> tuple[
     Float[torch.Tensor, "D len_longest_array"],
@@ -248,14 +248,14 @@ def find_valid_distances(
 
 
 def residue_level_lddt_single(
-    threshold_passes: Int[torch.Tensor, "N"], # noqa F821
-    first_index_valid: Int[torch.Tensor, "N"], # noqa F821
-    second_index_valid: Int[torch.Tensor, "N"], # noqa F821
-    valid_mask: Bool[torch.Tensor, "N"], # noqa F821
+    threshold_passes: Int[torch.Tensor, "N"],  # noqa F821
+    first_index_valid: Int[torch.Tensor, "N"],  # noqa F821
+    second_index_valid: Int[torch.Tensor, "N"],  # noqa F821
+    valid_mask: Bool[torch.Tensor, "N"],  # noqa F821
     tok_idx: Int[torch.Tensor, "L"],  # noqa F821
     selected_token_ids: Int[torch.Tensor, "*"],
     eps: float,
-) -> Float[torch.Tensor, "n_tokens"]: # noqa F821
+) -> Float[torch.Tensor, "n_tokens"]:  # noqa F821
     """Calculates residue-level lDDT for a single batch item
     (Helper function for _calc_lddt)
 
@@ -282,10 +282,10 @@ def residue_level_lddt_single(
 
     # Calculate for single residue
     def residue_level_lddt_single_residue(
-        threshold_passes: Int[torch.Tensor, "N"], # noqa F821
-        first_index_valid: Int[torch.Tensor, "N"], # noqa F821
-        second_index_valid: Int[torch.Tensor, "N"], # noqa F821
-        valid_mask: Bool[torch.Tensor, "N"], # noqa F821
+        threshold_passes: Int[torch.Tensor, "N"],  # noqa F821
+        first_index_valid: Int[torch.Tensor, "N"],  # noqa F821
+        second_index_valid: Int[torch.Tensor, "N"],  # noqa F821
+        valid_mask: Bool[torch.Tensor, "N"],  # noqa F821
         tok_idx: Int[torch.Tensor, "L"],  # noqa F821
         token_id: int,
         eps: float = 1e-6,
@@ -303,7 +303,7 @@ def residue_level_lddt_single(
         torch.Float
             lDDT for only atoms in this residue.
         """
-        # Filtering is simplified since same token pairs were already 
+        # Filtering is simplified since same token pairs were already
         # removed upstream from delta_distances
         idxu = (tok_idx[first_index_valid] == token_id) & valid_mask  # upper triangle
         idxl = (tok_idx[second_index_valid] == token_id) & valid_mask  # lower triangle
