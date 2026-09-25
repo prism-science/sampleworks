@@ -179,7 +179,8 @@ def test_save_everything_writes_validated_metadata_to_all_cifs(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Fetch once and write unique IDs and carried entities to every output CIF."""
-    structure_path = resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
+    # A grid-search input keeps the deposit's author numbering, which the carry looks up.
+    structure_path = resources_dir / "1vme" / "1VME_single_001_density_input.cif"
     atom_array = load_any(
         structure_path,
         altloc="first",
@@ -209,7 +210,7 @@ def test_save_everything_writes_validated_metadata_to_all_cifs(
         """
         fetch_calls.append((pdb_id, format, target_path))
         downloaded = Path(target_path) / f"{pdb_id}.{format}"
-        downloaded.write_bytes((resources_dir / "1vme" / "1vme_final.cif").read_bytes())
+        downloaded.write_bytes((resources_dir / "1vme" / "1vme_rcsb.cif").read_bytes())
         return str(downloaded)
 
     monkeypatch.setattr(guidance_script_utils, "fetch", fetch_reference)
@@ -247,7 +248,13 @@ def test_save_everything_writes_validated_metadata_to_all_cifs(
         atom_ids = atom_site["id"].as_array(int)
         assert np.array_equal(atom_ids, np.arange(1, len(atom_ids) + 1))
         assert set(atom_site["pdbx_PDB_model_num"].as_array(str)) == {"1", "2"}
-        assert {"entity", "entity_poly", "entity_poly_seq", "struct_asym"} <= block.keys()
+        assert {
+            "entity",
+            "entity_poly",
+            "entity_poly_seq",
+            "struct_asym",
+            "pdbx_poly_seq_scheme",
+        } <= block.keys()
 
 
 def test_load_guidance_structure_keeps_original_structure_file(
