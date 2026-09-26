@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+import json
 import pickle
 from argparse import Namespace
 from pathlib import Path
@@ -11,6 +13,7 @@ import pytest
 from sampleworks.utils.guidance_constants import GuidanceType, StructurePredictor
 from sampleworks.utils.guidance_script_arguments import (
     _remap_container_path,
+    add_generic_args,
     get_checkpoint,
     GuidanceConfig,
     JobConfig,
@@ -376,3 +379,273 @@ def test_job_result_migrates_legacy_model_pickle() -> None:
     assert restored.model_name == "boltz2"
     assert "model" not in restored.__dict__
     assert "model" not in restored.as_dict()
+
+
+# ============================================================================
+# _validate_target tests
+# ============================================================================
+#
+# Which arguments are required depends on --target-type and, for diffuse, on
+# --bragg-weight: a pure-diffuse run needs no amplitudes and a pure-Bragg run no
+# diffuse map. Validation runs in __post_init__ so a misconfigured run fails
+# before the model weights load, which is the behaviour these pin.
+
+
+def _config(**overrides) -> GuidanceConfig:
+    """A GuidanceConfig with the target arguments under test overridable."""
+    kwargs = {
+        "protein": "protein",
+        "structure": "/tmp/structure.cif",
+        "density": "/tmp/density.mrc",
+        "model_name": StructurePredictor.BOLTZ_2,
+        "guidance_type": GuidanceType.PURE_GUIDANCE,
+        "log_path": "/tmp/output/run.log",
+    }
+    kwargs.update(overrides)
+    return GuidanceConfig(**kwargs)
+
+
+def test_density_target_is_the_default_and_accepts_a_map():
+    config = _config()
+
+    assert config.target_type == "density"
+    assert config.bragg_weight == 0.5
+
+
+def test_density_target_requires_a_density_map():
+    with pytest.raises(ValueError, match="--density is required"):
+        _config(density=None)
+
+
+def test_unknown_target_type_is_rejected():
+    with pytest.raises(ValueError, match="Unknown target type: sasa"):
+        _config(target_type="sasa")
+
+
+@pytest.mark.parametrize("weight", [-0.1, 1.5])
+def test_bragg_weight_outside_the_unit_interval_is_rejected(weight):
+    """The weight mixes two targets convexly, so values outside [0, 1] are meaningless."""
+    with pytest.raises(ValueError, match="convex mixture"):
+        _config(
+            target_type="diffuse",
+            density=None,
+            bragg_weight=weight,
+            bragg_target="/tmp/bragg.mtz",
+            diffuse_target="/tmp/diffuse.mtz",
+        )
+
+
+def test_diffuse_target_requires_bragg_amplitudes_when_they_are_weighted():
+    with pytest.raises(ValueError, match="--bragg-target is required"):
+        _config(
+            target_type="diffuse",
+            density=None,
+            bragg_weight=0.5,
+            diffuse_target="/tmp/diffuse.mtz",
+        )
+
+
+def test_diffuse_target_requires_a_diffuse_map_unless_the_weight_is_all_bragg():
+    with pytest.raises(ValueError, match="--diffuse-target is required"):
+        _config(
+            target_type="diffuse",
+            density=None,
+            bragg_weight=0.5,
+            bragg_target="/tmp/bragg.mtz",
+        )
+
+
+def test_pure_diffuse_run_needs_no_bragg_amplitudes():
+    """bragg_weight == 0 drops the Bragg term entirely, so its target is optional."""
+    config = _config(
+        target_type="diffuse",
+        density=None,
+        bragg_weight=0.0,
+        diffuse_target="/tmp/diffuse.mtz",
+    )
+
+    assert config.bragg_target is None
+
+
+def test_pure_bragg_run_needs_no_diffuse_map():
+    config = _config(
+        target_type="diffuse",
+        density=None,
+        bragg_weight=1.0,
+        bragg_target="/tmp/bragg.mtz",
+    )
+
+    assert config.diffuse_target is None
+
+
+def test_mixed_run_accepts_both_targets():
+    config = _config(
+        target_type="diffuse",
+        density=None,
+        bragg_weight=0.25,
+        bragg_target="/tmp/bragg.mtz",
+        diffuse_target="/tmp/diffuse.mtz",
+    )
+
+    assert (config.bragg_weight, config.target_type) == (0.25, "diffuse")
+
+
+def test_diffuse_target_does_not_require_a_density_map():
+    """--density is for the real-space reward; a diffuse run should not demand one."""
+    config = _config(
+        target_type="diffuse",
+        density=None,
+        bragg_weight=0.0,
+        diffuse_target="/tmp/diffuse.mtz",
+    )
+
+    assert config.density is None
+
+
+def test_diffuse_target_arguments_are_exposed_on_the_command_line():
+    """--target-type and the diffuse targets must reach GuidanceConfig from argv.
+
+    The config reads them with ``getattr(args, ..., default)``, which silently
+    tolerates their absence, so a missing flag would not fail loudly -- it would
+    quietly run a density job instead.
+    """
+    parser = argparse.ArgumentParser()
+    add_generic_args(parser)
+
+    args = parser.parse_args(
+        [
+            "--structure",
+            "/tmp/structure.cif",
+            "--resolution",
+            "1.8",
+            "--target-type",
+            "diffuse",
+            "--bragg-target",
+            "/tmp/bragg.mtz",
+            "--diffuse-target",
+            "/tmp/diffuse.mtz",
+            "--bragg-weight",
+            "0.25",
+        ]
+    )
+
+    assert args.target_type == "diffuse"
+    assert str(args.bragg_target) == "/tmp/bragg.mtz"
+    assert str(args.diffuse_target) == "/tmp/diffuse.mtz"
+    assert args.bragg_weight == 0.25
+
+
+def test_density_remains_the_default_target_type_on_the_command_line():
+    parser = argparse.ArgumentParser()
+    add_generic_args(parser)
+
+    args = parser.parse_args(["--structure", "/tmp/structure.cif", "--resolution", "1.8"])
+
+    assert args.target_type == "density"
+    assert args.bragg_target is None
+    assert args.diffuse_target is None
+
+
+# ============================================================================
+# diffuse target serialization and ensemble-size warning
+# ============================================================================
+
+
+def test_as_dict_stringifies_the_diffuse_target_paths():
+    """job_metadata.json is written with an unconditional json.dump.
+
+    The target fields are typed ``Path | str | None``, so a programmatic run
+    passing Path would otherwise leave PosixPath in the metadata and raise
+    TypeError after the run had already finished.
+    """
+    config = _config(
+        target_type="diffuse",
+        density=None,
+        bragg_weight=0.5,
+        bragg_target=Path("/tmp/bragg.mtz"),
+        diffuse_target=Path("/tmp/diffuse.mtz"),
+    )
+
+    output = config.as_dict()
+
+    assert isinstance(output["bragg_target"], str)
+    assert isinstance(output["diffuse_target"], str)
+    json.dumps(output)  # must not raise
+
+
+def test_as_dict_keeps_absent_diffuse_targets_as_none():
+    """None must not become the string "None", which would read as a real path."""
+    config = _config(
+        target_type="diffuse",
+        density=None,
+        bragg_weight=1.0,
+        bragg_target="/tmp/bragg.mtz",
+    )
+
+    output = config.as_dict()
+
+    assert output["diffuse_target"] is None
+    json.dumps(output)
+
+
+def test_single_configuration_with_a_weighted_diffuse_term_warns(caplog):
+    """Diffuse is <|F|^2> - |<F>|^2, identically zero for one configuration.
+
+    The run still works -- Bragg carries it, and the diffuse residual collapses
+    to a constant with no gradient -- so this warns rather than raising.
+    """
+    config = _config(
+        target_type="diffuse",
+        density=None,
+        bragg_weight=0.5,
+        bragg_target="/tmp/bragg.mtz",
+        diffuse_target="/tmp/diffuse.mtz",
+    )
+    config.ensemble_size = 1
+
+    with caplog.at_level("WARNING"):
+        config.warn_if_diffuse_cannot_contribute()
+
+    assert "identically zero for one" in caplog.text
+
+
+def test_no_warning_when_the_diffuse_term_carries_no_weight(caplog):
+    """bragg_weight == 1 drops the diffuse term, so one configuration is fine."""
+    config = _config(
+        target_type="diffuse",
+        density=None,
+        bragg_weight=1.0,
+        bragg_target="/tmp/bragg.mtz",
+    )
+    config.ensemble_size = 1
+
+    with caplog.at_level("WARNING"):
+        config.warn_if_diffuse_cannot_contribute()
+
+    assert caplog.text == ""
+
+
+def test_no_warning_when_the_ensemble_can_produce_a_diffuse_signal(caplog):
+    config = _config(
+        target_type="diffuse",
+        density=None,
+        bragg_weight=0.5,
+        bragg_target="/tmp/bragg.mtz",
+        diffuse_target="/tmp/diffuse.mtz",
+    )
+    config.ensemble_size = 4
+
+    with caplog.at_level("WARNING"):
+        config.warn_if_diffuse_cannot_contribute()
+
+    assert caplog.text == ""
+
+
+def test_no_warning_for_a_density_run(caplog):
+    config = _config()
+    config.ensemble_size = 1
+
+    with caplog.at_level("WARNING"):
+        config.warn_if_diffuse_cannot_contribute()
+
+    assert caplog.text == ""

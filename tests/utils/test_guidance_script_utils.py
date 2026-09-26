@@ -4,13 +4,16 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import sampleworks.utils.guidance_script_utils as guidance_script_utils
 import torch
+from sampleworks.core.rewards.protocol import PreparableRewardFunctionProtocol
 from sampleworks.utils.guidance_script_arguments import GuidanceConfig, JobResult
 from sampleworks.utils.guidance_script_utils import (
     _three_state_resolver,
     _write_job_metadata,
+    get_diffuse_reward_and_structure,
     get_model_and_device,
     get_reward_function_and_structure,
     save_everything,
@@ -340,3 +343,193 @@ def test_write_job_metadata_remaps_job_result_paths_to_host(
     metadata = json.loads((tmp_path / "job_metadata.json").read_text())
     assert metadata["output_dir"] == expected_output
     assert metadata["log_path"] == expected_log
+
+
+# ============================================================================
+# get_diffuse_reward_and_structure tests
+# ============================================================================
+#
+# The diffuse reward is partly two-phase: __init__ reads the targets and reduces
+# them to one shared reflection list, while the scattering kernels and grid wait
+# for prepare(), which needs the model atom array. These pin the half that runs
+# at build time, plus the structure loading the builder shares with the
+# real-space path.
+
+
+@pytest.fixture
+def structure_copy(resources_dir: Path, tmp_path: Path) -> Path:
+    """A throwaway copy of 1VME, so a deletion bug cannot damage the resource."""
+    source = resources_dir / "1vme" / "1vme_final.cif"
+    if not source.exists():
+        pytest.skip(f"Source structure not found at {source}")
+    destination = tmp_path / "input.cif"
+    destination.write_bytes(source.read_bytes())
+    return destination
+
+
+@pytest.fixture
+def diffuse_targets(tmp_path: Path) -> tuple[Path, Path]:
+    """A minimal Bragg/diffuse MTZ pair on a shared reflection list.
+
+    Written with the generator's own writers so the column names and MTZ dtypes
+    match what the pipeline produces, but from invented amplitudes: the reward
+    only has to read them here, not agree with them.
+    """
+    pytest.importorskip("lunus.sf", reason="lunus[sf] not installed")
+    import gemmi
+    from sampleworks.synthetic.generate_synthetic_sf_lunus import (
+        dataset_from_bragg_amplitudes,
+        dataset_from_diffuse_intensities,
+        save_mtz,
+    )
+
+    cell = gemmi.UnitCell(30.0, 40.0, 50.0, 90.0, 90.0, 90.0)
+    space_group = gemmi.SpaceGroup("P 1")
+    hkl = np.array(
+        [(h, k, ell) for h in range(-2, 3) for k in range(-2, 3) for ell in range(-2, 3)],
+        dtype=np.int32,
+    )
+    amplitudes = np.linspace(10.0, 100.0, len(hkl)).astype(np.complex64)
+    intensities = np.linspace(1.0, 10.0, len(hkl)).astype(np.float32)
+
+    bragg_path = tmp_path / "bragg.mtz"
+    diffuse_path = tmp_path / "diffuse.mtz"
+    save_mtz(
+        dataset_from_bragg_amplitudes(hkl, amplitudes, cell, space_group),
+        bragg_path,
+        "structure factors",
+    )
+    save_mtz(
+        dataset_from_diffuse_intensities(hkl, intensities, cell, space_group),
+        diffuse_path,
+        "diffuse intensities",
+    )
+    return bragg_path, diffuse_path
+
+
+def test_get_diffuse_reward_and_structure_returns_reward_and_parsed_structure(
+    structure_copy: Path, diffuse_targets: tuple[Path, Path]
+):
+    bragg_path, diffuse_path = diffuse_targets
+
+    reward, structure = get_diffuse_reward_and_structure(
+        structure_path=structure_copy,
+        bragg_target=bragg_path,
+        diffuse_target=diffuse_path,
+        bragg_weight=0.25,
+        resolution=None,
+    )
+
+    assert "asym_unit" in structure
+    assert len(structure["asym_unit"]) > 0
+    assert reward.bragg_weight == 0.25
+
+
+def test_get_diffuse_reward_and_structure_builds_a_preparable_reward(
+    structure_copy: Path, diffuse_targets: tuple[Path, Path]
+):
+    """The trajectory scalers dispatch on this protocol, so the builder must satisfy it.
+
+    The reward is not usable yet: prepare() still has to supply the atom array.
+    """
+    bragg_path, diffuse_path = diffuse_targets
+
+    reward, _ = get_diffuse_reward_and_structure(
+        structure_path=structure_copy,
+        bragg_target=bragg_path,
+        diffuse_target=diffuse_path,
+        bragg_weight=0.5,
+        resolution=None,
+    )
+
+    assert isinstance(reward, PreparableRewardFunctionProtocol)
+    assert reward.setup is None, "kernels must wait for prepare()"
+
+
+def test_get_diffuse_reward_and_structure_reads_the_targets_at_build_time(
+    structure_copy: Path, tmp_path: Path
+):
+    """A missing target fails here, before the model weights are loaded.
+
+    The reflection list comes from the targets, so it is read during
+    construction rather than deferred with the coordinate-dependent parts.
+    """
+    with pytest.raises(RuntimeError, match="bragg.mtz"):
+        get_diffuse_reward_and_structure(
+            structure_path=structure_copy,
+            bragg_target=tmp_path / "bragg.mtz",
+            diffuse_target=tmp_path / "diffuse.mtz",
+            bragg_weight=0.5,
+            resolution=None,
+        )
+
+
+def test_get_diffuse_reward_and_structure_rejects_a_missing_target_before_reading(
+    structure_copy: Path,
+):
+    """bragg_weight < 1 needs a diffuse target; that is caught without touching disk."""
+    with pytest.raises(ValueError, match="diffuse_target is required"):
+        get_diffuse_reward_and_structure(
+            structure_path=structure_copy,
+            bragg_target=None,
+            diffuse_target=None,
+            bragg_weight=0.0,
+            resolution=None,
+        )
+
+
+def test_get_diffuse_reward_and_structure_keeps_the_original_structure_file(
+    structure_copy: Path, diffuse_targets: tuple[Path, Path]
+):
+    """Same contract as the real-space builder: the caller's input must survive.
+
+    ``load_structure`` deletes the temporary file that altloc resolution may
+    write, and the comparison guarding that unlink is by string value because
+    ``Path(x) != str(x)``.
+    """
+    bragg_path, diffuse_path = diffuse_targets
+
+    get_diffuse_reward_and_structure(
+        structure_path=str(structure_copy),
+        bragg_target=bragg_path,
+        diffuse_target=diffuse_path,
+        bragg_weight=0.5,
+        resolution=None,
+    )
+
+    assert structure_copy.exists(), "original structure file must not be deleted"
+
+
+def test_get_diffuse_reward_and_structure_leaves_no_temporary_structures_behind(
+    structure_copy: Path, diffuse_targets: tuple[Path, Path], tmp_path: Path
+):
+    """Altloc resolution may write a temporary cif; it must be cleaned up."""
+    bragg_path, diffuse_path = diffuse_targets
+
+    get_diffuse_reward_and_structure(
+        structure_path=structure_copy,
+        bragg_target=bragg_path,
+        diffuse_target=diffuse_path,
+        bragg_weight=0.5,
+        resolution=None,
+    )
+
+    stray = [p.name for p in tmp_path.glob("*.cif") if p != structure_copy]
+    assert stray == [], f"temporary structure files left behind: {stray}"
+
+
+def test_get_diffuse_reward_and_structure_removes_hydrogens(
+    structure_copy: Path, diffuse_targets: tuple[Path, Path]
+):
+    """The structure is loaded with hydrogens stripped, as every target type expects."""
+    bragg_path, diffuse_path = diffuse_targets
+
+    _, structure = get_diffuse_reward_and_structure(
+        structure_path=structure_copy,
+        bragg_target=bragg_path,
+        diffuse_target=diffuse_path,
+        bragg_weight=0.5,
+        resolution=None,
+    )
+
+    assert "H" not in set(structure["asym_unit"].element)

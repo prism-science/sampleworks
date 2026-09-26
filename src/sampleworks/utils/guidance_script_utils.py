@@ -265,15 +265,11 @@ def get_model_and_device(
 
 
 # TODO: further atomize for easier testing.
-def get_reward_function_and_structure(
-    density: str | Path,
-    device: torch.device,
-    em,
-    loss_order,
-    resolution,
-    structure_path: str | Path,
-) -> tuple[RealSpaceRewardFunction, dict[str, Any]]:
-    """Load structure and density inputs and build the real-space reward function."""
+def load_structure(structure_path: str | Path) -> dict[str, Any]:
+    """Parse a structure file into an atomworks dict, hydrogens removed.
+
+    Shared by every target type: the reward differs, the structure does not.
+    """
     logger.debug(f"Loading structure from {structure_path}")
     structure_path = Path(structure_path)
     safe_structure_path = resolve_mixed_hetatm_atom_altlocs(structure_path)
@@ -288,6 +284,57 @@ def get_reward_function_and_structure(
                 safe_structure_path.unlink()
             except OSError as error:
                 logger.warning(f"Failed to remove temporary CIF: {safe_structure_path}: {error}")
+    return structure
+
+
+def get_diffuse_reward_and_structure(
+    structure_path: str | Path,
+    bragg_target: str | Path | None,
+    diffuse_target: str | Path | None,
+    bragg_weight: float,
+    resolution: float | None,
+) -> tuple[Any, dict[str, Any]]:
+    """Build the combined Bragg + diffuse reward and load the structure.
+
+    Unlike the real-space reward this one is two-phase: the scattering kernels,
+    grid and reflection list need the model atom array, which does not exist
+    until sampling starts. The trajectory scaler calls ``prepare()`` via
+    :func:`~sampleworks.core.rewards.protocol.prepare_reward_if_needed`, so
+    nothing here touches the device.
+
+    Crystal metadata comes from the target MTZs rather than from the structure,
+    the same choice ``StructureFactorRewardFunction`` makes: the reflections and
+    the cell they were indexed on have to agree, and only the MTZ knows both.
+    """
+    # Inline deliberately: diffuse_bragg imports lunus.sf at module scope, and
+    # the analysis, analysis-dev and boltz-analysis environments do not get the
+    # diffuse pixi feature, so importing this at module scope would break their
+    # import of this module entirely.
+    from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
+
+    logger.info(
+        f"Creating diffuse reward: bragg_weight={bragg_weight}, "
+        f"bragg_target={bragg_target}, diffuse_target={diffuse_target}"
+    )
+    reward_function = DiffuseBraggRewardFunction(
+        bragg_target=bragg_target,
+        diffuse_target=diffuse_target,
+        bragg_weight=bragg_weight,
+        resolution=resolution,
+    )
+    return reward_function, load_structure(structure_path)
+
+
+def get_reward_function_and_structure(
+    density: str | Path,
+    device: torch.device,
+    em,
+    loss_order,
+    resolution,
+    structure_path: str | Path,
+) -> tuple[RealSpaceRewardFunction, dict[str, Any]]:
+    """Load structure and density inputs and build the real-space reward function."""
+    structure = load_structure(structure_path)
 
     logger.debug(f"Loading density map from {density}")
     xmap = XMap.fromfile(density, resolution=resolution)
@@ -476,14 +523,23 @@ def _three_state_resolver(value: str | bool | None, default: bool) -> bool:
 # "guidance_type" is also called "scaler" in many places
 def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, device):
     """Run one configured guidance trajectory and save its outputs."""
-    reward_function, structure = get_reward_function_and_structure(
-        args.density,  # str/path to a map file.
-        device,  # this needs to come from the global context, not the args object.
-        args.em,
-        args.loss_order,
-        args.resolution,
-        args.structure,  # path/string to a structure file.
-    )
+    if getattr(args, "target_type", "density") == "diffuse":
+        reward_function, structure = get_diffuse_reward_and_structure(
+            args.structure,
+            args.bragg_target,
+            args.diffuse_target,
+            args.bragg_weight,
+            args.resolution,
+        )
+    else:
+        reward_function, structure = get_reward_function_and_structure(
+            args.density,  # str/path to a map file.
+            device,  # this needs to come from the global context, not the args object.
+            args.em,
+            args.loss_order,
+            args.resolution,
+            args.structure,  # path/string to a structure file.
+        )
 
     # Determine model type from wrapper class name
     wrapper_class_name = model_wrapper.__class__.__name__

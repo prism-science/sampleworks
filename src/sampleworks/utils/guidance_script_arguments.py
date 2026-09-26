@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from sampleworks.utils.guidance_constants import GuidanceType, StructurePredictor
 
 
@@ -232,6 +234,10 @@ class GuidanceConfig:
     alignment_reverse_diffusion: bool | None = None
     recycling_steps: int | None = None
     num_diffusion_steps: int = 200
+    target_type: str = "density"
+    bragg_target: Path | str | None = None
+    diffuse_target: Path | str | None = None
+    bragg_weight: float = 0.5
 
     # DO NOT remove the **kwargs, it is for compatibility with argparse.
     def add_argument(self, name: str, default: Any = None, **kwargs):
@@ -331,25 +337,36 @@ class GuidanceConfig:
                 f" Use sampleworks-guidance for other guidance types."
             )
 
-        config = cls(
-            protein=args.protein,
-            structure=args.structure,
-            density=args.density,
-            model_name=model_name,
-            guidance_type=guidance_type,
-            log_path=getattr(args, "log_path", None) or "",
-            output_dir=args.output_dir,
-            partial_diffusion_step=args.partial_diffusion_step,
-            loss_order=args.loss_order,
-            resolution=args.resolution,
-            device=getattr(args, "device", "") or "",
-            gradient_normalization=args.gradient_normalization,
-            em=args.em,
-            guidance_start=args.guidance_start,
-            augmentation=args.augmentation,
-            align_to_input=args.align_to_input,
-            alignment_reverse_diffusion=args.alignment_reverse_diffusion,
-        )
+        # Validation lives in __post_init__ and raises ValueError, which is right
+        # for a dataclass built programmatically. On the command line it should
+        # read as an argument error: parser.error prints to stderr and exits 2,
+        # rather than showing a traceback for a missing flag.
+        try:
+            config = cls(
+                protein=args.protein,
+                structure=args.structure,
+                density=args.density,
+                model_name=model_name,
+                guidance_type=guidance_type,
+                log_path=getattr(args, "log_path", None) or "",
+                output_dir=args.output_dir,
+                partial_diffusion_step=args.partial_diffusion_step,
+                loss_order=args.loss_order,
+                resolution=args.resolution,
+                device=getattr(args, "device", "") or "",
+                gradient_normalization=args.gradient_normalization,
+                em=args.em,
+                guidance_start=args.guidance_start,
+                augmentation=args.augmentation,
+                align_to_input=args.align_to_input,
+                alignment_reverse_diffusion=args.alignment_reverse_diffusion,
+                target_type=getattr(args, "target_type", "density"),
+                bragg_target=getattr(args, "bragg_target", None),
+                diffuse_target=getattr(args, "diffuse_target", None),
+                bragg_weight=getattr(args, "bragg_weight", 0.5),
+            )
+        except ValueError as error:
+            parser.error(str(error))
 
         # __post_init__ already set defaults for model/guidance-specific
         # attrs; override with any explicit CLI values.
@@ -358,6 +375,9 @@ class GuidanceConfig:
             if val is not None:
                 setattr(config, attr, val)
 
+        # Checked here, not in __post_init__: ensemble_size is a dynamic attr,
+        # so the CLI value only lands in the loop above.
+        config.warn_if_diffuse_cannot_contribute()
         return config
 
     def __post_init__(self):
@@ -371,6 +391,63 @@ class GuidanceConfig:
             _MODEL_ARG_ADDERS[self.model_name](self)
         except KeyError:
             raise ValueError(f"Unknown model type: {self.model_name}")
+
+        self._validate_target()
+
+    def _validate_target(self) -> None:
+        """Check the target arguments agree with the target type.
+
+        Done here rather than in argparse because which inputs are required
+        depends on ``--target-type`` and, for diffuse, on ``--bragg-weight``: a
+        pure-diffuse run needs no amplitudes and a pure-Bragg run no diffuse map.
+        Catching it now means a misconfigured run fails before the model weights
+        are loaded rather than several minutes in.
+        """
+        if self.target_type == "density":
+            if not self.density:
+                raise ValueError("--density is required for --target-type density (the default).")
+            return
+
+        if self.target_type != "diffuse":
+            raise ValueError(f"Unknown target type: {self.target_type}")
+
+        if not 0.0 <= self.bragg_weight <= 1.0:
+            raise ValueError(
+                f"--bragg-weight must lie in [0, 1] to be a convex mixture; "
+                f"got {self.bragg_weight}."
+            )
+        if self.bragg_weight > 0.0 and not self.bragg_target:
+            raise ValueError(
+                f"--bragg-target is required unless --bragg-weight is 0 (got {self.bragg_weight})."
+            )
+        if self.bragg_weight < 1.0 and not self.diffuse_target:
+            raise ValueError(
+                "--diffuse-target is required unless --bragg-weight is 1 "
+                f"(got {self.bragg_weight})."
+            )
+
+    def warn_if_diffuse_cannot_contribute(self) -> None:
+        """Warn when the diffuse term is weighted but cannot produce a gradient.
+
+        ``<|F|^2> - |<F>|^2`` is identically zero for a single configuration, so
+        with ``--ensemble-size 1`` the diffuse residual collapses to a constant:
+        the scale fit lands on zero and the normalized residual on 1.0, with no
+        gradient. Nothing breaks -- Bragg guidance carries on at its own weight
+        -- so this is a warning rather than an error, but the diffuse target is
+        doing nothing and the run should probably be configured differently.
+        """
+        if self.target_type != "diffuse" or self.bragg_weight >= 1.0:
+            return
+        if getattr(self, "ensemble_size", 2) >= 2:
+            return
+
+        logger.warning(
+            f"--ensemble-size 1 with --bragg-weight {self.bragg_weight}: the diffuse "
+            "term is <|F|^2> - |<F>|^2, which is identically zero for one "
+            "configuration, so it contributes a constant and no gradient. Raise "
+            "--ensemble-size to score diffuse, or set --bragg-weight 1 to drop the "
+            "term and score Bragg alone."
+        )
 
     def populate_config_for_guidance_type(self, job: JobConfig, args: argparse.Namespace):
         """Apply per-job grid-search values onto this guidance configuration."""
@@ -401,6 +478,8 @@ class GuidanceConfig:
             self.step_scaler_type = args.step_scaler_type
             self.ensemble_size = job.ensemble_size
 
+        self.warn_if_diffuse_cannot_contribute()
+
     def as_dict(self) -> dict[str, Any]:
         """Return a dictionary representation of the guidance config, converting Path to strings.
 
@@ -413,6 +492,13 @@ class GuidanceConfig:
         output["structure"] = _remap_container_path(str(self.structure))
         output["output_dir"] = _remap_container_path(str(self.output_dir))
         output["log_path"] = _remap_container_path(str(self.log_path))
+        # The diffuse targets are typed `Path | str | None`. A programmatic run
+        # passing Path would otherwise leave PosixPath here, and the
+        # unconditional json.dump in _write_job_metadata raises on it. None must
+        # survive as None: "None" would read as a path that was set.
+        for target in ("bragg_target", "diffuse_target"):
+            value = getattr(self, target, None)
+            output[target] = None if value is None else _remap_container_path(str(value))
         return output
 
     def __setstate__(self, state: dict[str, Any]) -> None:
@@ -426,7 +512,43 @@ class GuidanceConfig:
 def add_generic_args(parser: argparse.ArgumentParser | GuidanceConfig):
     """Add CLI arguments shared by all models and guidance methods."""
     parser.add_argument("--structure", type=str, required=True, help="Input structure")
-    parser.add_argument("--density", type=str, required=True, help="Input density map")
+    parser.add_argument(
+        "--density",
+        type=str,
+        default=None,
+        help="Input density map. Required for --target-type density (the default).",
+    )
+    parser.add_argument(
+        "--target-type",
+        choices=["density", "diffuse"],
+        default="density",
+        help=(
+            "Experimental observable to guide against. 'density' scores a real-space "
+            "map; 'diffuse' scores structure-factor amplitudes and the anisotropic "
+            "component of a diffuse map through lunus.sf."
+        ),
+    )
+    parser.add_argument(
+        "--bragg-target",
+        type=str,
+        default=None,
+        help="MTZ of target amplitudes, for --target-type diffuse. Required unless "
+        "--bragg-weight is 0.",
+    )
+    parser.add_argument(
+        "--diffuse-target",
+        type=str,
+        default=None,
+        help="MTZ of target diffuse intensities, for --target-type diffuse. Required "
+        "unless --bragg-weight is 1.",
+    )
+    parser.add_argument(
+        "--bragg-weight",
+        type=float,
+        default=0.5,
+        help="Convex mixture for --target-type diffuse: 1.0 scores Bragg alone, 0.0 "
+        "diffuse alone. Each term is normalized first, so this is a true mixing dial.",
+    )
     parser.add_argument("--output-dir", type=str, default="output", help="Output directory")
     parser.add_argument(
         "--log-path", type=str, default=None, help="Log file path (default: output-dir/run.log)"
