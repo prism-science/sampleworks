@@ -88,7 +88,7 @@ from lunus.sf import (
     build_atom_kernels_torch,
     build_grid_ops,
     grid_shape_for_resolution,
-    orth_matrix as build_orth_matrix,
+    orth_matrix,
     structure_factors_batch,
 )
 
@@ -409,7 +409,7 @@ def build_setup(
         ) from e
 
     a, b, c = unit_cell.a, unit_cell.b, unit_cell.c
-    orth_np = build_orth_matrix(a, b, c, unit_cell.alpha, unit_cell.beta, unit_cell.gamma)
+    orth_np = orth_matrix(a, b, c, unit_cell.alpha, unit_cell.beta, unit_cell.gamma)
     # Fractionalization comes from qFit's closed form, the same code the real-space
     # density path uses, rather than inverting orth_np here: one formula, no
     # divergence to discover when comparing the two methods. Its space group is
