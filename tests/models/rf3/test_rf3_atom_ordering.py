@@ -103,3 +103,36 @@ class TestRF3AtomOrdering:
             f"model_atom_array contains {h_count} hydrogen atoms that the pipeline "
             "should have removed."
         )
+
+    @require_rf3()
+    @pytest.mark.parametrize(
+        "structure_fixture",
+        [
+            "structure_5i09_density",
+            "structure_5sop_density",
+            "structure_9bn8_density",
+            "structure_6ni6_density",
+        ],
+    )
+    def test_coord_to_be_noised_in_model_atom_array(self, rf3_wrapper, structure_fixture, request):
+        """model_atom_array has valid .coord_to_be_noised annotations.
+
+        RF3.wrapper.featurize() should place all unresolved atoms on a nearby resolved atom/token. These cleaned
+        coordinates should be stored under the .coord_to_be_noised annotation rather than modifying the
+        ground truth .coord attribute.
+        """
+        # Pass structure through RF3 Wrapper featurize()
+        structure = request.getfixturevalue(structure_fixture)
+        annotated = annotate_structure_for_rf3(structure)
+        features = rf3_wrapper.featurize(annotated)
+        cond = features.conditioning
+        assert cond.model_atom_array is not None
+
+        # Check .coord_to_be_noised annotation exist
+        assert "coord_to_be_noised" in cond.model_atom_array.get_annotation_categories()
+        
+        # Check .coord_to_be_noised no longer has np.nan elements
+        cleaned_coords = cond.model_atom_array.coord_to_be_noised
+        assert not np.isnan(cleaned_coords).any(), (
+            "model.coord_to_be_noised has unplaced unresolved atoms"
+        )
