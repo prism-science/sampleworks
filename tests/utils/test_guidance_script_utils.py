@@ -70,7 +70,6 @@ def test_get_model_and_device_forwards_preloaded_model_to_rf3(monkeypatch):
 
 def test_save_everything_uses_model_atom_array_for_mismatch(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ):
     """Mismatch output saves while a failed reference load emits a warning."""
@@ -78,14 +77,10 @@ def test_save_everything_uses_model_atom_array_for_mismatch(
     model_atom_array = build_test_atom_array(n_atoms=5, with_occupancy=False)
 
     final_state = torch.zeros((1, 5, 3), dtype=torch.float32)
-    monkeypatch.setattr(
-        guidance_script_utils,
-        "_load_reference_cif",
-        MagicMock(side_effect=OSError("offline")),
-    )
 
     args = GuidanceConfig(
-        protein="1l63",
+        # Not a deposited structure id, so the reference load fails without touching RCSB.
+        protein="example_run",
         structure=Path("dummy"),
         density=Path("dummy"),
         model_name="boltz2",

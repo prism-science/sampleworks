@@ -9,16 +9,21 @@ from atomworks.io.utils.io_utils import load_any
 from biotite.structure import AtomArray, AtomArrayStack, stack
 from biotite.structure.io.pdbx import set_structure
 from biotite.structure.io.pdbx.cif import CIFBlock, CIFCategory, CIFFile
-from sampleworks.utils.cif_utils import carry_polymer_entity_categories
+from sampleworks.utils.cif_utils import (
+    _canonical_monomer,
+    _matching_entity,
+    _unique_subsequence_indices,
+    carry_polymer_entity_categories,
+)
 from sampleworks.utils.guidance_script_arguments import GuidanceConfig
 from sampleworks.utils.guidance_script_utils import save_everything
 
 
 # Deposited entity 1 (author chain P, label chain A), author-numbered from -3. Position 10 is
-# microheterogeneous (SER/SEP), and MSE/LYR are modified residues written as HETATM.
-_SEQUENCE = ["MET", "GLY", "HIS", "HIS", "HIS", "HIS", "MSE", "PRO", "LYR", "SER"]
+# microheterogeneous (CYS/CSO), and MSE/LYR/CSO are modified residues written as HETATM.
+_SEQUENCE = ["MET", "GLY", "HIS", "HIS", "HIS", "HIS", "MSE", "CYS", "LYR", "CYS"]
 _AUTHOR_OFFSET = -4  # pdb_seq_num = seq_id + _AUTHOR_OFFSET
-_HETERO = {"MSE", "LYR", "HOH"}
+_HETERO = {"MSE", "LYR", "CSO", "HOH"}
 
 
 def _reference(chem_comp_ids: list[str] | None = None) -> CIFFile:
@@ -35,7 +40,7 @@ def _reference(chem_comp_ids: list[str] | None = None) -> CIFFile:
         Single-block deposit with polymer categories and ``pdbx_poly_seq_scheme``.
     """
     rows = [("1", "A", "P", i + 1, name) for i, name in enumerate(_SEQUENCE)]
-    rows.append(("1", "A", "P", len(_SEQUENCE), "SEP"))
+    rows.append(("1", "A", "P", len(_SEQUENCE), "CSO"))
     rows += [("2", "B", "Q", i + 1, "GLY") for i in range(2)]
     scheme = {
         "asym_id": [asym for _, asym, _, _, _ in rows],
@@ -71,7 +76,11 @@ def _reference(chem_comp_ids: list[str] | None = None) -> CIFFile:
     return reference
 
 
-def _output(positions: list[int], extra: tuple[tuple[str, int, str], ...] = ()) -> CIFFile:
+def _output(
+    positions: list[int],
+    extra: tuple[tuple[str, int, str], ...] = (),
+    renumber: bool = False,
+) -> CIFFile:
     """Write a two-model, one-CA-per-residue output in the deposit's author numbering.
 
     Parameters
@@ -80,6 +89,8 @@ def _output(positions: list[int], extra: tuple[tuple[str, int, str], ...] = ()) 
         0-based positions in ``_SEQUENCE`` that the output models.
     extra : tuple[tuple[str, int, str], ...]
         Additional ``(chain, author number, name)`` residues, e.g. waters.
+    renumber : bool
+        Write chain ``A`` numbered 1..n instead, as a model wrapper does without #414.
 
     Returns
     -------
@@ -87,6 +98,8 @@ def _output(positions: list[int], extra: tuple[tuple[str, int, str], ...] = ()) 
         Output as written by ``set_structure``: label ids hold author values.
     """
     residues = [("P", p + 1 + _AUTHOR_OFFSET, _SEQUENCE[p]) for p in positions] + list(extra)
+    if renumber:
+        residues = [("A", number, name) for number, (_, _, name) in enumerate(residues, start=1)]
     atom_array = AtomArray(len(residues))
     atom_array.chain_id[:] = [chain for chain, _, _ in residues]
     atom_array.res_id[:] = [number for _, number, _ in residues]
@@ -153,29 +166,47 @@ def test_carry_maps_gap_beside_repeat_by_number():
     assert _column(output, "atom_site", "label_seq_id") == ["3", "4", "6", "7"] * 2
 
 
-@pytest.mark.parametrize(
-    ("mutation", "message"),
-    [
-        (("auth_seq_id", "99"), "no deposited pdbx_poly_seq_scheme row"),
-        (("label_comp_id", "TRP"), "disagree with the deposit"),
-    ],
-)
-def test_carry_does_not_mutate_on_failed_match(mutation, message):
-    """An unknown author number or a renamed residue fails before anything is written."""
+def test_carry_does_not_mutate_on_failed_match():
+    """A residue neither the lookup nor the alignment can place fails before anything is written."""
     output = _output([1, 2, 3])
     atom_site = output.block["atom_site"]
-    column, value = mutation
-    values = atom_site[column].as_array(str)
-    values[0] = value
-    atom_site[column] = values
+    names = atom_site["label_comp_id"].as_array(str)
+    names[0] = "TRP"
+    atom_site["label_comp_id"] = names
     label_seq_ids = _column(output, "atom_site", "label_seq_id")
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match="author lookup: .*; sequence alignment: .*"):
         carry_polymer_entity_categories(output, _reference())
 
     assert _column(output, "atom_site", "label_seq_id") == label_seq_ids
     for category in ("entity", "entity_poly", "entity_poly_seq", "struct_asym"):
         assert category not in output.block
+
+
+def test_carry_accepts_canonical_parent_of_deposited_modified_residue():
+    """A model that writes CSO where the deposit has CYS (or CYS for CSO) still maps."""
+    output = _output([6, 7])
+    atom_site = output.block["atom_site"]
+    names = atom_site["label_comp_id"].as_array(str)
+    atom_site["label_comp_id"] = np.where(names == "CYS", "CSO", names)
+
+    carry_polymer_entity_categories(output, _reference())
+
+    assert _column(output, "atom_site", "label_seq_id") == ["7", "8"] * 2
+
+
+def test_carry_falls_back_to_alignment_for_renumbered_output():
+    """A model-renumbered output (chain A, 1..n) maps onto the deposited numbering."""
+    positions = [1, 2, 3, 4, 5, 6, 8, 9]  # skip MET -3 and CYS 4: one unambiguous placement
+    output = _output(positions, renumber=True)
+
+    categories = carry_polymer_entity_categories(output, _reference())
+
+    assert "pdbx_poly_seq_scheme" not in categories
+    assert _column(output, "atom_site", "label_seq_id") == [str(p + 1) for p in positions] * 2
+    assert set(_column(output, "atom_site", "label_entity_id")) == {"1"}
+    assert _column(output, "struct_asym", "id") == ["A"]
+    assert _column(output, "entity", "id") == ["1"]
 
 
 def test_carry_accepts_met_for_deposited_selenomethionine():
@@ -217,6 +248,78 @@ def test_carry_keeps_polymer_beside_non_polymer():
     assert [_column(output, "atom_site", "label_asym_id")[i] for i in water] == water_labels
     assert _column(output, "struct_asym", "id") == ["A"]
     assert _column(output, "entity", "id") == ["1"]
+
+
+@pytest.fixture(scope="module")
+def carved_1vme(resources_dir: Path) -> AtomArray:
+    """Load the carved 1vme input once; it is numbered 1..410 by position, not by author."""
+    atom_array = load_any(
+        resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif",
+        altloc="first",
+        extra_fields=["occupancy", "b_factor"],
+    )
+    return atom_array[0] if isinstance(atom_array, AtomArrayStack) else atom_array
+
+
+def test_carry_aligns_position_numbered_structure_to_deposit(carved_1vme, resources_dir):
+    """Real data: the fallback maps each residue to the deposit's num, with matching monomers."""
+    output = CIFFile()
+    set_structure(output, stack([carved_1vme, carved_1vme]))
+    reference = CIFFile.read(str(resources_dir / "1vme" / "1vme_rcsb.cif"))
+
+    categories = carry_polymer_entity_categories(output, reference)
+
+    assert "pdbx_poly_seq_scheme" not in categories
+    atom_site = output.block["atom_site"]
+    # Position numbering is the deposit's entity numbering for 1VME.
+    assert _column(output, "atom_site", "label_seq_id") == _column(
+        output, "atom_site", "auth_seq_id"
+    )
+    carried = dict(
+        zip(
+            zip(
+                _column(output, "entity_poly_seq", "entity_id"),
+                _column(output, "entity_poly_seq", "num"),
+            ),
+            _column(output, "entity_poly_seq", "mon_id"),
+        )
+    )
+    modeled = zip(
+        atom_site["label_entity_id"].as_array(str),
+        atom_site["label_seq_id"].as_array(str),
+        atom_site["label_comp_id"].as_array(str),
+    )
+    assert all(
+        _canonical_monomer(carried[(entity, seq)]) == _canonical_monomer(name)
+        for entity, seq, name in modeled
+    )
+
+
+def test_unique_subsequence_indices():
+    """Exact matches, the fewest deletion runs, canonical parents, and no embedding."""
+    assert _unique_subsequence_indices(["GLY", "HIS", "SER"], ["GLY", "HIS", "SER"]) == [0, 1, 2]
+    # One run of four deletions (cost 1) beats two separate runs (cost 2).
+    reference = ["ALA", "GLY", "SER", "ALA", "THR", "ALA"]
+    assert _unique_subsequence_indices(reference, ["ALA", "ALA"]) == [0, 5]
+    assert _unique_subsequence_indices(["MSE", "CSO"], ["MET", "CYS"]) == [0, 1]
+    assert _unique_subsequence_indices(["ALA"], ["GLY"]) is None
+
+
+def test_matching_entity_reports_ambiguous_placement():
+    """Two of three alanines can sit in three equally good places; say so instead of guessing."""
+    block = CIFBlock(
+        {
+            "entity_poly": CIFCategory({"entity_id": ["1"]}),
+            "entity_poly_seq": CIFCategory(
+                {"entity_id": ["1"] * 3, "num": ["1", "2", "3"], "mon_id": ["ALA"] * 3}
+            ),
+        }
+    )
+
+    with pytest.raises(ValueError, match="several equally good ways"):
+        _matching_entity(block, ["ALA", "ALA"])
+    with pytest.raises(ValueError, match="No deposited entity contains"):
+        _matching_entity(block, ["GLY"])
 
 
 def test_save_everything_writes_cifs_when_entity_carry_fails(

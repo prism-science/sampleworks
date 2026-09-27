@@ -198,11 +198,14 @@ wandb = "*"
 [tool.pixi.feature.rf3.pypi-dependencies]
 rc-foundry = {editable = true, extras = ["rf3"], git = "https://github.com/k-chrispens/foundry.git"}
 
-# Pin cuequivariance versions to match pytorch version 
+# Pin cuequivariance versions to match pytorch version
 [tool.pixi.feature.rf3.target.linux-64.pypi-dependencies]
 cuequivariance = "==0.9.0"
-cuequivariance-torch = "==0.9.0"
 cuequivariance-ops-torch-cu12 = "==0.9.0"
+cuequivariance-torch = "==0.9.0"
+
+[tool.pixi.pypi-dependencies]
+sampleworks = {editable = true, path = "."}
 
 [tool.pixi.pypi-dependencies]
 sampleworks = {editable = true, path = "."}
