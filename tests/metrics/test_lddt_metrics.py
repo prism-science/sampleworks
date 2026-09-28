@@ -4,8 +4,8 @@ Tests for lDDT metrics
 
 from typing import cast
 
-import pytest
 import numpy as np
+import pytest
 from sampleworks.metrics.lddt import AllAtomLDDT, SelectedLDDT
 
 

@@ -122,7 +122,7 @@ def _calc_lddt(
         second_index_valid,  # vectorize over batch
         valid_mask,  # vectorize over batch
         tok_idx,  # pass directly
-        selected_token_ids_tensor  # pass directly, needs to be tensor for vmapå
+        selected_token_ids_tensor,  # pass directly, needs to be tensor for vmapå
     )  # (D, n_tokens)
 
     # Reformat into dictionary of lists
@@ -252,7 +252,7 @@ def residue_level_lddt_single(
     second_index_valid: Int[torch.Tensor, "N"],  # noqa F821
     valid_mask: Bool[torch.Tensor, "N"],  # noqa F821
     tok_idx: Int[torch.Tensor, "L"],  # noqa F821
-    selected_token_ids: Int[torch.Tensor, "*"]
+    selected_token_ids: Int[torch.Tensor, "*"],
 ) -> Float[torch.Tensor, "n_tokens"]:  # noqa F821
     """Calculates residue-level lDDT for a single batch item
     (Helper function for _calc_lddt)
@@ -283,7 +283,7 @@ def residue_level_lddt_single(
         second_index_valid: Int[torch.Tensor, "N"],  # noqa F821
         valid_mask: Bool[torch.Tensor, "N"],  # noqa F821
         tok_idx: Int[torch.Tensor, "L"],  # noqa F821
-        token_id: int
+        token_id: int,
     ) -> Float[torch.Tensor, ""] | float:
         """Calculate residue-level lDDT for single residue
 
@@ -322,7 +322,7 @@ def residue_level_lddt_single(
         second_index_valid,
         valid_mask,
         tok_idx,
-        selected_token_ids  # vectorize over tokens
+        selected_token_ids,  # vectorize over tokens
     )
 
 
