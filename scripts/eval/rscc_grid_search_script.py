@@ -52,6 +52,7 @@ from sampleworks.utils.frame_transforms import (
 )
 from sampleworks.utils.framework_utils import match_batch
 from sampleworks.utils.structure_utils import (
+    filter_to_selection,
     get_asym_unit_from_structure,
     get_reference_structure_coords,
 )
@@ -67,6 +68,7 @@ def process_group(
     group_ref_coords: dict[str, np.ndarray],
     base_map_path: Path,
     group_index: int,
+    selected_residues_only: bool = False,
 ) -> list[dict]:
     """
     Process all trials sharing one (protein, occ_key) group.
@@ -90,6 +92,11 @@ def process_group(
     group_index : int
         Position of this group in the dispatch order; used to round-robin the
         group onto one of the available GPUs.
+    selected_residues_only : bool
+        If True, compute each refined structure's density from only the atoms in
+        that selection (rather than the whole structure) before extracting the
+        region and correlating, so RSCC reflects just the selected residues. The
+        density is then computed per selection instead of once per trial.
 
     Returns
     -------
@@ -211,17 +218,20 @@ def process_group(
             )
             atom_array.coord = aligned_coords_torch.numpy()
 
-            # Compute density from the aligned refined structure
-            computed_density = run_density_transformer(transformer, atom_array)
-            # Shallow-copy the base xmap so .array can be rebound without touching the cache.
-            # XMap.extract_tight reads self.array live, so the two wrappers stay independent.
-            computed_xmap = copy.copy(base_xmap)
-            computed_xmap.array = computed_density.cpu().numpy()
-            if computed_xmap.array.shape != base_xmap.array.shape:
-                raise ValueError(
-                    f"density shape {computed_xmap.array.shape} does not match base map "
-                    f"shape {base_xmap.array.shape}"
-                )
+            # Compute density from the whole aligned refined structure, shared across all
+            # selections. When selected_residues_only is set, this is deferred to the
+            # per-selection loop below so each map contains only that selection's atoms.
+            if not selected_residues_only:
+                computed_density = run_density_transformer(transformer, atom_array)
+                # Shallow-copy the base xmap so .array can be rebound without touching the cache.
+                # XMap.extract_tight reads self.array live, so the two wrappers stay independent.
+                computed_xmap = copy.copy(base_xmap)
+                computed_xmap.array = computed_density.cpu().numpy()
+                if computed_xmap.array.shape != base_xmap.array.shape:
+                    raise ValueError(
+                        f"density shape {computed_xmap.array.shape} does not match base map "
+                        f"shape {base_xmap.array.shape}"
+                    )
         except (
             FileNotFoundError,
             OSError,
@@ -245,18 +255,33 @@ def process_group(
 
         # Per selection, extract base region (cache) + computed region, compute RSCC
         for selection in valid_selections:
+            # These are the coordinates of the selection in the reference (input) structure.
+            # we will use them to limit the region that we extract from the target ("base") and
+            # predicted map computed from the predicted ensemble of structures.
             sel_coords = group_ref_coords[selection]
             row = trial.__dict__.copy()
             row.update(selection=selection, error=None, base_map_path=base_map_path)
             try:
                 extracted_base = extracted_base_cache.get(selection)
                 if extracted_base is None:
+                    # we limit the region of the map to a radius around the
+                    # reference structure selection's atoms
                     _, extracted_base = base_xmap.extract_tight(
                         sel_coords, padding=DEFAULT_SELECTION_PADDING
                     )
                     if extracted_base is None or extracted_base.shape[0] == 0:
                         raise ValueError(f"Extracted base map empty for selection {selection}")
                     extracted_base_cache[selection] = extracted_base
+
+                if selected_residues_only:
+                    # In addition to extracting the part of the map around the target structure,
+                    # we may also want to make sure we don't include density from parts of the
+                    # predicted ensemble that are not part of the selection. This way, if other
+                    # parts of the structure fit the target density, we don't inflate the RSCC.
+                    selected_atoms = filter_to_selection(atom_array, selection)
+                    selected_density = run_density_transformer(transformer, selected_atoms)
+                    computed_xmap = copy.copy(base_xmap)
+                    computed_xmap.array = selected_density.cpu().numpy()
 
                 _, extracted_computed = computed_xmap.extract_tight(
                     sel_coords, padding=DEFAULT_SELECTION_PADDING
@@ -348,7 +373,13 @@ def main(args: argparse.Namespace):
 
     group_results = Parallel(n_jobs=args.n_jobs, verbose=10)(
         delayed(process_group)(
-            trials, protein, protein_configs[protein], group_ref_coords, base_map_path, i
+            trials,
+            protein,
+            protein_configs[protein],
+            group_ref_coords,
+            base_map_path,
+            i,
+            selected_residues_only=args.selected_residues_only,
         )
         for i, (protein, trials, base_map_path, group_ref_coords) in enumerate(groups)
     )

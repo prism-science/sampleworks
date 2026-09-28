@@ -450,6 +450,13 @@ def parse_eval_args(description: str | None = None):
         help="Number of parallel jobs to run. -1 uses all CPUs.",
         default=16,
     )
+    parser.add_argument(
+        "--selected-residues-only",
+        action="store_true",
+        help="Compute the refined structure's density from only the atoms in each "
+        "selection (rather than the whole structure) before correlating, so RSCC "
+        "reflects just the selected residues and not the surrounding structure.",
+    )
     return parser.parse_args()
 
 

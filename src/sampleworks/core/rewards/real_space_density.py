@@ -17,6 +17,8 @@ from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.sf import
 from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.volume import (
     XMap,
 )
+from sampleworks.core.rewards.options import RealSpaceDensityOptions
+from sampleworks.core.rewards.registry import RewardBuildContext
 from sampleworks.utils.elements import elements_to_scattering_indices
 from sampleworks.utils.torch_utils import try_gpu
 
@@ -310,3 +312,59 @@ class RealSpaceRewardFunction:
         ).sum(0)  # sum over batch dimension
 
         return self.loss(density, self.transformer.xmap.array)
+
+
+def build_real_space_density_reward(
+    options: RealSpaceDensityOptions, context: RewardBuildContext
+) -> RealSpaceRewardFunction:
+    """Build the real-space density reward from its configured options.
+
+    Parameters
+    ----------
+    options
+        Density reward options: map path, resolution, loss order, and whether to
+        use electron scattering factors.
+    context
+        Run-level inputs; the parsed input structure and the target device.
+
+    Returns
+    -------
+    RealSpaceRewardFunction
+        Reward scoring the model against the given map.
+
+    Raises
+    ------
+    ValueError
+        If the map or the resolution is missing.
+    """
+    if options.density is None:
+        raise ValueError(
+            "The real_space_density reward needs a density map. Pass --density, or set "
+            "reward_options.density in a --reward-config file."
+        )
+    if options.resolution is None:
+        raise ValueError(
+            "The real_space_density reward needs a map resolution. Pass --resolution, or "
+            "set reward_options.resolution in a --reward-config file."
+        )
+
+    device = torch.device(context.device) if isinstance(context.device, str) else context.device
+
+    logger.debug(f"Loading density map from {options.density}")
+    xmap = XMap.fromfile(options.density, resolution=options.resolution)
+
+    logger.debug("Setting up scattering parameters")
+    atom_array = context.structure["asym_unit"]
+    scattering_params = setup_scattering_params(em_mode=options.em, device=device)
+
+    selection_mask = atom_array.occupancy > 0
+    logger.info(f"Selected {selection_mask.sum()} atoms with occupancy > 0")
+
+    return RealSpaceRewardFunction(
+        xmap,
+        scattering_params,
+        selection_mask,
+        em=options.em,
+        loss_order=options.loss_order,
+        device=device,
+    )
