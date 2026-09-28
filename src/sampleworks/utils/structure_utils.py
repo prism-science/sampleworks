@@ -220,15 +220,17 @@ def process_structure_to_trajectory_input(
         device=coords_from_prior.device,
     )
     if model_atom_array is not None:
-        # TODO: to integrate changes, change this to take coord_to_noise instead
         if not "coord_to_be_noised" in model_atom_array.get_annotation_categories():
+            # safely still allows other models to use original coordinates
             model_template_np = cast(np.ndarray, model_atom_array.coord)
         else:
+            # use RF3 unresolved atom placement strategy
             model_template_np = cast(np.ndarray, model_atom_array.coord_to_be_noised)
 
         # Replace non-finite coords with the common-atom centroid
-        # TODO: use something like the RF3 processing where they put things on the nearest token
-        # (this is in atomworks RF3 transform pipeline)
+        # TODO: apply RF3 nearest atom/token placement strategy to all models
+        # (currently this section should not trigger any changes, as 
+        # models have np.nan coordinates imputed inside the model wrapper call)
         struct_centroid = struct_coords_np.mean(axis=0)
         if not np.isfinite(model_template_np).all():
             logger.warning(
