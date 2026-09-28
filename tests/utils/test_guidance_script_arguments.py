@@ -428,6 +428,8 @@ def test_latent_opt_cli_flags_reach_the_config():
     assert config.anchor_weight == pytest.approx(0.7)
     assert config.max_grad_norm == pytest.approx(2.0)
     assert config.bond_length_weight == pytest.approx(0.001)
+
+
 # Reward configuration on GuidanceConfig
 # ============================================================================
 
