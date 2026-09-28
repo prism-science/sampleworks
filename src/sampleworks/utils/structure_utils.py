@@ -220,7 +220,11 @@ def process_structure_to_trajectory_input(
         device=coords_from_prior.device,
     )
     if model_atom_array is not None:
-        model_template_np = cast(np.ndarray, model_atom_array.coord)
+        # TODO: to integrate changes, change this to take coord_to_noise instead
+        if not "coord_to_be_noised" in model_atom_array.get_annotation_categories():
+            model_template_np = cast(np.ndarray, model_atom_array.coord)
+        else:
+            model_template_np = cast(np.ndarray, model_atom_array.coord_to_be_noised)
 
         # Replace non-finite coords with the common-atom centroid
         # TODO: use something like the RF3 processing where they put things on the nearest token
