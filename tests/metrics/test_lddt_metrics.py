@@ -196,7 +196,7 @@ def test_unresolved_atoms_are_masked_out():
     # token-level
     # This simulates the case where selected_token_ids tries to select a token (residue) for which
     # all atoms are invalid, which may(?) happen since crd_mask_L and selected_token_ids
-    # do not check against each other. In this case, we output NaN to differentiate from a 
+    # do not check against each other. In this case, we output NaN to differentiate from a
     # true measured lDDT of 0.
     for token_name in lddt_residues:
         token_score = lddt_residues[token_name][0]

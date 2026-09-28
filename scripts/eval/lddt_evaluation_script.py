@@ -93,7 +93,11 @@ def compute_cross_lddts(
 
             # Calculate the mean LDDT score
             if all_scores:
-                lddt_matrix[i, j] = np.mean(all_scores)
+                # Take mean of non-NaN values
+                if np.any(np.isnan(all_scores)):
+                    lddt_matrix[i, j] = np.nanmean(all_scores)
+                else:
+                    lddt_matrix[i, j] = np.mean(all_scores)
             else:
                 # If no scores computed (e.g., no residues match selection), set to NaN
                 lddt_matrix[i, j] = np.nan
