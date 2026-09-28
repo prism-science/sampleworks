@@ -5,6 +5,7 @@ Tests for lDDT metrics
 from typing import cast
 
 import pytest
+import numpy as np
 from sampleworks.metrics.lddt import AllAtomLDDT, SelectedLDDT
 
 
@@ -202,8 +203,8 @@ def test_unresolved_atoms_are_masked_out():
 
         # atom 3 should score 0
         if token_name == 3:
-            assert token_score == pytest.approx(0, abs=1e-4), (
-                f"Score mismatch for {token_name}: got {token_score}, expected 0"
+            assert np.isnan(token_score), (
+                f"Score mismatch for {token_name}: got {token_score}, expected NaN"
             )
         else:
             # valid residues should score 1
@@ -230,12 +231,12 @@ def test_same_token_pairs_excluded():
 
     # Same token: the only pair is excluded → no valid pairs → 0.0.
     lddt, lddt_residues = _calc_lddt(pred, gt, mask, torch.tensor([0, 0]))
-    assert torch.allclose(lddt, torch.zeros(1), atol=1e-4)
+    assert np.isnan(lddt)
     assert len(lddt_residues) == 1
     for token_name in lddt_residues:
         token_score = lddt_residues[token_name][0]
-        assert token_score == pytest.approx(0, abs=1e-4), (
-            f"Score mismatch for {token_name}: got {token_score}, expected 0"
+        assert np.isnan(token_score), (
+            f"Score mismatch for {token_name}: got {token_score}, expected NaN"
         )
 
 
@@ -248,12 +249,12 @@ def test_distance_cutoff_excludes_far_pairs():
 
     # Default cutoff 15 Å → pair is out of range → excluded → 0.0.
     lddt, lddt_residues = _calc_lddt(pred, gt, mask, tok)
-    assert torch.allclose(lddt, torch.zeros(1), atol=1e-4)
+    assert np.isnan(lddt)
     assert len(lddt_residues) == 2
     for token_name in lddt_residues:
         token_score = lddt_residues[token_name][0]
-        assert token_score == pytest.approx(0, abs=1e-4), (
-            f"Score mismatch for {token_name}: got {token_score}, expected 0"
+        assert np.isnan(token_score), (
+            f"Score mismatch for {token_name}: got {token_score}, expected NaN"
         )
 
     # Cutoff 30 Å → pair is in range and perfect → 1.0.

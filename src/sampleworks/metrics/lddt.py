@@ -100,8 +100,8 @@ def _calc_lddt(
     lddt_score = (
         0.25
         * threshold_passes.sum(dim=-1)  # For global, sum over pairs
-        # Adding eps to denominator here makes having no valid pairs return 0 instead of NaN
-        / (valid_mask.sum(dim=-1) + eps)  # Normalize by number of valid pairs
+        # Remove eps from denominator to make having no valid pairs return NaN instead of 0
+        / (valid_mask.sum(dim=-1))  # Normalize by number of valid pairs
     )
 
     # Construct selected_token_ids if not provided
@@ -115,15 +115,14 @@ def _calc_lddt(
 
     # Calculate residue level lDDT scores
     residue_level_lddt_scores = torch.vmap(
-        residue_level_lddt_single, in_dims=(0, 0, 0, 0, None, None, None)
+        residue_level_lddt_single, in_dims=(0, 0, 0, 0, None, None)
     )(
         threshold_passes,  # vectorize over batch
         first_index_valid,  # vectorize over batch
         second_index_valid,  # vectorize over batch
         valid_mask,  # vectorize over batch
         tok_idx,  # pass directly
-        selected_token_ids_tensor,  # pass directly, needs to be tensor for vmap
-        eps,
+        selected_token_ids_tensor  # pass directly, needs to be tensor for vmapå
     )  # (D, n_tokens)
 
     # Reformat into dictionary of lists
@@ -253,8 +252,7 @@ def residue_level_lddt_single(
     second_index_valid: Int[torch.Tensor, "N"],  # noqa F821
     valid_mask: Bool[torch.Tensor, "N"],  # noqa F821
     tok_idx: Int[torch.Tensor, "L"],  # noqa F821
-    selected_token_ids: Int[torch.Tensor, "*"],
-    eps: float,
+    selected_token_ids: Int[torch.Tensor, "*"]
 ) -> Float[torch.Tensor, "n_tokens"]:  # noqa F821
     """Calculates residue-level lDDT for a single batch item
     (Helper function for _calc_lddt)
@@ -269,8 +267,6 @@ def residue_level_lddt_single(
         Second index of valid pairs.
     tok_idx : Int[Tensor, "L"]
         Token index of each atom. Used to exclude same-token pairs.
-    eps : float
-        Small epsilon to prevent division by zero.
     selected_token_ids : Int[Tensor, "*"]
         Set of token IDs to compute residue-level scores for.
 
@@ -287,9 +283,8 @@ def residue_level_lddt_single(
         second_index_valid: Int[torch.Tensor, "N"],  # noqa F821
         valid_mask: Bool[torch.Tensor, "N"],  # noqa F821
         tok_idx: Int[torch.Tensor, "L"],  # noqa F821
-        token_id: int,
-        eps: float = 1e-6,
-    ) -> Float[torch.Tensor, ""]:
+        token_id: int
+    ) -> Float[torch.Tensor, ""] | float:
         """Calculate residue-level lDDT for single residue
 
         Parameters
@@ -313,21 +308,21 @@ def residue_level_lddt_single(
         return (
             0.25
             * (threshold_passes * idx).sum()  # sum over pairs involving this residue only
-            / (idx.sum() + eps)
+            # returns NaN if no pairs, from 0/0
+            / (idx.sum())
         )
 
     # Vectorize over all residues
     return torch.vmap(
         residue_level_lddt_single_residue,
-        in_dims=(None, None, None, None, None, 0, None),
+        in_dims=(None, None, None, None, None, 0),
     )(
         threshold_passes,
         first_index_valid,
         second_index_valid,
         valid_mask,
         tok_idx,
-        selected_token_ids,  # vectorize over tokens
-        eps,
+        selected_token_ids  # vectorize over tokens
     )
 
 
