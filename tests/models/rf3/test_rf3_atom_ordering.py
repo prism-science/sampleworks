@@ -117,9 +117,9 @@ class TestRF3AtomOrdering:
     def test_coord_to_be_noised_in_model_atom_array(self, rf3_wrapper, structure_fixture, request):
         """model_atom_array has valid .coord_to_be_noised annotations.
 
-        RF3.wrapper.featurize() should place all unresolved atoms on a nearby resolved atom/token. These cleaned
-        coordinates should be stored under the .coord_to_be_noised annotation rather than modifying the
-        ground truth .coord attribute.
+        RF3.wrapper.featurize() should place all unresolved atoms on a nearby resolved atom/token.
+        These cleaned coordinates should be stored under the .coord_to_be_noised annotation
+        rather than modifying the ground truth .coord attribute.
         """
         # Pass structure through RF3 Wrapper featurize()
         structure = request.getfixturevalue(structure_fixture)
@@ -130,7 +130,7 @@ class TestRF3AtomOrdering:
 
         # Check .coord_to_be_noised annotation exist
         assert "coord_to_be_noised" in cond.model_atom_array.get_annotation_categories()
-        
+
         # Check .coord_to_be_noised no longer has np.nan elements
         cleaned_coords = cond.model_atom_array.coord_to_be_noised
         assert not np.isnan(cleaned_coords).any(), (

@@ -10,7 +10,7 @@ from atomworks.enums import ChainType
 from atomworks.ml.samplers import LoadBalancedDistributedSampler
 from atomworks.ml.transforms.featurize_unresolved_residues import (
     place_unresolved_token_atoms_on_token_representative_atom,
-    place_unresolved_token_on_closest_resolved_token_in_sequence
+    place_unresolved_token_on_closest_resolved_token_in_sequence,
 )
 from biotite.structure import AtomArray, AtomArrayStack
 from jaxtyping import Float
@@ -455,8 +455,8 @@ class RF3Wrapper:
         # has not been instantiated, so that additional transforms
         # added upstream will be retained. (Even if model has all
         # resolved residues, we want to populate this annotation category for
-        # more consistent downstream operations). 
-        if not "coord_to_be_noised" in model_aa.get_annotation_categories():
+        # more consistent downstream operations).
+        if "coord_to_be_noised" not in model_aa.get_annotation_categories():
             model_aa.set_annotation("coord_to_be_noised", model_aa.coord.copy())
 
         nan_coord_mask = np.any(np.isnan(model_aa.coord), axis=-1)
@@ -464,16 +464,15 @@ class RF3Wrapper:
             # Place unresolved atoms on resolved atom in the same token,
             # if possible.
             model_aa = place_unresolved_token_atoms_on_token_representative_atom(
-                model_aa,
-                annotation_to_update = "coord_to_be_noised"
+                model_aa, annotation_to_update="coord_to_be_noised"
             )
 
             # For remaining unresolved atoms, place them on the
             # closest token in the sequence.
             model_aa = place_unresolved_token_on_closest_resolved_token_in_sequence(
                 model_aa,
-                annotation_to_update = "coord_to_be_noised",
-                annotation_to_copy = "coord_to_be_noised"
+                annotation_to_update="coord_to_be_noised",
+                annotation_to_copy="coord_to_be_noised",
             )
 
             n_nan = int(nan_coord_mask.sum())
