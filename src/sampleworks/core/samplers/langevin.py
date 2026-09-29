@@ -1,11 +1,61 @@
 """Annealed Langevin SDE sampler for AF3-style models.
+
+Relation to Chroma
+------------------
+The ``reverse_sde``/``langevin``/``ode`` modes follow Chroma
+(github.com/generatebio/chroma):
+
+- ``chroma/layers/structure/diffusion.py``, ``DiffusionChainCov``:
+  ``_schedule_coefficients`` (``lambda_t``, ``lambda_langevin``),
+  ``reverse_sde``, ``langevin``, ``ode``.
+- ``chroma/layers/sde.py``: ``sde_integrate`` (Euler-Maruyama) and
+  ``sde_integrate_heun``.
+- ``chroma/models/chroma.py``, ``Chroma.sample``: defaults of 500 steps,
+  ``inverse_temperature=10`` and ``langevin_factor=2``.
+
+Kept as in Chroma:
+
+- The structure of each ``sde_func``: which terms are present, how
+  ``inverse_temperature`` and ``langevin_factor`` enter the drift and the
+  noise, and isothermal Langevin (``lambda_langevin = beta``).
+- Guidance is tempered together with the model score by default
+  (``temper_guidance=True``), because Chroma adds conditioner energies to the
+  diffusion energy before taking the gradient.
+- Heun's second drift evaluation uses the same ``t`` and the same noise draw.
+
+Rewritten for the VE parameterization the AF3-family wrappers were trained
+with (``x_sigma = x_0 + sigma * eps``):
+
+- ``alpha = 1``, so the ``-beta_VP / 2 * X`` drift term is dropped.
+- ``g^2 dt = d(sigma^2) = 2 sigma dsigma``, and the noise becomes
+  ``sqrt(2 sigma |dsigma|)``.
+- The score comes from the denoiser: ``score = -(x_t - x_hat_0) / sigma^2``.
+- ``lambda_t`` keeps its form but replaces ``alpha^2`` with
+  ``sigma_data^2``, which is exact for Gaussian data ``N(0, sigma_data^2)``.
+  Chroma's whitened backbone coordinates have unit scale; all-atom coordinates
+  do not.
+- Time is discretized on the Karras sigma schedule (as in ``AF3EDMSampler``)
+  rather than Chroma's uniform grid in ``t``.
+
+Not reproduced:
+
+- Chroma's backbone-specific correlated noise (``multiply_covariance`` /
+  ``_multiply_R``). Noise here is i.i.d. Gaussian and the score is not
+  covariance-transformed, since it has no all-atom analogue.
+- Chroma's centering. Instead, this sampler centers, randomly rotates and
+  aligns to the input exactly like ``AF3EDMSampler``, so that rewards are
+  computed in the map frame.
+
+``sde_mode="legacy"`` is the original simplified update. It does not follow
+Chroma: its noise is not scaled by ``sigma`` and has no matching pull toward
+``x_hat_0``.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import cast, TYPE_CHECKING
+from typing import cast, Literal, TYPE_CHECKING
 
 import einx
 import torch
@@ -19,6 +69,7 @@ from sampleworks.utils.frame_transforms import (
     apply_forward_transform,
     create_random_transform,
     transform_coords_and_noise_to_frame,
+    weighted_rigid_align_differentiable,
 )
 from sampleworks.utils.framework_utils import match_batch
 
@@ -82,8 +133,37 @@ class LangevinSamplerConfig:
         Strength of the Langevin (Brownian) noise injected on top of the
         deterministic drift (Chroma's parameter of the same name). ``0.0``
         is a deterministic Euler step; positive values make it a true SDE.
+    sde_mode
+        ``"legacy"`` (default): the original two-knob update, where
+        ``inverse_temperature`` scales the drift and ``langevin_factor`` scales
+        noise of size ``sqrt(|step_scale * dt|)``. ``"reverse_sde"``,
+        ``"langevin"``, ``"ode"``: Chroma's ``sde_funcs`` of the same names,
+        rewritten for the VE schedule (alpha=1, beta=0, g^2 dt = d(sigma^2)).
+        All three share one update, ``x + dt * c * (delta + guidance) +
+        sqrt(n) * sqrt(2 sigma |dt|) * z``, built from an optional
+        probability-flow ODE term plus ``n`` Langevin units (see
+        ``_sde_drift_and_units``). ``"langevin"`` requires
+        ``langevin_factor > 0`` and ``"ode"`` requires ``langevin_factor == 0``.
+        ``step_scale`` is not applied in these modes.
+    align_xt_to_x0
+        Rigidly align the noisy state onto the denoised prediction before the
+        update (same operation as ``EDMSamplerConfig.alignment_reverse_diffusion``).
+    temper_guidance
+        If True (default), ``inverse_temperature`` scales the step-scaler
+        guidance term along with the model score. If False, the guidance term
+        uses the ``inverse_temperature=1`` coefficient, i.e. only the prior is
+        tempered: ``p(x)^beta * p(y|x)``. ``langevin_factor`` still scales it
+        in the ``reverse_sde`` and ``langevin`` modes.
+    integrate_func
+        ``"euler_maruyama"`` (default) or ``"heun"``, Chroma's two
+        ``integrate_funcs``. ``"heun"`` follows ``chroma.layers.sde.
+        sde_integrate_heun``: it re-evaluates the drift at the Euler prediction
+        at the same noise level, reuses the same noise draw, and averages the
+        two drifts, so it costs two model calls per step. Requires one of the
+        Chroma ``sde_mode`` values (not ``"legacy"``).
     step_scale
         Multiplier on the Euler step size, matching ``EDMSamplerConfig``.
+        Only used when ``sde_mode="legacy"``.
     augmentation
         Whether to apply random SO(3) rotation augmentation before each
         denoising step, matching ``EDMSamplerConfig``.
@@ -104,6 +184,10 @@ class LangevinSamplerConfig:
     p: float = 7.0
     inverse_temperature: float = 1.0
     langevin_factor: float = 0.0
+    sde_mode: Literal["legacy", "reverse_sde", "langevin", "ode"] = "legacy"
+    align_xt_to_x0: bool = False
+    temper_guidance: bool = True
+    integrate_func: Literal["euler_maruyama", "heun"] = "euler_maruyama"
     step_scale: float = 1.5
     augmentation: bool = True
     align_to_input: bool = True
@@ -123,6 +207,20 @@ class LangevinSamplerConfig:
             raise ValueError(f"inverse_temperature ({self.inverse_temperature}) must be positive")
         if self.langevin_factor < 0:
             raise ValueError(f"langevin_factor ({self.langevin_factor}) must be non-negative")
+        if self.sde_mode not in ("legacy", "reverse_sde", "langevin", "ode"):
+            raise ValueError(
+                f"sde_mode ({self.sde_mode}) must be 'legacy', 'reverse_sde', 'langevin' or 'ode'"
+            )
+        if self.sde_mode == "langevin" and self.langevin_factor == 0:
+            raise ValueError("sde_mode='langevin' has no drift or noise when langevin_factor=0")
+        if self.sde_mode == "ode" and self.langevin_factor != 0:
+            raise ValueError("sde_mode='ode' ignores langevin_factor; set it to 0")
+        if self.integrate_func not in ("euler_maruyama", "heun"):
+            raise ValueError(
+                f"integrate_func ({self.integrate_func}) must be 'euler_maruyama' or 'heun'"
+            )
+        if self.integrate_func == "heun" and self.sde_mode == "legacy":
+            raise ValueError("integrate_func='heun' requires a Chroma sde_mode, not 'legacy'")
 
 
 class AnnealedLangevinSampler:
@@ -262,6 +360,62 @@ class AnnealedLangevinSampler:
             noise_scale=t_hat,
         )
 
+    def _sde_drift_and_units(
+        self, inverse_temperature: float, sigma: torch.Tensor
+    ) -> tuple[torch.Tensor, float]:
+        r"""Drift coefficient and Langevin-unit count for the Chroma SDE modes.
+
+        Every mode is a probability-flow ODE term (weight 0 or 1) plus ``n``
+        Langevin units. The ODE term contributes ``dt * b_ode * delta``; each
+        Langevin unit contributes ``dt * b * delta`` of drift and
+        ``sqrt(2 sigma |dt|)`` of noise, which leaves the current noise level
+        unchanged at equilibrium. The temperature coefficients follow Chroma's
+        ``sde_funcs`` with ``langevin_isothermal=True``:
+
+        ============  ===========  =============================================
+        mode          ODE term     Langevin units (count x coefficient)
+        ============  ===========  =============================================
+        reverse_sde   kappa_t      1 x kappa_t  +  langevin_factor x beta
+        langevin      --           langevin_factor x beta
+        ode           beta         --
+        ============  ===========  =============================================
+
+        with ``kappa_t = beta (sigma^2 + sigma_data^2) / (beta sigma^2 +
+        sigma_data^2)``: Chroma's ``lambda_t`` with ``alpha^2`` replaced by
+        ``sigma_data^2`` for the VE schedule (see the module docstring).
+
+        Parameters
+        ----------
+        inverse_temperature
+            ``beta`` for this term (the model score, or the guidance term
+            when ``temper_guidance=False`` passes 1.0).
+        sigma
+            Current noise level ``sigma_tm``.
+
+        Returns
+        -------
+        tuple[torch.Tensor, float]
+            ``(c, n)``: the update is ``dt * c * direction`` plus
+            ``sqrt(n) * sqrt(2 sigma |dt|) * z`` of noise.
+        """
+        sigma_data_sq = self.config.sigma_data**2
+        kappa = (
+            inverse_temperature
+            * (sigma**2 + sigma_data_sq)
+            / (inverse_temperature * sigma**2 + sigma_data_sq)
+        )
+        langevin_factor = self.config.langevin_factor
+        ode_weight, ode_coefficient, langevin_units = {
+            "reverse_sde": (1.0, kappa, [(1.0, kappa), (langevin_factor, inverse_temperature)]),
+            "langevin": (0.0, kappa, [(langevin_factor, inverse_temperature)]),
+            "ode": (1.0, inverse_temperature, []),
+        }[self.config.sde_mode]
+        drift_coefficient = ode_weight * ode_coefficient + sum(
+            count * coefficient for count, coefficient in langevin_units
+        )
+        num_units = sum(count for count, _ in langevin_units)
+        return torch.as_tensor(drift_coefficient), float(num_units)
+
     def _apply_scaler_guidance(
         self,
         scaler: StepScalerProtocol,
@@ -283,7 +437,9 @@ class AnnealedLangevinSampler:
         Returns
         -------
         tuple[torch.Tensor, torch.Tensor | None]
-            (modified_delta, loss)
+            (guidance_term, loss). ``guidance_term`` is returned separately
+            from ``delta`` (unlike ``AF3EDMSampler``) so ``step()`` can scale
+            the two with different coefficients.
         """
         scaler_metadata: dict[str, object] = {"x_t": noisy_state}
         scaler_context = context.with_metadata(scaler_metadata)
@@ -319,8 +475,7 @@ class AnnealedLangevinSampler:
             / context.t_effective
         )
 
-        result = delta + scaled_delta_contribution
-        return torch.as_tensor(result), loss
+        return torch.as_tensor(scaled_delta_contribution), loss
 
     def step(
         self,
@@ -362,6 +517,72 @@ class AnnealedLangevinSampler:
         """
         self.check_context(context)
 
+        working_state, drift_update, noise_scale, denoised, loss = self._drift_at(
+            state, model_wrapper, context, scaler, features
+        )
+        noise = noise_scale * torch.randn_like(working_state)
+
+        if self.config.integrate_func == "euler_maruyama":
+            next_state = working_state + drift_update + noise
+        else:
+            # Chroma's sde_integrate_heun: re-evaluate the drift at the Euler prediction at the
+            # *same* t (not t + dt), reuse the same noise, and average the two drifts. Both
+            # drifts live in the input-aligned frame, since _drift_at re-aligns the prediction.
+            predicted_state = working_state + drift_update + noise
+            _, predicted_drift, _, _, _ = self._drift_at(
+                predicted_state.detach(), model_wrapper, context, scaler, features
+            )
+            next_state = working_state + 0.5 * (drift_update + predicted_drift) + noise
+
+        return SamplerStepOutput(
+            state=next_state,
+            denoised=denoised,
+            loss=loss,
+            log_proposal_correction=None,
+        )
+
+    def _drift_at(
+        self,
+        state: Float[torch.Tensor, "*batch atoms 3"],
+        model_wrapper: FlowModelWrapper,
+        context: StepParams,
+        scaler: StepScalerProtocol | None,
+        features: GenerativeModelInput | None,
+    ) -> tuple[
+        Float[torch.Tensor, "*batch atoms 3"],
+        Float[torch.Tensor, "*batch atoms 3"],
+        torch.Tensor,
+        Float[torch.Tensor, "*batch atoms 3"],
+        torch.Tensor | None,
+    ]:
+        r"""Evaluate the model at ``state`` and return the drift for one step.
+
+        Runs augmentation, the denoiser, input alignment and guidance, then
+        builds the drift of the configured ``sde_mode``. The noise is left to
+        the caller so it can be shared between Heun's two evaluations.
+
+        Parameters
+        ----------
+        state
+            Coordinates to evaluate at.
+        model_wrapper
+            Model wrapper for :math:`\hat{x}_\theta` prediction.
+        context
+            Step context with ``t``, ``dt``, and optionally reward info.
+        scaler
+            Optional step scaler for computing guidance from rewards.
+        features
+            Additional model features/inputs.
+
+        Returns
+        -------
+        tuple
+            ``(working_state, drift, noise_scale, denoised, loss)``:
+            ``state`` in the input-aligned working frame, the drift to add to
+            it, the scalar noise standard deviation for this step, the aligned
+            denoised prediction, and the guidance loss (``None`` without a
+            scaler).
+        """
         t_hat = context.t_effective
         dt = context.dt
         allow_gradients = True if scaler and getattr(scaler, "requires_gradients", False) else False
@@ -435,12 +656,25 @@ class AnnealedLangevinSampler:
 
         x_hat_0_working_frame_t = torch.as_tensor(x_hat_0_working_frame)
         noisy_state_working_frame_t = torch.as_tensor(noisy_state_working_frame)
+
+        if self.config.align_xt_to_x0:
+            noisy_state_working_frame_t = torch.as_tensor(
+                weighted_rigid_align_differentiable(
+                    noisy_state_working_frame_t,
+                    x_hat_0_working_frame_t,  # target frame
+                    weights=torch.ones_like(x_hat_0_working_frame_t[..., 0]),
+                    mask=torch.ones_like(x_hat_0_working_frame_t[..., 0]),
+                    allow_gradients=False,
+                )
+            )
+
         # Tweedie-derived score-following direction: delta = -sigma * score(x, sigma).
         delta = torch.as_tensor((noisy_state_working_frame_t - x_hat_0_working_frame_t) / t_hat)
 
         loss = None
+        guidance_term = torch.zeros_like(delta)
         if scaler is not None:
-            delta, loss = self._apply_scaler_guidance(
+            guidance_term, loss = self._apply_scaler_guidance(
                 scaler=scaler,
                 x_hat_0_working_frame=x_hat_0_working_frame_t,
                 noisy_state=noisy_state,
@@ -451,18 +685,31 @@ class AnnealedLangevinSampler:
                 allow_gradients=allow_gradients,
             )
 
-        # Temperature-scaled deterministic drift, plus injected Langevin diffusion noise.
-        step_size = self.config.step_scale * dt  # ty: ignore[unsupported-operator]
-        drift_update = step_size * self.config.inverse_temperature * delta
-        langevin_noise = self.config.langevin_factor * torch.sqrt(
-            torch.abs(torch.as_tensor(step_size))
-        ) * torch.randn_like(noisy_state_working_frame_t)
+        beta = self.config.inverse_temperature
+        guidance_beta = beta if self.config.temper_guidance else 1.0
 
-        next_state = noisy_state_working_frame_t + drift_update + langevin_noise
+        if self.config.sde_mode == "legacy":
+            # Temperature-scaled deterministic drift, plus injected Langevin diffusion noise.
+            step_size = self.config.step_scale * dt  # ty: ignore[unsupported-operator]
+            drift_update = step_size * (beta * delta + guidance_beta * guidance_term)
+            noise_scale = self.config.langevin_factor * torch.sqrt(
+                torch.abs(torch.as_tensor(step_size))
+            )
+        else:
+            # VE form of Chroma's sde_funcs: g^2 dt = 2 sigma dsigma, score = -delta / sigma.
+            sigma = torch.as_tensor(t_hat)
+            dsigma = torch.as_tensor(dt)
+            prior_coefficient, num_langevin_units = self._sde_drift_and_units(beta, sigma)
+            guidance_coefficient, _ = self._sde_drift_and_units(guidance_beta, sigma)
+            drift_update = dsigma * (
+                prior_coefficient * delta + guidance_coefficient * guidance_term
+            )
+            noise_scale = num_langevin_units**0.5 * torch.sqrt(2.0 * sigma * torch.abs(dsigma))
 
-        return SamplerStepOutput(
-            state=next_state,
-            denoised=x_hat_0_working_frame_t,
-            loss=loss,
-            log_proposal_correction=None,
+        return (
+            noisy_state_working_frame_t,
+            drift_update,
+            torch.as_tensor(noise_scale),
+            x_hat_0_working_frame_t,
+            loss,
         )
