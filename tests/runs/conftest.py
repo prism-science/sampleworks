@@ -43,6 +43,7 @@ BUNDLED = (
     "full_8gpu",
     "protenix",
     "protenix_dual",
+    "protenix_langevin",
     "protpardelle",
     "rf3",
     "rf3_partial",

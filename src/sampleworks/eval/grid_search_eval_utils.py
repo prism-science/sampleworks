@@ -303,6 +303,8 @@ def scan_grid_search_results(
         input_structure_value = _metadata_value(metadata, "structure", "")
         density_value = _metadata_value(metadata, "density", "")
         resolution = _metadata_float(metadata, "resolution", None)
+        # Runs from before the sampler option have no "sampler" key and used AF3EDM.
+        sampler = str(_metadata_value(metadata, "sampler", "af3edm"))
 
         # Validate parameters to satisfy ty
         if (
@@ -333,6 +335,7 @@ def scan_grid_search_results(
                 ),
                 density_path=Path(str(density_value)) if density_value else None,
                 resolution=resolution,
+                sampler=sampler,
             )
         )
 

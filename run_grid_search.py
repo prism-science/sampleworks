@@ -18,8 +18,18 @@ from threading import Lock
 from typing import Any
 
 from loguru import logger as log
-from sampleworks.utils.guidance_constants import GuidanceType, StructurePredictor
-from sampleworks.utils.guidance_script_arguments import GuidanceConfig, JobConfig, JobResult
+from sampleworks.utils.guidance_constants import (
+    GuidanceType,
+    StructurePredictor,
+    TrajectorySamplers,
+)
+from sampleworks.utils.guidance_script_arguments import (
+    add_langevin_sampler_args,
+    add_sampler_selection_args,
+    GuidanceConfig,
+    JobConfig,
+    JobResult,
+)
 from sampleworks.utils.protein_input import ProteinInput
 
 
@@ -35,6 +45,7 @@ class GridSearchConfig:
     method: str
     proteins_file: str
     output_dir: str
+    sampler: str = TrajectorySamplers.AF3EDM.value
 
 
 def get_job_status(job: JobConfig) -> str:
@@ -218,6 +229,7 @@ def build_args_for_process_pool(
         align_to_input=args.align_to_input,
         recycling_steps=args.recycling_steps,
         num_diffusion_steps=args.num_diffusion_steps,
+        sampler=job.sampler,
     )
     # given model_type and guidance_type, the GuidanceConfig class will set itself up
     # with defaults for remaining required args, but we want to set them further here.
@@ -522,6 +534,7 @@ def main(args: argparse.Namespace):
         method=args.method,
         proteins_file=args.proteins,
         output_dir=args.output_dir,
+        sampler=args.sampler,
     )
 
     start_time = time.time()
@@ -535,6 +548,24 @@ def main(args: argparse.Namespace):
     log.info("=" * 50)
 
 
+def sampler_dir_suffix(args: argparse.Namespace) -> str:
+    """Return the trial-directory suffix that keeps each sampler configuration separate.
+
+    Empty for the default ``af3edm`` sampler, so existing layouts are unchanged. For
+    ``langevin`` it encodes the settings that change results, e.g.
+    ``_langevin_reverse_sde_b4_l4_untemp``. It avoids ``ens``/``gw``/``gd`` followed by
+    digits, which ``parse_trial_dir`` reads as grid values.
+    """
+    if args.sampler != TrajectorySamplers.LANGEVIN:
+        return ""
+    suffix = f"_langevin_{args.sde_mode}_b{args.inverse_temperature:g}_l{args.langevin_factor:g}"
+    if not args.temper_guidance:
+        suffix += "_untemp"
+    if args.integrate_func != "euler_maruyama":
+        suffix += f"_{args.integrate_func}"
+    return suffix
+
+
 def generate_jobs(args: argparse.Namespace) -> list[JobConfig]:
     """Expand CLI grid dimensions into concrete per-protein guidance jobs."""
     jobs = []
@@ -545,6 +576,7 @@ def generate_jobs(args: argparse.Namespace) -> list[JobConfig]:
     ensemble_sizes = [int(x) for x in args.ensemble_sizes.split()]
     gradient_weights = [float(x) for x in args.gradient_weights.split()]
     gd_steps_list = [int(x) for x in args.num_gd_steps.split()]
+    sampler_suffix = sampler_dir_suffix(args)
 
     for protein in proteins:
         structure = protein.structure
@@ -563,7 +595,7 @@ def generate_jobs(args: argparse.Namespace) -> list[JobConfig]:
                                 protein_name,
                                 f"{model}{method_suffix}",
                                 scaler,
-                                f"ens{ens}_gw{gw}_gd{gd}",
+                                f"ens{ens}_gw{gw}_gd{gd}{sampler_suffix}",
                             )
                             log_path = os.path.join(output_dir, "run.log")
                             jobs.append(
@@ -580,6 +612,7 @@ def generate_jobs(args: argparse.Namespace) -> list[JobConfig]:
                                     method=args.method,
                                     output_dir=output_dir,
                                     log_path=log_path,
+                                    sampler=args.sampler,
                                 )
                             )
             else:
@@ -590,7 +623,7 @@ def generate_jobs(args: argparse.Namespace) -> list[JobConfig]:
                             protein_name,
                             f"{model}{method_suffix}",
                             scaler,
-                            f"ens{ens}_gw{gw}",
+                            f"ens{ens}_gw{gw}{sampler_suffix}",
                         )
                         log_path = os.path.join(output_dir, "run.log")
                         jobs.append(
@@ -607,6 +640,7 @@ def generate_jobs(args: argparse.Namespace) -> list[JobConfig]:
                                 method=args.method,
                                 output_dir=output_dir,
                                 log_path=log_path,
+                                sampler=args.sampler,
                             )
                         )
 
@@ -645,6 +679,7 @@ def save_results(
             r.ensemble_size,
             r.gradient_weight,
             r.gd_steps,
+            r.sampler,
         )
         for r in results
     }
@@ -662,6 +697,7 @@ def save_results(
             normalized_run.get("ensemble_size"),
             normalized_run.get("gradient_weight"),
             normalized_run.get("gd_steps"),
+            normalized_run.get("sampler", TrajectorySamplers.AF3EDM.value),
         )
         if key not in new_run_keys:
             merged_runs.append(normalized_run)
@@ -762,6 +798,10 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="FK steering: resampling interval",
     )
+
+    # Sampler arguments (the Langevin options only apply with --sampler langevin)
+    add_sampler_selection_args(parser)
+    add_langevin_sampler_args(parser)
 
     # Step Scaler arguments
     parser.add_argument(

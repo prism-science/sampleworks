@@ -64,3 +64,25 @@ def test_scan_uses_path_fallback_for_empty_metadata_values(tmp_path) -> None:
     assert trials[0].model == "boltz2"
     assert trials[0].method == "MD"
     assert trials[0].ensemble_size == 8
+
+
+def test_scan_reads_sampler_from_metadata(tmp_path) -> None:
+    """The sampler comes from job metadata, and older runs without it default to af3edm."""
+    for sampler, trial_name in (
+        ("langevin", "ens8_gw0.1_langevin_reverse_sde_b4_l4"),
+        (None, "ens8_gw0.1"),
+    ):
+        trial_dir = tmp_path / "1ABC_1.0occA" / "protenix" / "pure_guidance" / trial_name
+        trial_dir.mkdir(parents=True)
+        (trial_dir / "refined.cif").write_text("data_test")
+        metadata = {"model_name": "protenix", "ensemble_size": 8, "step_size": 0.1}
+        if sampler is not None:
+            metadata["sampler"] = sampler
+        (trial_dir / "job_metadata.json").write_text(json.dumps(metadata))
+
+        trials = scan_grid_search_results(trial_dir, current_depth=4, target_depth=4)
+
+        assert len(trials) == 1
+        assert trials[0].sampler == (sampler or "af3edm")
+        assert trials[0].ensemble_size == 8
+        assert trials[0].guidance_weight == 0.1

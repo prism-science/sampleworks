@@ -352,6 +352,37 @@ def test_guidance_config_migrates_legacy_model_pickle() -> None:
     assert "model" not in restored.as_dict()
 
 
+def test_guidance_config_pickle_without_sampler_defaults_to_af3edm() -> None:
+    """Job queues pickled before the sampler option restore as the AF3EDM sampler."""
+    config = GuidanceConfig(
+        protein="1abc",
+        structure="structure.cif",
+        density="density.ccp4",
+        model_name=StructurePredictor.PROTENIX,
+        guidance_type=GuidanceType.PURE_GUIDANCE,
+        log_path="run.log",
+    )
+    del config.__dict__["sampler"]
+
+    restored = pickle.loads(pickle.dumps(config))
+
+    assert restored.sampler == "af3edm"
+
+
+def test_guidance_config_rejects_unknown_sampler() -> None:
+    """An unknown sampler fails when the config is built, not inside a worker."""
+    with pytest.raises(ValueError, match="Unknown sampler"):
+        GuidanceConfig(
+            protein="1abc",
+            structure="structure.cif",
+            density="density.ccp4",
+            model_name=StructurePredictor.PROTENIX,
+            guidance_type=GuidanceType.PURE_GUIDANCE,
+            log_path="run.log",
+            sampler="euler",
+        )
+
+
 def test_job_result_migrates_legacy_model_pickle() -> None:
     """Old result pickles restore ``model`` state as ``model_name``."""
     result = JobResult(

@@ -809,3 +809,52 @@ class TestRewardConfigFile:
 
         with pytest.raises(SystemExit):
             GuidanceConfig.from_cli(argv)
+
+
+class TestSamplerSelection:
+    """``--sampler`` picks the trajectory sampler and which option flags exist."""
+
+    BASE = ["--model", "protenix", "--guidance-type", "pure_guidance"] + COMMON_ARGS
+
+    def test_default_sampler_is_af3edm(self):
+        config = GuidanceConfig.from_cli(self.BASE)
+        assert config.sampler == "af3edm"
+        assert not hasattr(config, "langevin_factor")
+
+    def test_langevin_defaults(self):
+        config = GuidanceConfig.from_cli(self.BASE + ["--sampler", "langevin"])
+        assert config.sampler == "langevin"
+        assert config.inverse_temperature == 1.0
+        assert config.langevin_factor == 0.0
+        assert config.sde_mode == "reverse_sde"
+        assert config.temper_guidance is True
+        assert config.integrate_func == "euler_maruyama"
+
+    def test_langevin_options_pass_through(self):
+        argv = self.BASE + [
+            "--sampler",
+            "langevin",
+            "--inverse-temperature",
+            "4",
+            "--langevin-factor",
+            "4",
+            "--sde-mode",
+            "langevin",
+            "--no-temper-guidance",
+            "--integrate-func",
+            "heun",
+        ]
+        config = GuidanceConfig.from_cli(argv)
+        assert config.inverse_temperature == 4.0
+        assert config.langevin_factor == 4.0
+        assert config.sde_mode == "langevin"
+        assert config.temper_guidance is False
+        assert config.integrate_func == "heun"
+
+    def test_langevin_args_rejected_for_af3edm(self):
+        with pytest.raises(SystemExit):
+            GuidanceConfig.from_cli(self.BASE + ["--langevin-factor", "4"])
+
+    def test_invalid_sampler_errors(self):
+        with pytest.raises(SystemExit):
+            GuidanceConfig.from_cli(self.BASE + ["--sampler", "euler"])

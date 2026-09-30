@@ -24,6 +24,7 @@ class Trial:
     input_structure_path: Path | None = None
     density_path: Path | None = None
     resolution: float | None = None
+    sampler: str = "af3edm"
     rscc: float = np.nan  # these last three are placeholders for RSCC calculations.
     base_map_path: Path | None = None
     error: Exception | None = None
@@ -40,6 +41,7 @@ class TrialList(list[Trial]):
         logger.info(f"Proteins: {set(trial.protein for trial in self)}")
         logger.info(f"Models: {set(trial.model for trial in self)}")
         logger.info(f"Scalers: {set(trial.scaler for trial in self)}")
+        logger.info(f"Samplers: {set(trial.sampler for trial in self)}")
 
 
 @dataclass

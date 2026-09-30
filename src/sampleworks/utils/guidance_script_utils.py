@@ -19,6 +19,7 @@ from loguru import logger
 from sampleworks.core.rewards.config import build_reward
 from sampleworks.core.rewards.registry import RewardBuildContext
 from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
+from sampleworks.core.samplers.langevin import AnnealedLangevinSampler, LangevinSamplerConfig
 from sampleworks.core.scalers.fk_steering import FKSteering
 from sampleworks.core.scalers.pure_guidance import PureGuidance
 from sampleworks.core.scalers.step_scalers import (
@@ -32,6 +33,7 @@ from sampleworks.utils.cif_utils import add_category_to_cif, resolve_mixed_hetat
 from sampleworks.utils.guidance_constants import (
     GuidanceType,
     StructurePredictor,
+    TrajectorySamplers,
 )
 from sampleworks.utils.guidance_script_arguments import (
     _resolve_checkpoint,
@@ -526,16 +528,38 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
     )
 
     # Create sampler with model-appropriate settings
-    sampler_config = EDMSamplerConfig(
-        device=str(device),
-        augmentation=args.augmentation,
-        align_to_input=args.align_to_input,
-        alignment_reverse_diffusion=use_alignment_for_reverse_diffusion,
-        **edm_sampler_kwargs,
-    )
-    sampler = AF3EDMSampler(
-        config=sampler_config,
-    )
+    sampler_name = getattr(args, "sampler", TrajectorySamplers.AF3EDM)
+    if sampler_name == TrajectorySamplers.LANGEVIN:
+        if edm_sampler_kwargs:
+            raise ValueError(
+                f"The langevin sampler has no schedule settings for {wrapper_class_name}; "
+                "use --sampler af3edm for this model."
+            )
+        sampler = AnnealedLangevinSampler(
+            LangevinSamplerConfig(
+                device=str(device),
+                augmentation=args.augmentation,
+                align_to_input=args.align_to_input,
+                align_xt_to_x0=use_alignment_for_reverse_diffusion,
+                inverse_temperature=args.inverse_temperature,
+                langevin_factor=args.langevin_factor,
+                sde_mode=args.sde_mode,
+                temper_guidance=args.temper_guidance,
+                integrate_func=args.integrate_func,
+            )
+        )
+    elif sampler_name == TrajectorySamplers.AF3EDM:
+        sampler = AF3EDMSampler(
+            config=EDMSamplerConfig(
+                device=str(device),
+                augmentation=args.augmentation,
+                align_to_input=args.align_to_input,
+                alignment_reverse_diffusion=use_alignment_for_reverse_diffusion,
+                **edm_sampler_kwargs,
+            )
+        )
+    else:
+        raise ValueError(f"Unknown sampler: {sampler_name}")
 
     # Create step scaler for gradient-based guidance.
     # TODO: unify this arg, no need for both of them now
@@ -709,6 +733,7 @@ def get_job_result(
         finished_at=ended_at.isoformat(),
         log_path=getattr(args, "log_path", None) or os.path.join(args.output_dir, "run.log"),
         output_dir=args.output_dir,
+        sampler=getattr(args, "sampler", TrajectorySamplers.AF3EDM.value),
     )
     return result
 

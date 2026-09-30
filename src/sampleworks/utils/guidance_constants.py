@@ -32,6 +32,7 @@ class TrajectorySamplers(StrEnum):
     """Enum for all TrajectorySampler implementations."""
 
     AF3EDM = "af3edm"
+    LANGEVIN = "langevin"
 
 
 class StepScalers(StrEnum):

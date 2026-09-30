@@ -82,6 +82,7 @@ class TestTrial:
             "input_structure_path",
             "density_path",
             "resolution",
+            "sampler",
             "rscc",
             "base_map_path",
             "error",

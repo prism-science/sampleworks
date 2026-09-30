@@ -13,7 +13,12 @@ from typing import Any
 from sampleworks.core.rewards.config import REWARD_OPTIONS_KEY, RewardConfig
 from sampleworks.core.rewards.options import option_type
 from sampleworks.core.rewards.registry import get_reward_spec, reward_type_names
-from sampleworks.utils.guidance_constants import GuidanceType, Rewards, StructurePredictor
+from sampleworks.utils.guidance_constants import (
+    GuidanceType,
+    Rewards,
+    StructurePredictor,
+    TrajectorySamplers,
+)
 
 
 # Reward used when a run does not say which one it wants. Keeps every command
@@ -213,6 +218,12 @@ _DYNAMIC_ATTRS = [
     "disable_chiral_features",
     "track_chiral_features",
     "protpardelle_config_path",
+    # sampler-specific
+    "inverse_temperature",
+    "langevin_factor",
+    "sde_mode",
+    "temper_guidance",
+    "integrate_func",
     # generic (overridable)
     "ensemble_size",
     "recycling_steps",
@@ -247,6 +258,7 @@ class GuidanceConfig:
     alignment_reverse_diffusion: bool | None = None
     recycling_steps: int | None = None
     num_diffusion_steps: int = 200
+    sampler: str | TrajectorySamplers = TrajectorySamplers.AF3EDM.value
     # Rewards this run scores against, as the {reward: {weight, reward_options}}
     # mapping of issue #358. Kept as plain primitives, not a RewardConfig: these
     # configs are pickled into job queues and read back by workers that may be
@@ -306,6 +318,7 @@ class GuidanceConfig:
                 help="Guidance method",
             )
         add_reward_selection_args(pre)
+        add_sampler_selection_args(pre)
         pre_args, _ = pre.parse_known_args(argv)
         model_name = model_name or pre_args.model_name
         guidance_type = guidance_type or pre_args.guidance_type
@@ -345,8 +358,10 @@ class GuidanceConfig:
         # keeps --help honest about what this invocation accepts.
         if pre_args.reward_config is None:
             add_reward_args(parser, pre_args.reward_type)
+        add_sampler_selection_args(parser)
         _MODEL_ARG_ADDERS[model_name](parser)
         _GUIDANCE_ARG_ADDERS[guidance_type](parser)
+        _SAMPLER_ARG_ADDERS[pre_args.sampler](parser)
 
         args = parser.parse_args(argv)
 
@@ -389,6 +404,7 @@ class GuidanceConfig:
             augmentation=args.augmentation,
             align_to_input=args.align_to_input,
             alignment_reverse_diffusion=args.alignment_reverse_diffusion,
+            sampler=args.sampler,
             reward_config=reward_config.to_mapping(),
         )
 
@@ -454,6 +470,11 @@ class GuidanceConfig:
             _MODEL_ARG_ADDERS[self.model_name](self)
         except KeyError:
             raise ValueError(f"Unknown model type: {self.model_name}")
+
+        try:
+            _SAMPLER_ARG_ADDERS[self.sampler](self)
+        except KeyError:
+            raise ValueError(f"Unknown sampler: {self.sampler}")
 
         self._reconcile_reward_config()
 
@@ -528,6 +549,10 @@ class GuidanceConfig:
             self.step_scaler_type = args.step_scaler_type
             self.ensemble_size = job.ensemble_size
 
+        if self.sampler == TrajectorySamplers.LANGEVIN:
+            for option in _LANGEVIN_OPTIONS:
+                setattr(self, option, getattr(args, option))
+
     def as_dict(self) -> dict[str, Any]:
         """Return a dictionary representation of the guidance config, converting Path to strings.
 
@@ -565,6 +590,7 @@ class GuidanceConfig:
         if "model" in migrated:
             migrated.setdefault("model_name", migrated.pop("model"))
         migrated.setdefault("reward_config", {})
+        migrated.setdefault("sampler", TrajectorySamplers.AF3EDM.value)
         self.__dict__.update(migrated)
         self._reconcile_reward_config()
 
@@ -874,6 +900,80 @@ def add_protpardelle_specific_args(parser: argparse.ArgumentParser | GuidanceCon
     )
 
 
+######################
+# Sampler specific arguments
+######################
+def add_sampler_selection_args(parser: argparse.ArgumentParser):
+    """Add ``--sampler``, which picks the trajectory sampler and its option flags."""
+    parser.add_argument(
+        "--sampler",
+        type=str,
+        default=TrajectorySamplers.AF3EDM.value,
+        choices=[s.value for s in TrajectorySamplers],
+        help="Trajectory sampler: af3edm (AF3EDMSampler, default) or langevin "
+        "(AnnealedLangevinSampler, Chroma-style annealed Langevin SDE)",
+    )
+
+
+def add_af3edm_sampler_args(parser: argparse.ArgumentParser | GuidanceConfig):
+    """AF3EDMSampler takes its settings from the generic arguments; nothing to add."""
+
+
+def add_langevin_sampler_args(parser: argparse.ArgumentParser | GuidanceConfig):
+    """Add CLI arguments specific to ``AnnealedLangevinSampler``.
+
+    See ``LangevinSamplerConfig`` in ``core/samplers/langevin.py`` for the meaning of each.
+    """
+    parser.add_argument(
+        "--inverse-temperature",
+        type=float,
+        default=1.0,
+        help="Inverse temperature beta of the prior (Chroma's inverse_temperature)",
+    )
+    parser.add_argument(
+        "--langevin-factor",
+        type=float,
+        default=0.0,
+        help="Langevin factor lambda (Chroma's langevin_factor)",
+    )
+    parser.add_argument(
+        "--sde-mode",
+        type=str,
+        default="reverse_sde",
+        choices=["legacy", "reverse_sde", "langevin", "ode"],
+        help="Update rule: Chroma's reverse_sde (default), langevin or ode, or the legacy update",
+    )
+    parser.add_argument(
+        "--temper-guidance",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Temper the guidance term by beta as Chroma does (default). With "
+        "--no-temper-guidance only the prior is tempered, keeping w_guid on the CSG scale.",
+    )
+    parser.add_argument(
+        "--integrate-func",
+        type=str,
+        default="euler_maruyama",
+        choices=["euler_maruyama", "heun"],
+        help="Integrator: euler_maruyama (default) or heun (two model calls per step)",
+    )
+
+
+# GuidanceConfig attribute names set by add_langevin_sampler_args.
+_LANGEVIN_OPTIONS = (
+    "inverse_temperature",
+    "langevin_factor",
+    "sde_mode",
+    "temper_guidance",
+    "integrate_func",
+)
+
+_SAMPLER_ARG_ADDERS: dict[str, Any] = {
+    TrajectorySamplers.AF3EDM.value: add_af3edm_sampler_args,
+    TrajectorySamplers.LANGEVIN.value: add_langevin_sampler_args,
+}
+
+
 _MODEL_ARG_ADDERS: dict[str, Any] = {
     "boltz1": add_boltz1_specific_args,
     "boltz2": add_boltz2_specific_args,
@@ -904,6 +1004,7 @@ class JobConfig:
     method: str | None
     output_dir: str
     log_path: str
+    sampler: str = TrajectorySamplers.AF3EDM.value
 
 
 @dataclass
@@ -924,6 +1025,7 @@ class JobResult:
     finished_at: str
     log_path: str
     output_dir: str
+    sampler: str = TrajectorySamplers.AF3EDM.value
 
     def as_dict(self) -> dict[str, Any]:
         """Return a dictionary representation of the job result.

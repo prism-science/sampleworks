@@ -1,0 +1,37 @@
+description = "Protenix CSG vs. annealed Langevin (Chroma reverse SDE), both with the data-space DPS scaler."
+
+# Both jobs start partial diffusion at t = 0.6 and sweep the canonical w_guid list.
+# The Langevin job needs ~500 steps: at beta=4, lambda=4 the explicit update is
+# unstable with fewer. Guidance is not tempered by beta, which keeps w_guid on the
+# CSG scale so the two sweeps line up.
+
+[defaults]
+DATA_DIR = "/data/inputs"
+RESULTS_DIR = "/data/results/protenix_langevin"
+MSA_CACHE_DIR = "/root/.sampleworks"
+PROTEINS_CSV = "${DATA_DIR}/proteins.csv"
+
+[shared_args]
+proteins = "${PROTEINS_CSV}"
+model = "protenix"
+scalers = "pure_guidance"
+ensemble-sizes = "8"
+gradient-weights = "0.0 0.05 0.1 0.2 0.35 0.5"
+gradient-normalization = true
+step-scaler-type = "dataspace"
+augmentation = true
+align-to-input = true
+
+[[jobs]]
+name = "protenix_csg_dataspace"
+env = "protenix"
+gpu_count = 4
+output_subdir = "protenix_csg_dataspace"
+args = { num-diffusion-steps = 200, partial-diffusion-step = 120 }
+
+[[jobs]]
+name = "protenix_langevin"
+env = "protenix"
+gpu_count = 4
+output_subdir = "protenix_langevin"
+args = { sampler = "langevin", num-diffusion-steps = 500, partial-diffusion-step = 300, sde-mode = "reverse_sde", inverse-temperature = 4.0, langevin-factor = 4.0, no-temper-guidance = true }
