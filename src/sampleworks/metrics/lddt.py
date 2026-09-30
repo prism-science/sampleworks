@@ -94,7 +94,7 @@ def _calc_lddt(
 
     # Remove contributions of padding elements
     threshold_passes &= valid_mask[..., None]  # (D, N, 4)
-    threshold_passes = threshold_passes.sum(dim=-1)  # Flatten alongst threshold dimension
+    threshold_passes = threshold_passes.sum(dim=-1)  # Flatten along threshold dimension
 
     # Calculate global lDDT score
     lddt_score = (
