@@ -147,8 +147,8 @@ def nn_lddt_clustering(
 
     # Throw error if compute_cross_lddts returns nan (i.e. all residues in the selection) do
     # not have valid lDDT
-    invalid_columns = ~np.isfinite(cross_lddt_matrix).any()
-    if invalid_columns.any():
+    invalid = ~np.isfinite(cross_lddt_matrix)
+    if invalid.any():
         raise ValueError(
             "At least 1 predicted structure has no valid LDDT score; check that selection is valid"
         )
