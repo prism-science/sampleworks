@@ -172,7 +172,10 @@ def parse_args() -> argparse.Namespace:
         "churn increment (~1.5 sigma, or 0 when --edm-gamma0 0); 'sigma' uses sigma, "
         "matching AnnealedLangevinSampler.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not 0.0 <= args.t_start < 1.0:
+        parser.error(f"--t-start must be in [0, 1), got {args.t_start}; 1 runs no sampling steps")
+    return args
 
 
 class SigmaInitNoise:

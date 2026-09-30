@@ -160,7 +160,9 @@ class LangevinSamplerConfig:
         sde_integrate_heun``: it re-evaluates the drift at the Euler prediction
         at the same noise level, reuses the same noise draw, and averages the
         two drifts, so it costs two model calls per step. Requires one of the
-        Chroma ``sde_mode`` values (not ``"legacy"``).
+        Chroma ``sde_mode`` values (not ``"legacy"``) and ``align_to_input``,
+        since each evaluation draws its own random augmentation and only the
+        alignment to the input puts both drifts in the same frame.
     step_scale
         Multiplier on the Euler step size, matching ``EDMSamplerConfig``.
         Only used when ``sde_mode="legacy"``.
@@ -221,6 +223,11 @@ class LangevinSamplerConfig:
             )
         if self.integrate_func == "heun" and self.sde_mode == "legacy":
             raise ValueError("integrate_func='heun' requires a Chroma sde_mode, not 'legacy'")
+        if self.integrate_func == "heun" and not self.align_to_input:
+            raise ValueError(
+                "integrate_func='heun' requires align_to_input=True so both drift "
+                "evaluations share the input frame"
+            )
 
 
 class AnnealedLangevinSampler:
@@ -526,8 +533,14 @@ class AnnealedLangevinSampler:
             next_state = working_state + drift_update + noise
         else:
             # Chroma's sde_integrate_heun: re-evaluate the drift at the Euler prediction at the
-            # *same* t (not t + dt), reuse the same noise, and average the two drifts. Both
-            # drifts live in the input-aligned frame, since _drift_at re-aligns the prediction.
+            # *same* t (not t + dt), reuse the same noise, and average the two drifts. Each
+            # _drift_at call draws its own augmentation rotation, so both drifts share a frame
+            # only because _drift_at aligns to the input reference.
+            if context.alignment_reference is None:
+                raise ValueError(
+                    "integrate_func='heun' needs StepParams.alignment_reference so both drift "
+                    "evaluations share the input frame"
+                )
             predicted_state = working_state + drift_update + noise
             _, predicted_drift, _, _, _ = self._drift_at(
                 predicted_state.detach(), model_wrapper, context, scaler, features

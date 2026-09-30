@@ -109,6 +109,11 @@ def main() -> None:
     missing = [s for s in segments if s not in segment_coords]
     if missing:
         logger.warning(f"No reference coords for {len(missing)} segment(s): {missing}")
+    if not segment_coords:
+        raise ValueError(
+            f"No reference coordinates for any segment of {protein_config.protein} "
+            f"in {structure_path}"
+        )
 
     # Same loader as rscc_grid_search_script.py: expands to the canonical unit cell,
     # which extract_tight requires.
