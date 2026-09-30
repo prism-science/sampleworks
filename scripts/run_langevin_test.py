@@ -13,20 +13,21 @@ import argparse
 import csv
 import dataclasses
 from pathlib import Path
+from typing import Any, cast
 
 import torch
 from loguru import logger
-
+from sampleworks.core.rewards.config import build_reward, RewardConfig
+from sampleworks.core.rewards.real_space_density import RealSpaceRewardFunction
+from sampleworks.core.rewards.registry import RewardBuildContext
 from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
 from sampleworks.core.samplers.langevin import AnnealedLangevinSampler, LangevinSamplerConfig
 from sampleworks.core.scalers.pure_guidance import PureGuidance
 from sampleworks.core.scalers.step_scalers import DataSpaceDPSScaler
 from sampleworks.eval.metrics import rscc
-from sampleworks.eval.structure_utils import process_structure_to_trajectory_input
-from sampleworks.utils.guidance_script_utils import (
-    get_model_and_device,
-    get_reward_function_and_structure,
-)
+from sampleworks.utils.guidance_constants import Rewards
+from sampleworks.utils.guidance_script_utils import get_model_and_device, load_guidance_structure
+from sampleworks.utils.structure_utils import process_structure_to_trajectory_input
 from sampleworks.utils.torch_utils import try_gpu
 
 
@@ -67,6 +68,28 @@ def resolve_inputs(
         float(row["resolution"]),
         OUTPUT_BASE / name,
     )
+
+
+def load_structure_and_reward(
+    structure_path: str, density_path: str, resolution: float, device: torch.device
+) -> tuple[RealSpaceRewardFunction, dict[str, Any]]:
+    """Parse the input structure and build the L2 real-space density reward for it.
+
+    Mirrors ``_run_guidance`` in ``utils/guidance_script_utils.py`` with
+    ``--reward-type real_space_density``.
+    """
+    structure = load_guidance_structure(structure_path)
+    reward = build_reward(
+        RewardConfig.single(
+            Rewards.REAL_SPACE_DENSITY,
+            density=density_path,
+            resolution=resolution,
+            loss_order=2,
+            em=False,
+        ),
+        RewardBuildContext(structure=structure, device=device),
+    )
+    return cast(RealSpaceRewardFunction, reward), structure
 
 
 def parse_args() -> argparse.Namespace:
@@ -192,14 +215,7 @@ def main() -> None:
         device_str=str(device), model_checkpoint_path=None, model_type="protenix"
     )
 
-    reward, structure = get_reward_function_and_structure(
-        density=density_path,
-        device=device,
-        em=False,
-        loss_order=2,
-        resolution=resolution,
-        structure_path=structure_path,
-    )
+    reward, structure = load_structure_and_reward(structure_path, density_path, resolution, device)
 
     step_scaler = DataSpaceDPSScaler(step_size=0.1, gradient_normalization=True)
 
@@ -235,9 +251,7 @@ def main() -> None:
             ).sum(0)
         target_array = reward.transformer.xmap.array
         target_np = (
-            target_array.detach().cpu().numpy()
-            if torch.is_tensor(target_array)
-            else target_array
+            target_array.detach().cpu().numpy() if torch.is_tensor(target_array) else target_array
         )
         return float(rscc(density.detach().cpu().numpy(), target_np))
 
@@ -329,9 +343,7 @@ def main() -> None:
                 langevin_scaler = DataSpaceDPSScaler(
                     step_size=langevin_gamma, gradient_normalization=True
                 )
-                results.append(
-                    run_one(f"{label}{rep_suffix}", langevin_sampler, langevin_scaler)
-                )
+                results.append(run_one(f"{label}{rep_suffix}", langevin_sampler, langevin_scaler))
 
     output_base.mkdir(parents=True, exist_ok=True)
     with open(output_base / "summary.csv", "w") as f:

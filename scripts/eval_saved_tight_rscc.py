@@ -26,18 +26,14 @@ from pathlib import Path
 import torch
 from loguru import logger
 from run_langevin_test import DATASET_ROOT, resolve_inputs
-
 from sampleworks.eval.constants import DEFAULT_SELECTION_PADDING
 from sampleworks.eval.eval_dataclasses import ProteinConfig
 from sampleworks.eval.metrics import rscc
-from sampleworks.eval.structure_utils import (
+from sampleworks.utils.density_utils import build_density_transformer
+from sampleworks.utils.guidance_script_utils import get_model_and_device, load_guidance_structure
+from sampleworks.utils.structure_utils import (
     get_reference_structure_coords,
     process_structure_to_trajectory_input,
-)
-from sampleworks.utils.density_utils import build_density_transformer
-from sampleworks.utils.guidance_script_utils import (
-    get_model_and_device,
-    get_reward_function_and_structure,
 )
 from sampleworks.utils.torch_utils import try_gpu
 
@@ -84,16 +80,15 @@ def main() -> None:
     _, model = get_model_and_device(
         device_str=str(device), model_checkpoint_path=None, model_type="protenix"
     )
-    _, structure = get_reward_function_and_structure(
-        density=density_path, device=device, em=False, loss_order=2,
-        resolution=resolution, structure_path=structure_path,
-    )
+    structure = load_guidance_structure(structure_path)
     features = model.featurize(structure)
     prior_coords = torch.as_tensor(
         model.initialize_from_prior(batch_size=ENSEMBLE_SIZE, features=features)
     )
     processed_structure = process_structure_to_trajectory_input(
-        structure=structure, coords_from_prior=prior_coords, features=features,
+        structure=structure,
+        coords_from_prior=prior_coords,
+        features=features,
         ensemble_size=ENSEMBLE_SIZE,
     )
     reward_inputs = processed_structure.to_reward_inputs(device=device)

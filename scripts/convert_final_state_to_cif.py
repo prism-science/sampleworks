@@ -19,12 +19,8 @@ import torch
 from biotite.structure import stack
 from biotite.structure.io.pdbx import CIFFile, set_structure
 from run_langevin_test import DATASET_ROOT, resolve_inputs
-
-from sampleworks.eval.structure_utils import process_structure_to_trajectory_input
-from sampleworks.utils.guidance_script_utils import (
-    get_model_and_device,
-    get_reward_function_and_structure,
-)
+from sampleworks.utils.guidance_script_utils import get_model_and_device, load_guidance_structure
+from sampleworks.utils.structure_utils import process_structure_to_trajectory_input
 from sampleworks.utils.torch_utils import try_gpu
 
 
@@ -55,10 +51,7 @@ def main() -> None:
     _, model = get_model_and_device(
         device_str=str(device), model_checkpoint_path=None, model_type="protenix"
     )
-    _, structure = get_reward_function_and_structure(
-        density=density_path, device=device, em=False, loss_order=2,
-        resolution=resolution, structure_path=structure_path,
-    )
+    structure = load_guidance_structure(structure_path)
     features = model.featurize(structure)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -69,7 +62,9 @@ def main() -> None:
             model.initialize_from_prior(batch_size=ensemble_size, features=features)
         )
         processed_structure = process_structure_to_trajectory_input(
-            structure=structure, coords_from_prior=prior_coords, features=features,
+            structure=structure,
+            coords_from_prior=prior_coords,
+            features=features,
             ensemble_size=ensemble_size,
         )
         template = processed_structure.reward_atom_array

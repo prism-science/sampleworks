@@ -23,7 +23,7 @@ import torch
 from atomworks.io.transforms.atom_array import ensure_atom_array_stack
 from biotite.structure import stack
 from loguru import logger
-
+from run_langevin_test import load_structure_and_reward
 from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.volume import XMap
 from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
 from sampleworks.core.samplers.langevin import AnnealedLangevinSampler, LangevinSamplerConfig
@@ -32,10 +32,7 @@ from sampleworks.core.scalers.step_scalers import DataSpaceDPSScaler
 from sampleworks.eval.metrics import rscc
 from sampleworks.utils.atom_array_utils import apply_selection, parse_structure
 from sampleworks.utils.density_utils import build_density_transformer, run_density_transformer
-from sampleworks.utils.guidance_script_utils import (
-    get_model_and_device,
-    get_reward_function_and_structure,
-)
+from sampleworks.utils.guidance_script_utils import get_model_and_device
 from sampleworks.utils.torch_utils import try_gpu
 
 
@@ -67,14 +64,7 @@ def main() -> None:
         device_str=str(device), model_checkpoint_path=None, model_type="protenix"
     )
 
-    reward, structure = get_reward_function_and_structure(
-        density=DENSITY,
-        device=device,
-        em=False,
-        loss_order=2,
-        resolution=RESOLUTION,
-        structure_path=STRUCTURE,
-    )
+    reward, structure = load_structure_and_reward(STRUCTURE, DENSITY, RESOLUTION, device)
 
     # Reference selection coordinates, used only to pick which voxels to look
     # at -- these come from the deposited/reference structure, not the model.
@@ -86,7 +76,9 @@ def main() -> None:
     # reference density -- computed once, reused for every run.
     base_xmap = XMap.fromfile(DENSITY, resolution=RESOLUTION)
     _, extracted_target = base_xmap.extract_tight(sel_coords, padding=SELECTION_PADDING)
-    logger.info(f"Selection '{SELECTION}': {len(sel_atoms)} atoms, {extracted_target.shape[0]} voxels")
+    logger.info(
+        f"Selection '{SELECTION}': {len(sel_atoms)} atoms, {extracted_target.shape[0]} voxels"
+    )
 
     density_transformer, _ = build_density_transformer(base_xmap, em_mode=False, device=device)
 
@@ -110,7 +102,11 @@ def main() -> None:
             ensemble_size=ENSEMBLE_SIZE, num_steps=NUM_STEPS, t_start=T_START, guidance_t_start=0.0
         )
         output = guidance.sample(
-            structure=structure, model=model, sampler=sampler, step_scaler=step_scaler, reward=reward
+            structure=structure,
+            model=model,
+            sampler=sampler,
+            step_scaler=step_scaler,
+            reward=reward,
         )
         losses = [v for v in output.losses if v is not None]
         initial_loss, final_loss = losses[0], losses[-1]
@@ -134,7 +130,9 @@ def main() -> None:
     for factor in factors:
         sampler = AnnealedLangevinSampler(
             LangevinSamplerConfig(
-                device=str(device), inverse_temperature=args.inverse_temperature, langevin_factor=factor
+                device=str(device),
+                inverse_temperature=args.inverse_temperature,
+                langevin_factor=factor,
             )
         )
         results.append(run_one(f"factor{factor}", sampler))
@@ -143,7 +141,8 @@ def main() -> None:
     with open(OUTPUT_BASE / "summary.csv", "w") as f:
         f.write("label,initial_loss,final_loss,reduction,tight_rscc\n")
         for label, initial_loss, final_loss, final_rscc in results:
-            f.write(f"{label},{initial_loss},{final_loss},{initial_loss - final_loss},{final_rscc}\n")
+            reduction = initial_loss - final_loss
+            f.write(f"{label},{initial_loss},{final_loss},{reduction},{final_rscc}\n")
     logger.info(f"Saved results to {OUTPUT_BASE}/")
 
 
