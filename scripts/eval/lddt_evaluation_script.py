@@ -145,6 +145,14 @@ def nn_lddt_clustering(
     # all structures in the reference stack
     cross_lddt_matrix = compute_cross_lddts(ref_atom_array_stack, pred_atom_array_stack, selection)
 
+    # Throw error if compute_cross_lddts returns nan (i.e. all residues in the selection) do
+    # not have valid lDDT
+    invalid_columns = ~np.isfinite(cross_lddt_matrix).any(axis=0)
+    if invalid_columns.any():
+        raise ValueError(
+            "At least 1 predicted structure has no valid LDDT score; check that selection is valid"
+        )
+
     # Assign each predicted structure to the closest reference structure based on LDDT score (i.e.,
     # the reference structure with the highest LDDT score is assigned to the predicted structure)
     closest_ref_indices = np.argmax(cross_lddt_matrix, axis=0)
