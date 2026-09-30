@@ -260,16 +260,15 @@ def pad_ragged(
         Mask indicating which padded_array values are valid (versus padded).
     """
     # Determine length to pad to
-    assert len(arrays) > 0, "No elements were provided"
+    if len(arrays) == 0:
+        raise ValueError("No elements were provided")
     max_len = max(len(array) for array in arrays)
 
     # Pad array
-    assert all(array.dtype == arrays[0].dtype for array in arrays), (
-        "Input arrays have different dtype"
-    )
-    assert all(array.device == arrays[0].device for array in arrays), (
-        "Input arrays are placed on different devices"
-    )
+    if not all(array.dtype == arrays[0].dtype for array in arrays):
+        raise TypeError("Input arrays have different dtype")
+    if not all(array.device == arrays[0].device for array in arrays):
+        raise ValueError("Input arrays are placed on different devices")
     padded = torch.full(
         (len(arrays), max_len), pad_value, dtype=arrays[0].dtype, device=arrays[0].device
     )
