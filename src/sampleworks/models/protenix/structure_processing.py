@@ -364,6 +364,8 @@ def get_poly_res_names(atom_array, chain_info, valid_positions=None):
                         )
                         if chain_has_seq_idx:
                             seq_idx_vals = cast(np.ndarray, chain_array.seq_idx)[starts[:-1]]
+                            # The `if chain_has_seq_idx:` filter branch below keys on
+                            # raw res_id and keeps the matching seq_idx positions.
                             positions = [int(s) + 1 for s in seq_idx_vals]
                         elif hasattr(chain_array, "res_id"):
                             res_ids = cast(np.ndarray, chain_array.res_id)[starts[:-1]].tolist()
@@ -818,6 +820,8 @@ def structure_to_protenix_json(structure: dict) -> dict[str, Any]:
             for atoms in token_bonds[:, :2]:
                 bond_dict = {}
                 for i in range(2):
+                    # The polymer branch below uses seq_idx + 1 when
+                    # seq_idx >= 0 and falls back to res_id arithmetic otherwise.
                     raw_res_id = int(cast(np.ndarray, atom_array.res_id)[atoms[i]])
                     label_entity_id = atom_array.get_annotation("label_entity_id")[atoms[i]]
                     # For polymers, convert to 1-based position. When a sequence

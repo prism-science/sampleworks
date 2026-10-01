@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from atomworks.constants import STANDARD_AA
 from atomworks.io.utils.ccd import ChainType
 from atomworks.io.utils.sequence import get_1_from_3_letter_code
 from biotite.sequence import ProteinSequence
@@ -41,23 +42,37 @@ def expected_heavy_atom_count(sequence: str) -> int:
     return sum(_heavy_atoms_per_residue(ProteinSequence.convert_letter_1to3(aa)) for aa in sequence)
 
 
-def validate_seq_with_error(sequence: str) -> None:
-    """Validate that a string contains a valid protein sequence.
+_CANONICAL_AMINO_ACIDS = frozenset(
+    get_1_from_3_letter_code(res_name, ChainType.POLYPEPTIDE_L) for res_name in STANDARD_AA
+)
+
+
+def validate_seq_with_error(sequence: str) -> str:
+    """Validate a protein sequence and return it in canonical (uppercase) form.
 
     Parameters
     ----------
     sequence : str
-        Amino-acid sequence to validate.
+        Amino-acid sequence to validate. Case-insensitive.
+
+    Returns
+    -------
+    str
+        The uppercased sequence.
 
     Raises
     ------
     ValueError
-        If *sequence* contains invalid amino-acid characters.
+        If *sequence* contains anything other than the 20 canonical amino acids.
     """
-    try:
-        ProteinSequence(sequence)
-    except Exception as e:
-        raise ValueError(f"Invalid protein sequence: {e}") from e
+    sequence = sequence.upper()
+    invalid = sorted(set(sequence) - _CANONICAL_AMINO_ACIDS)
+    if invalid:
+        raise ValueError(
+            f"Invalid protein sequence: non-canonical character(s) {invalid}. Only the 20 "
+            f"canonical one-letter amino-acid codes are supported"
+        )
+    return sequence
 
 
 def resolve_sequence_arg(
@@ -69,7 +84,8 @@ def resolve_sequence_arg(
     Parameters
     ----------
     value : str or os.PathLike or None
-        An amino-acid string, a path to a FASTA file, or an empty value.
+        An amino-acid string, a path to a FASTA file (``.fasta``, ``.fa``, ``.faa``
+        or ``.fas``), or an empty value.
     root : str or os.PathLike or None
         Base directory for resolving relative FASTA paths.
 
@@ -108,9 +124,7 @@ def resolve_sequence_arg(
         if not sequence:
             raise ValueError(f"FASTA file contains no sequence: {path}")
 
-    validate_seq_with_error(sequence)
-
-    return sequence
+    return validate_seq_with_error(sequence)
 
 
 def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> dict[str, Any]:
@@ -140,9 +154,7 @@ def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> 
     if sequence is None or not sequence.strip():
         return structure
 
-    sequence = sequence.strip()
-
-    validate_seq_with_error(sequence)
+    sequence = validate_seq_with_error(sequence.strip())
 
     chain_info = structure.get("chain_info")
     if not chain_info:
@@ -189,7 +201,7 @@ def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> 
     obs_prot = ProteinSequence(observed_seq)
     full_prot = ProteinSequence(sequence)
     matrix = SubstitutionMatrix.std_protein_matrix()
-    alignments = align_optimal(obs_prot, full_prot, matrix, terminal_penalty=False)
+    alignments = align_optimal(obs_prot, full_prot, matrix, terminal_penalty=False, max_number=1)
     trace = alignments[0].trace
 
     residue_seq_idx = np.full(len(starts) - 1, -1, dtype=np.int64)

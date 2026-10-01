@@ -183,6 +183,34 @@ def test_validate_accepts_canonical_amino_acids():
     validate_seq_with_error("ACDEFGHIKLMNPQRSTVWY")
 
 
+@pytest.mark.parametrize("sequence", ["ACDX", "ACDB", "ACDZ", "ACDU", "ACD*"])
+def test_validate_rejects_non_canonical_codes(sequence: str):
+    """Ambiguous, rare, and stop codes are rejected rather than reaching CCD lookups."""
+    with pytest.raises(ValueError, match="Invalid protein sequence"):
+        validate_seq_with_error(sequence)
+
+
+def test_validate_returns_uppercased_sequence():
+    """Lowercase input is accepted and returned in canonical uppercase form."""
+    assert validate_seq_with_error("acdefghiklmnpqrstvwy") == "ACDEFGHIKLMNPQRSTVWY"
+
+
+def test_lowercase_override_aligns_like_uppercase(structure_6b8x: dict):
+    """A lowercase override must store the uppercase sequence and map every residue."""
+    protein_chain_id, info = next(
+        (cid, info)
+        for cid, info in structure_6b8x["chain_info"].items()
+        if info["chain_type"].is_protein()
+    )
+    longer = info["processed_entity_canonical_sequence"] + "GGG"
+
+    result = apply_sequence_override(structure_6b8x, longer.lower())
+
+    assert result["chain_info"][protein_chain_id]["processed_entity_canonical_sequence"] == longer
+    arr = result["asym_unit"]
+    assert np.all(arr.seq_idx[np.asarray(arr.chain_id) == protein_chain_id] >= 0)
+
+
 def test_override_with_no_protein_chain_raises():
     """Overriding a structure with no protein chains should raise."""
     from atomworks.enums import ChainType

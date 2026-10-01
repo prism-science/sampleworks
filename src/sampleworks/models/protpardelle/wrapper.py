@@ -564,6 +564,9 @@ class ProtpardelleWrapper:
         # remap observed atoms to their correct full-sequence positions
         # and fill canonical atoms for the unobserved positions.
         has_seq_idx = "seq_idx" in atom_array.get_annotation_categories()
+        # ligand atoms are already handled by atom_array being
+        # restricted to protein chains above, and
+        # apply_sequence_override raises if any protein residue ends up with seq_idx = -1.
         if has_seq_idx:
             atom37_residue_index = torch.as_tensor(
                 np.asarray(atom_array.seq_idx), dtype=torch.long, device=self.device

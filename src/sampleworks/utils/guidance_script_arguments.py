@@ -699,9 +699,10 @@ def add_generic_args(parser: argparse.ArgumentParser | GuidanceConfig):
         "--sequence",
         type=str,
         default=None,
-        help="Ground-truth sequence (amino acid string or path to a FASTA file)."
-        "This sequence will be what gets passed into the structure predictor in the case of "
-        "unmodeled regions.",
+        help="Reference sequence, e.g. the deposited PDB sequence (amino-acid string or path "
+        "to a single-record .fasta/.fa/.faa/.fas file). The structure predictor receives this "
+        "sequence, so unmodeled regions are generated. Only single-protein-chain structures are "
+        "supported currently.",
     )
     parser.add_argument("--output-dir", type=str, default="output", help="Output directory")
     parser.add_argument(
