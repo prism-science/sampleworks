@@ -477,7 +477,7 @@ class RF3Wrapper:
 
             n_nan = int(nan_coord_mask.sum())
             logger.info(
-                f"Initialized {n_nan} unresolved atoms with noise "
+                f"Initialized {n_nan} unresolved atoms at nearest atom or token before noising"
                 f"(had NaN coordinates from add_missing_atoms)"
             )
 
