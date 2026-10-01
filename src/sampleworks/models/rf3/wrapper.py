@@ -321,6 +321,9 @@ class RF3Wrapper:
         """From an Atomworks structure, calculate RF3 input features.
 
         Runs the trunk forward pass to produce conditioning features.
+        Any unresolved atoms (NaN coordinates or 0 occupancy) are moved to the
+        coordinates of the nearest resolved atom or token under the
+        coord_to_be_noised annotation.
 
         Parameters
         ----------
@@ -452,19 +455,11 @@ class RF3Wrapper:
         # the center atom for the token, or (3) the closest neighboring token in
         # the chain's sequence (defaulting to left token when both are present).
 
-        # RF3 transforms during inference should have already added the
-        # coord_to_be_noised annotation (copy over coordinates as fallback).
-        #TODO: raise error here instead if annotation doesn't exist, and run
-        # a few tests
-        if "coord_to_be_noised" not in model_aa.get_annotation_categories():
-            model_aa = copy_annotation(
-                atom_array = model_aa,
-                annotation_to_copy = "coord",
-                new_annotation = "coord_to_be_noised"
-            )
-
-        nan_coord_mask = np.any(np.isnan(model_aa.coord), axis=-1)
-        if nan_coord_mask.any():
+        unresolved_coord_mask = (
+            np.any(np.isnan(model_aa.coord), axis=-1) or # >= 1 NaN coordinate
+            (model_aa.occupancy <= 0.0) # 0 occupancy
+        )
+        if unresolved_coord_mask.any():
             # Place unresolved atoms on resolved atom in the same token,
             # if possible.
             model_aa = place_unresolved_token_atoms_on_token_representative_atom(
@@ -479,7 +474,7 @@ class RF3Wrapper:
                 annotation_to_copy="coord_to_be_noised",
             )
 
-            n_nan = int(nan_coord_mask.sum())
+            n_nan = int(unresolved_coord_mask.sum())
             logger.info(
                 f"Initialized {n_nan} unresolved atoms at nearest atom or token before noising"
                 f"(had NaN coordinates from add_missing_atoms)"
