@@ -12,6 +12,7 @@ from atomworks.ml.transforms.featurize_unresolved_residues import (
     place_unresolved_token_atoms_on_token_representative_atom,
     place_unresolved_token_on_closest_resolved_token_in_sequence,
 )
+from atomworks.ml.transforms.atom_array import copy_annotation
 from biotite.structure import AtomArray, AtomArrayStack
 from jaxtyping import Float
 from loguru import logger
@@ -451,13 +452,16 @@ class RF3Wrapper:
         # the center atom for the token, or (3) the closest neighboring token in
         # the chain's sequence (defaulting to left token when both are present).
 
-        # Copy over existing coords to coord_to_be_noised if category
-        # has not been instantiated, so that additional transforms
-        # added upstream will be retained. (Even if model has all
-        # resolved residues, we want to populate this annotation category for
-        # more consistent downstream operations).
+        # RF3 transforms during inference should have already added the
+        # coord_to_be_noised annotation (copy over coordinates as fallback).
+        #TODO: raise error here instead if annotation doesn't exist, and run
+        # a few tests
         if "coord_to_be_noised" not in model_aa.get_annotation_categories():
-            model_aa.set_annotation("coord_to_be_noised", model_aa.coord.copy())
+            model_aa = copy_annotation(
+                atom_array = model_aa,
+                annotation_to_copy = "coord",
+                new_annotation = "coord_to_be_noised"
+            )
 
         nan_coord_mask = np.any(np.isnan(model_aa.coord), axis=-1)
         if nan_coord_mask.any():
