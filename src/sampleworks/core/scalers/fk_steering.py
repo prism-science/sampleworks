@@ -214,10 +214,12 @@ class FKSteering:
 
         metadata: dict = {"trajectory_denoised": trajectory_denoised}
 
-        # If we had a mismatch, we need to add this key to the metadata so the save_everything
-        # function can get the right number of atoms.
+        # Mismatch outputs need the model topology, filtered input topology, and canonical CPU
+        # mapping so save_everything can restore input identities without stale coordinates.
         if reconciler.has_mismatch and processed.model_atom_array is not None:
             metadata["model_atom_array"] = processed.model_atom_array
+            metadata["struct_atom_array"] = processed.atom_array
+            metadata["reconciler"] = processed.reconciler
 
         return GuidanceOutput(
             structure=structure,

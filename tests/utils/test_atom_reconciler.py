@@ -32,6 +32,13 @@ class TestIdentity:
         result = rec.struct_to_model(coords, template)
         torch.testing.assert_close(result, coords)
 
+    def test_identity_model_to_struct_is_copy(self):
+        rec = AtomReconciler.identity(3)
+        coords = torch.randn(2, 3, 3)
+        template = torch.zeros(2, 3, 3)
+        result = rec.model_to_struct(coords, template)
+        torch.testing.assert_close(result, coords)
+
 
 class TestFromArrays:
     """Construction from model and structure atom arrays."""
@@ -57,6 +64,38 @@ class TestFromArrays:
         struct = build_test_atom_array(chain_ids=["B"], res_ids=[0], atom_names=["CA"])
         with pytest.raises(RuntimeError, match="No common atoms"):
             AtomReconciler.from_arrays(model, struct)
+
+    def test_different_chain_and_numbering_require_reconciliation(self):
+        model = build_test_atom_array(
+            chain_ids=["A", "A"], res_ids=[0, 0], atom_names=["N", "CA"]
+        )
+        struct = build_test_atom_array(
+            chain_ids=["B", "B"], res_ids=[365, 365], atom_names=["N", "CA"]
+        )
+
+        rec = AtomReconciler.from_arrays(model, struct)
+
+        assert rec.has_mismatch
+        assert rec.n_common == len(model) == len(struct)
+
+    def test_mse_se_maps_to_met_sd(self):
+        model = build_test_atom_array(
+            chain_ids=["A", "A"], res_ids=[0, 0], atom_names=["N", "SD"]
+        )
+        model.res_name[:] = "MET"
+        model.element[:] = ["N", "S"]
+        struct = build_test_atom_array(
+            chain_ids=["A", "A"], res_ids=[13, 13], atom_names=["N", "SE"]
+        )
+        struct.res_name[:] = "MSE"
+        struct.element[:] = ["N", "Se"]
+
+        rec = AtomReconciler.from_arrays(model, struct)
+
+        assert rec.has_mismatch
+        assert rec.n_common == len(model) == len(struct)
+        assert rec.model_indices.tolist() == [0, 1]
+        assert rec.struct_indices.tolist() == [0, 1]
 
 
 class TestCoordinateTranslation:
@@ -97,6 +136,52 @@ class TestCoordinateTranslation:
             rec.struct_to_model(torch.randn(1, 4, 3), torch.randn(1, 5, 3))
         with pytest.raises(ValueError, match="Expected model_template"):
             rec.struct_to_model(torch.randn(1, 3, 3), torch.randn(1, 4, 3))
+
+    def test_model_to_struct_copies_common_atoms(self, mismatch_rec):
+        rec = mismatch_rec
+        model_coords = torch.arange(15, dtype=torch.float32).reshape(1, 5, 3)
+        template = torch.full((1, 3, 3), -1.0)
+
+        result = rec.model_to_struct(model_coords, template)
+
+        assert result.shape == template.shape
+        torch.testing.assert_close(
+            result[0, rec.struct_indices], model_coords[0, rec.model_indices]
+        )
+
+    def test_model_to_struct_rejects_wrong_shapes(self, mismatch_rec):
+        rec = mismatch_rec
+        with pytest.raises(ValueError, match="Expected model_coords"):
+            rec.model_to_struct(torch.randn(1, 4, 3), torch.randn(1, 3, 3))
+        with pytest.raises(ValueError, match="Expected struct_template"):
+            rec.model_to_struct(torch.randn(1, 5, 3), torch.randn(1, 4, 3))
+
+    def test_mapped_struct_mask_excludes_unmapped_template_atoms(self):
+        model = build_test_atom_array(
+            chain_ids=["A", "A"], res_ids=[0, 0], atom_names=["N", "CA"]
+        )
+        struct = build_test_atom_array(
+            chain_ids=["B", "B", "B"], res_ids=[5, 5, 5], atom_names=["N", "CA", "O"]
+        )
+        rec = AtomReconciler.from_arrays(model, struct)
+
+        mask = rec.mapped_struct_mask
+
+        assert mask.dtype == torch.bool
+        assert mask.tolist() == [True, True, False]
+
+    def test_common_atoms_round_trip(self, mismatch_rec):
+        rec = mismatch_rec
+        struct_coords = torch.randn(2, 3, 3)
+        model_template = torch.randn(2, 5, 3)
+        struct_template = torch.randn(2, 3, 3)
+
+        model_coords = rec.struct_to_model(struct_coords, model_template)
+        result = rec.model_to_struct(model_coords, struct_template)
+
+        torch.testing.assert_close(
+            result[:, rec.struct_indices], struct_coords[:, rec.struct_indices]
+        )
 
     def test_align_shape(self, mismatch_rec):
         rec = mismatch_rec
