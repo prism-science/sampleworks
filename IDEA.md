@@ -1,0 +1,1 @@
+This is my PhD thesis project. I am designing a platform for sampling conformational ensembles of macromolecules using structure prediction models guided by experimental data from structural experiments.

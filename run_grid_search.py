@@ -218,6 +218,7 @@ def build_args_for_process_pool(
         align_to_input=args.align_to_input,
         recycling_steps=args.recycling_steps,
         num_diffusion_steps=args.num_diffusion_steps,
+        sequence=job.sequence,
     )
     # given model_type and guidance_type, the GuidanceConfig class will set itself up
     # with defaults for remaining required args, but we want to set them further here.
@@ -580,6 +581,7 @@ def generate_jobs(args: argparse.Namespace) -> list[JobConfig]:
                                     method=args.method,
                                     output_dir=output_dir,
                                     log_path=log_path,
+                                    sequence=protein.sequence,
                                 )
                             )
             else:
@@ -607,6 +609,7 @@ def generate_jobs(args: argparse.Namespace) -> list[JobConfig]:
                                 method=args.method,
                                 output_dir=output_dir,
                                 log_path=log_path,
+                                sequence=protein.sequence,
                             )
                         )
 

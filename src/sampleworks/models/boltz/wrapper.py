@@ -388,7 +388,10 @@ class PredictArgs:
 
 # TODO move this so that it can be imported without requiring a Boltz installation
 def create_boltz_input_from_structure(
-    structure: dict, out_dir: str | Path, msa_manager: MSAManager | None, msa_pairing_strategy: str
+    structure: dict,
+    out_dir: str | Path,
+    msa_manager: MSAManager | None,
+    msa_pairing_strategy: str,
 ) -> Path:
     """Creates Boltz YAML file from an Atomworks parsed structure file.
 

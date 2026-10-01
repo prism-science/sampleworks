@@ -60,6 +60,26 @@ class TestCreateBoltzInputFromStructure:
                 assert f"id: {chain_id}" in content
                 assert chain_data["processed_entity_canonical_sequence"] in content
 
+    def test_sequence_override_in_yaml(self, structure_6b8x: dict, temp_output_dir: Path):
+        """The sequence override should reach the YAML."""
+        from sampleworks.utils.sequence import apply_sequence_override
+
+        chain_info = structure_6b8x["chain_info"]
+        protein_chain_id = next(
+            cid for cid, info in chain_info.items() if info["chain_type"].is_protein()
+        )
+        sequence = chain_info[protein_chain_id]["processed_entity_canonical_sequence"] + "GGG"
+        overridden = apply_sequence_override(structure_6b8x, sequence)
+        yaml_path = create_boltz_input_from_structure(
+            overridden,
+            temp_output_dir,
+            msa_manager=None,
+            msa_pairing_strategy="greedy",
+        )
+
+        content = yaml_path.read_text()
+        assert f"sequence: {sequence}" in content
+
     def test_handles_cif_format(self, structure_1vme: dict, temp_output_dir: Path):
         yaml_path = create_boltz_input_from_structure(
             structure_1vme, temp_output_dir, msa_manager=None, msa_pairing_strategy="greedy"
@@ -408,9 +428,6 @@ class TestBoltzWrapperStep:
 @pytest.mark.parametrize("structure_fixture", STRUCTURES, ids=lambda s: s.replace("structure_", ""))
 class TestBoltzWrapperInitializeFromPrior:
     """Test Boltz wrapper initialize_from_prior method with all structures."""
-
-    # TODO: apply checking of this to all model wrappers once I figure out all the shape issues in
-    # a more general way
 
     def test_initialize_from_prior_returns_tensor(
         self,
