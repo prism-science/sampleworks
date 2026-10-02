@@ -26,22 +26,9 @@ from biotite.structure import AtomArray, connect_via_residue_names
 from torch import Tensor
 
 
-# ---- Reading the type hints in this file --------------------------------------
-# A ": type" after a name (or "-> type" after a function) is only a HINT -- it CLAIMS what a
-# value should be, but nothing enforces it: pass the wrong type and Python still runs the code,
-# and deleting every hint changes nothing. Hints are for humans (and optional checkers like ty).
-# (In the table, "|" means "or".)
-#
-#   with the hint                 plain Python           what it claims (useless in runtime)
-#   element: str                  element                should be a string
-#   atom_array: AtomArray         atom_array             should be a biotite AtomArray
-#   coords: Tensor                coords                 should be a Tensor (~ a numpy array)
-#   bond_power: int = 2           bond_power = 2         should be an int
-#   bond_tolerance: float = 0.2   bond_tolerance = 0.2   should be a float
-#   device: torch.device | str    device                 should be a torch.device or a str
-#   f(...) -> float               f(...)                 f should return a float
-#   f(...) -> Tensor              f(...)                 f should return a Tensor
-# -------------------------------------------------------------------------------
+# Type hints below (": str", "-> Tensor", "| None" meaning "or None") only CLAIM what a value
+# should be -- nothing enforces them at runtime, and deleting them changes nothing. They are for
+# human readers and the ty checker. Worked examples: core/scalers/latent_optimization.py.
 
 
 # TODO(#421): move into utils/elements.py, the per-element lookup module.

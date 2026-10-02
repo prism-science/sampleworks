@@ -32,19 +32,9 @@ from typing import Protocol, runtime_checkable
 from torch import Tensor
 
 
-# ---- Reading the type hints in this file --------------------------------------
-# A ": type" after a name (or "-> type" after a function) is only a HINT -- it CLAIMS what a
-# value should be, but nothing enforces it: pass the wrong type and Python still runs the code,
-# and deleting every hint changes nothing. Hints are for humans (and optional checkers like ty).
-# (In the table, "|" means "or".)
-#
-#   with the hint                    plain Python               what it claims (useless in runtime)
-#   attr: str                        attr                       should be a string
-#   single: Tensor                   single                     should be a Tensor (~ a numpy array)
-#   pair_attr: str | None = None     pair_attr = None           should be a str, or None
-#   d: dict[str, str] = {}           d = {}                     should be a dict, string -> string
-#   f(...) -> Tensor | None          f(...)                     f should return a Tensor or None
-# -------------------------------------------------------------------------------
+# Type hints below (": str", "-> Tensor", "| None" meaning "or None") only CLAIM what a value
+# should be -- nothing enforces them at runtime, and deleting them changes nothing. They are for
+# human readers and the ty checker. Worked examples: core/scalers/latent_optimization.py.
 
 # Convenience maps of the representation attribute name per model. Documentation/
 # config only -- the adapter never imports these models.
