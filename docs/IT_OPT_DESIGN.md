@@ -83,8 +83,9 @@ LatentOptimization(
 - `max_grad_norm` clips `s` and `z` **independently** (see §6 — a joint clip starves `s`).
 - `single_attr`/`pair_attr` default to Boltz names; the wiring always passes model-resolved names.
 - The `metadata` on the returned `GuidanceOutput` carries `"optimization_losses"` (per-round,
-  per-step data losses) and `"latent_drift"` (per-round relative L2 drift of each latent). It does
-  **not** emit the siblings' `"trajectory_denoised"` — treat scaler-specific keys as optional.
+  per-step data losses) and `"latent_drift"` (per-round relative L2 drift of each latent), plus
+  the siblings' `"trajectory_denoised"` from the final sampling round. Treat scaler-specific keys
+  as optional.
 
 ## 4. The gradient gate
 
@@ -94,12 +95,12 @@ that still carries a graph back to the latent leaves. `_GradEnablingScaler` is d
 [core/scalers/latent_optimization.py](../src/sampleworks/core/scalers/latent_optimization.py):
 
 ```python
-class _GradEnablingScaler:
-    requires_gradients = True
-
-    def scale(self, state, context, *, model=None):
-        return torch.zeros_like(state), torch.zeros(state.shape[0], device=state.device)
+class _GradEnablingScaler(NoScalingScaler):
+    requires_gradients = True        # the only difference from NoScalingScaler
 ```
+
+It inherits the zero-guidance `scale()` unchanged; folding it back into `NoScalingScaler` is
+tracked in [#364](https://github.com/prism-science/sampleworks/issues/364).
 
 The zero direction means the trajectory advance is unguided; the flag is the *only* thing that turns
 autograd on. `requires_gradients` is duck-typed (read via `getattr`, not declared on the protocol).
