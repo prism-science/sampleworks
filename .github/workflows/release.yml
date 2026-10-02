@@ -1,5 +1,20 @@
 name: Release
 
+# Releases land on main through a pull request, never a direct push.
+#
+#   push to main  -> propose-release: compute the next version with
+#                    python-semantic-release, commit the bump (pyproject.toml,
+#                    CHANGELOG.md, pixi.lock) to release/pending, open or update
+#                    the release PR, wait for its required checks, squash-merge it.
+#
+#   that merge    -> tag-release: tag vX.Y.Z on the merged commit and publish
+#                    the GitHub release (notes + pixi.lock asset).
+#
+# Going through a PR gives the release commit the same CI and the org-required
+# secret scan as every other change. The org ruleset `secret-scan-required`
+# rejects direct pushes to main, which is what silently stalled releases after
+# v0.18.1 (#429).
+
 on:
   push:
     branches: [main]
@@ -7,12 +22,76 @@ on:
 permissions:
   contents: read
 
+env:
+  PSR: python-semantic-release==10.5.3
+  RELEASE_BRANCH: release/pending
+  BOT_NAME: diffuse-semantic-release[bot]
+  BOT_EMAIL: 273143859+diffuse-semantic-release[bot]@users.noreply.github.com
+
 jobs:
-  release:
+  tag-release:
+    # Only the squash-merge of a release PR carries this prefix
+    # (commit_message in [tool.semantic_release]).
+    if: startsWith(github.event.head_commit.message, 'chore(release):')
     runs-on: ubuntu-latest
-    concurrency: release
+    timeout-minutes: 15
+    concurrency: release-tag
     permissions:
       contents: write
+
+    steps:
+      - name: Generate App Token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.SEMANTIC_RELEASE_APP_ID }}
+          private-key: ${{ secrets.SEMANTIC_RELEASE_APP_PRIVATE_KEY }}
+
+      # semantic-release needs a real branch checked out, not a detached HEAD.
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ steps.app-token.outputs.token }}
+
+      - run: git reset --hard ${{ github.sha }}
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Tag and publish the release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          tag="v${version}"
+          git config user.name "${BOT_NAME}"
+          git config user.email "${BOT_EMAIL}"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null; then
+            echo "::notice::${tag} already exists on origin; publishing release notes only"
+          else
+            git tag -a "${tag}" -m "${tag}" "${GITHUB_SHA}"
+            git push origin "refs/tags/${tag}"
+          fi
+
+          # Create the GitHub release with generated notes, then upload the
+          # configured assets (pixi.lock) to it.
+          uvx --from="${PSR}" semantic-release changelog --post-to-release-tag "${tag}"
+          uvx --from="${PSR}" semantic-release publish --tag "${tag}"
+
+  propose-release:
+    needs: tag-release
+    # Run when tag-release succeeded or was skipped, never when it failed.
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    # A newer push to main supersedes a release PR still waiting on checks.
+    concurrency:
+      group: release-propose
+      cancel-in-progress: true
+    permissions:
+      contents: read
 
     steps:
       - name: Generate App Token
@@ -38,11 +117,117 @@ jobs:
 
       - uses: astral-sh/setup-uv@v6
 
-      - name: Semantic Release
+      - name: Compute next version
+        id: next
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          git config user.name "github-actions"
-          git config user.email "actions@users.noreply.github.com"
-          uvx --from="python-semantic-release==10.5.3" semantic-release version || true
-          uvx --from="python-semantic-release==10.5.3" semantic-release publish
+          # --strict makes "nothing to release" exit 2 instead of 0, so it can
+          # be told apart from a real failure (exit 1).
+          # GITHUB_OUTPUT is unset for every semantic-release call in this job:
+          # with it set, semantic-release writes its own Actions outputs and
+          # fails on the missing commit_sha that only tagging would have set.
+          set +e
+          out="$(env -u GITHUB_OUTPUT uvx --from="${PSR}" semantic-release --strict version --print)"
+          rc=$?
+          set -e
+          version="$(printf '%s\n' "${out}" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+' | tail -n1)"
+          case "${rc}" in
+            0)
+              echo "Next version: ${version}"
+              echo "next_version=${version}" >> "${GITHUB_OUTPUT}"
+              ;;
+            2)
+              echo "No release needed${version:+: ${version} is already released}."
+              ;;
+            *)
+              echo "::error::semantic-release version failed with exit code ${rc}"
+              exit "${rc}"
+              ;;
+          esac
+
+      - name: Prepare release commit
+        if: steps.next.outputs.next_version != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          NEXT: ${{ steps.next.outputs.next_version }}
+        run: |
+          git config user.name "${BOT_NAME}"
+          git config user.email "${BOT_EMAIL}"
+          # Bumps pyproject.toml and CHANGELOG.md, runs `pixi lock`, commits locally.
+          env -u GITHUB_OUTPUT uvx --from="${PSR}" semantic-release --strict version --no-tag --no-push --no-vcs-release
+          subject="$(git log -1 --format=%s)"
+          if [ "${subject}" != "chore(release): ${NEXT}" ]; then
+            echo "::error::expected release commit 'chore(release): ${NEXT}', got '${subject}'"
+            exit 1
+          fi
+
+      - name: Open or update the release PR
+        id: pr
+        if: steps.next.outputs.next_version != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          NEXT: ${{ steps.next.outputs.next_version }}
+        run: |
+          last_tag="$(env -u GITHUB_OUTPUT uvx --from="${PSR}" semantic-release version --print-last-released-tag | grep -E '^v[0-9]' | tail -n1)"
+          git push --force origin "HEAD:refs/heads/${RELEASE_BRANCH}"
+
+          title="chore(release): ${NEXT}"
+          body="${RUNNER_TEMP}/release-pr-body.md"
+          {
+            echo "Automated release PR opened by the Release workflow."
+            echo
+            echo "Merging it tags \`v${NEXT}\` on \`main\` and publishes the GitHub release."
+            echo "The workflow squash-merges it as soon as the required checks pass."
+            echo "Do not push to this branch: it is rebuilt and force-pushed on every merge to \`main\`."
+            echo
+            echo "## Commits since ${last_tag}"
+            echo
+            git log --no-merges --format='- %s (%h)' "${last_tag}..HEAD~1"
+          } > "${body}"
+
+          pr="$(gh pr list --head "${RELEASE_BRANCH}" --base main --state open --json number --jq '.[0].number // empty')"
+          if [ -z "${pr}" ]; then
+            url="$(gh pr create --base main --head "${RELEASE_BRANCH}" --title "${title}" --body-file "${body}")"
+            pr="${url##*/}"
+            echo "Opened release PR #${pr}"
+          else
+            gh pr edit "${pr}" --title "${title}" --body-file "${body}"
+            echo "Updated release PR #${pr}"
+          fi
+          echo "number=${pr}" >> "${GITHUB_OUTPUT}"
+
+      - name: Wait for required checks
+        if: steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ steps.pr.outputs.number }}
+        run: |
+          # Check runs register a few seconds after the push. gh exits 0 when all
+          # passed, 8 while pending, 1 on failure or when none exist yet.
+          for _ in $(seq 1 20); do
+            set +e
+            gh pr checks "${PR}" --required >/dev/null 2>&1
+            rc=$?
+            set -e
+            case "${rc}" in 0|8) break ;; esac
+            sleep 15
+          done
+          gh pr checks "${PR}" --required --watch --fail-fast
+
+      - name: Merge the release PR
+        if: steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ steps.pr.outputs.number }}
+          NEXT: ${{ steps.next.outputs.next_version }}
+        run: |
+          # The app bypasses the repo ruleset's review requirement; the org
+          # ruleset's secret scan is satisfied by the PR run.
+          gh pr merge "${PR}" --squash \
+            --subject "chore(release): ${NEXT} (#${PR})" \
+            --body "Automatically generated by python-semantic-release"
+          git push origin --delete "refs/heads/${RELEASE_BRANCH}"
