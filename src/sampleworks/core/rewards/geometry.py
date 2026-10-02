@@ -48,6 +48,7 @@ def _covalent_radius(element: str) -> float:
 
 
 # TODO(#420): this loss has no test coverage.
+# TODO(#363): widen __call__ to RewardFunctionProtocol so this composes with the other rewards.
 class BondGeometryReward:
     """Penalize distorted bonds and steric clashes in the denoised structure.
 
