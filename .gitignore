@@ -216,6 +216,8 @@ CLAUDE.local.md
 .github/workflows/claude*.yml
 .github/agents/
 .pi/
+IDEA.md
+_tasks/
 
 # Model checkpoints
 release_data/
@@ -233,3 +235,7 @@ initial_dataset_40*/
 !src/sampleworks/data/protein_configs.csv
 
 .idea
+
+# local tooling / build artifacts
+.continue/
+pyproject.toml.pixi.bak

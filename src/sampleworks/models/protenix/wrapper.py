@@ -637,13 +637,24 @@ class ProtenixWrapper:
 
         t_tensor = match_batch(t_tensor, target_batch_size=x_t.shape[0])
 
-        # When gradients are enabled, detach cached pairformer outputs so gradients
-        # only flow through the diffusion module (not back through the pairformer).
-        # The pairformer was computed with grad_needed=False, so its graph isn't retained.
+        # Detach cached pairformer outputs under grad so the many denoising steps that reuse them
+        # don't backprop through the trunk twice -- EXCEPT a latent that IT-opt has injected as an
+        # optimizable leaf (requires_grad=True), which is kept attached so its gradient survives.
+        # In the guidance path featurize() runs the trunk under no_grad, so every cached latent
+        # is a requires_grad=False constant and detaches -- the exact behavior before IT-opt.
         grad_needed = torch.is_grad_enabled()
-        s_inputs = cond.s_inputs.detach() if grad_needed else cond.s_inputs
-        s_trunk = cond.s_trunk.detach() if grad_needed else cond.s_trunk
-        z_trunk = cond.z_trunk.detach() if grad_needed else cond.z_trunk
+
+        def detach_unless_leaf(latent: Tensor) -> Tensor:
+            """Detach a cached latent under grad, unless it is an optimizable IT-opt leaf."""
+            return latent.detach() if grad_needed and not latent.requires_grad else latent
+
+        s_inputs = detach_unless_leaf(cond.s_inputs)
+        s_trunk = detach_unless_leaf(cond.s_trunk)
+        z_trunk = detach_unless_leaf(cond.z_trunk)
+        # pair_z / p_lm / c_l are z-derived caches. When optimizing z_trunk, featurize with
+        # enable_diffusion_shared_vars_cache=False so these are None and the diffusion module
+        # recomputes them from the live z_trunk; otherwise the z gradient is only partial.
+        # See docs/IT_OPT_TESTING.md.
         pair_z = cond.pair_z.detach() if grad_needed and cond.pair_z is not None else cond.pair_z
         p_lm = cond.p_lm.detach() if grad_needed and cond.p_lm is not None else cond.p_lm
         c_l = cond.c_l.detach() if grad_needed and cond.c_l is not None else cond.c_l

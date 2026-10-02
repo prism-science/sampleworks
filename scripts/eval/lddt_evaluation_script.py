@@ -93,7 +93,14 @@ def compute_cross_lddts(
 
             # Calculate the mean LDDT score
             if all_scores:
-                lddt_matrix[i, j] = np.mean(all_scores)
+                # Take sum, NaN will propagate
+                all_scores_sum = np.sum(all_scores)
+
+                # take mean of non-NaN elements
+                if np.isnan(all_scores_sum):
+                    lddt_matrix[i, j] = np.nanmean(all_scores)
+                else:
+                    lddt_matrix[i, j] = all_scores_sum / len(all_scores)
             else:
                 # If no scores computed (e.g., no residues match selection), set to NaN
                 lddt_matrix[i, j] = np.nan
@@ -137,6 +144,14 @@ def nn_lddt_clustering(
     # Second, compute the cross-LDDT matrix between all structures in the predicted stack and
     # all structures in the reference stack
     cross_lddt_matrix = compute_cross_lddts(ref_atom_array_stack, pred_atom_array_stack, selection)
+
+    # Throw error if compute_cross_lddts returns nan (i.e. all residues in the selection) do
+    # not have valid lDDT
+    invalid = ~np.isfinite(cross_lddt_matrix)
+    if invalid.any():
+        raise ValueError(
+            "At least 1 predicted structure has no valid LDDT score; check that selection is valid"
+        )
 
     # Assign each predicted structure to the closest reference structure based on LDDT score (i.e.,
     # the reference structure with the highest LDDT score is assigned to the predicted structure)

@@ -1,0 +1,41 @@
+description = "IT-opt s_plus_z on 1 GPU: all proteins run sequentially in one worker."
+
+# Run with:
+#   sampleworks-runs --preset it_opt_1gpu
+#
+# One job per protein, one worker, so 40 proteins is 40 jobs run back to back. The sibling
+# it_opt_4gpu.toml is this same configuration with gpu_count = 4, which splits those jobs over
+# four workers.
+#
+# The settings below are the defaults of it_opt_scratch/slurm_ensemble_and_score.sh, so a run
+# here is comparable to the recorded trees. To sample a different mode, change which-latent
+# (single = s, pair = z, both = s+z); for the unguided or coordinate-DPS references use
+# scalers = "pure_guidance" with step-scaler-type = "none" or "noisespace" instead.
+
+[defaults]
+DATA_DIR = "/data/inputs"
+RESULTS_DIR = "/data/results/it_opt_1gpu"
+PROTEINS_CSV = "${DATA_DIR}/proteins.csv"
+
+# ensemble-sizes and gradient-weights MUST stay single values. Their defaults are "1 2 4 8" and
+# "0.01 0.1 0.2", which would expand one job per protein into twelve. gradient-weights only
+# feeds the step scaler, which latent_opt does not use, so its value is arbitrary.
+# align-to-input matches the scratch runner, which set it unconditionally; the grid defaults it
+# off. bond-length-weight is named explicitly because the scratch runner defaulted it to 0.0.
+[shared_args]
+proteins = "${PROTEINS_CSV}"
+model = "protenix"
+scalers = "latent_opt"
+which-latent = "both"
+ensemble-sizes = "8"
+gradient-weights = "0.0"
+num-diffusion-steps = 200
+bond-length-weight = 5e-5
+align-to-input = true
+
+[[jobs]]
+name = "s_plus_z"
+env = "protenix"
+gpu_count = 1
+output_subdir = "s_plus_z"
+args = {}

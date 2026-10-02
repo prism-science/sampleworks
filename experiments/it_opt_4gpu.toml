@@ -1,0 +1,44 @@
+description = "IT-opt s_plus_z on 4 GPUs: proteins split across four workers, one per GPU."
+
+# Run with:
+#   sampleworks-runs --preset it_opt_4gpu
+#
+# Identical to it_opt_1gpu.toml except for gpu_count and jobs-per-gpu. run_grid_search sets
+# max_workers = len(gpus) * jobs-per-gpu and gives worker i the slice jobs[i::max_workers], so
+# 4 GPUs x 2 gives 8 workers and 40 proteins become 5 jobs each rather than 40 in a row.
+#
+# jobs-per-gpu = 2 matches the recorded run (--jobs-per-gpu 2 on 4 GPUs). Two jobs share a card,
+# each holding its own copy of the weights: a measured single job peaked near 11 GiB of an 80 GiB
+# H100, so two fit with wide margin. Raise it further only after checking VRAM on the largest
+# protein in the set, since cost scales with atom count.
+#
+# Settings are the defaults of it_opt_scratch/slurm_ensemble_and_score.sh; see the sibling
+# preset for how to switch mode.
+
+[defaults]
+DATA_DIR = "/data/inputs"
+RESULTS_DIR = "/data/results/it_opt_4gpu"
+PROTEINS_CSV = "${DATA_DIR}/proteins.csv"
+
+# ensemble-sizes and gradient-weights MUST stay single values. Their defaults are "1 2 4 8" and
+# "0.01 0.1 0.2", which would expand one job per protein into twelve. gradient-weights only
+# feeds the step scaler, which latent_opt does not use, so its value is arbitrary.
+# align-to-input matches the scratch runner, which set it unconditionally; the grid defaults it
+# off. bond-length-weight is named explicitly because the scratch runner defaulted it to 0.0.
+[shared_args]
+proteins = "${PROTEINS_CSV}"
+model = "protenix"
+scalers = "latent_opt"
+which-latent = "both"
+ensemble-sizes = "8"
+gradient-weights = "0.0"
+num-diffusion-steps = 200
+bond-length-weight = 5e-5
+align-to-input = true
+
+[[jobs]]
+name = "s_plus_z"
+env = "protenix"
+gpu_count = 4
+output_subdir = "s_plus_z"
+args = { jobs-per-gpu = 2 }

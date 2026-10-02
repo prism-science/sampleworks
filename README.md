@@ -102,13 +102,44 @@ Output files appear in `output/boltz2_pure_guidance/`: `refined.cif` (final ense
 | Argument | Description |
 |---|---|
 | `--model` | `boltz1`, `boltz2`, `protenix`, or `rf3` |
-| `--guidance-type` | `pure_guidance` or `fk_steering` |
+| `--guidance-type` | `pure_guidance`, `fk_steering`, or `latent_opt` |
 | `--protein` | Protein identifier (should match naming used in grid search / evaluation) |
 | `--structure` | Path to input structure file (CIF) |
 | `--density` | Path to density map (CCP4/MRC/MAP) — required by the default reward |
 | `--resolution` | Map resolution in Angstroms — required by the default reward |
 
 Model-specific arguments (e.g. `--method` for boltz2, `--msa-path` for rf3) and guidance-type-specific arguments (e.g. `--num-particles` for fk_steering) are included automatically. Run `sampleworks-guidance --model <model> --guidance-type <type> --help` to see all available options.
+
+### Latent optimization (IT-opt)
+
+`--guidance-type latent_opt` optimizes the model's cached post-trunk latents — the single
+representation `s` and the pair representation `z` — against the reward, rather than nudging
+coordinates. No model weights are trained. Available for `protenix`, `rf3` and `boltz1`.
+
+```bash
+pixi run -e protenix sampleworks-guidance \
+    --model protenix \
+    --guidance-type latent_opt \
+    --protein 1VME \
+    --structure 1vme.cif \
+    --density 1vme_1.80A.ccp4 \
+    --resolution 1.8 \
+    --ensemble-size 4 \
+    --which-latent pair \
+    --outer-steps 2
+```
+
+| Argument | Description | Default |
+|---|---|---|
+| `--which-latent` | Which latent to optimize: `single`, `pair`, or `both` | `pair` |
+| `--learning-rate` | Adam learning rate | `0.05` |
+| `--outer-steps` | Optimization rounds, fresh prior noise each | `2` |
+| `--anchor-weight` | Penalty on drift from the trunk baseline; `0` disables it | `0.0` |
+| `--max-grad-norm` | Per-latent gradient clip | `1.0` |
+| `--bond-length-weight` | Bond-length and steric-clash penalty; `0` disables it | `5e-5` |
+
+See [docs/IT_OPT_DESIGN.md](docs/IT_OPT_DESIGN.md) for the algorithm and the per-model gradient
+readiness table, and [docs/IT_OPT_TESTING.md](docs/IT_OPT_TESTING.md) for how to run and debug it.
 
 ### Rewards
 
