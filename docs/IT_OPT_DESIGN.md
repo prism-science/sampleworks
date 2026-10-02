@@ -96,7 +96,7 @@ that still carries a graph back to the latent leaves. `_GradEnablingScaler` is d
 
 ```python
 class _GradEnablingScaler(NoScalingScaler):
-    requires_gradients = True        # the only difference from NoScalingScaler
+    requires_gradients = True  # the only difference from NoScalingScaler
 ```
 
 It inherits the zero-guidance `scale()` unchanged; folding it back into `NoScalingScaler` is
