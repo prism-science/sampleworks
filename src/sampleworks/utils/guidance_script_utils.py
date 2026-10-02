@@ -578,7 +578,7 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
     if guidance_type == GuidanceType.PURE_GUIDANCE:
         logger.info("Initializing pure guidance")
 
-        # TODO: these should be fractions in the args directly
+        # TODO(#246): these should be fractions in the args directly
         guidance_t_start = args.guidance_start / num_steps if args.guidance_start > 0 else 0.0
         t_start = args.partial_diffusion_step / num_steps if args.partial_diffusion_step else 0.0
 
@@ -606,7 +606,7 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
     elif guidance_type == GuidanceType.FK_STEERING:
         logger.info("Initializing Feynman-Kac steering")
 
-        # TODO: same as above
+        # TODO(#246): same as above
         gs = args.guidance_start
         guidance_start_fraction = gs / num_steps if gs > 0 else 0.0
         pd = args.partial_diffusion_step
