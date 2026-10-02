@@ -45,7 +45,11 @@ class StepScalers(StrEnum):
 
 
 class TrajectoryScalers(StrEnum):
-    """Enum for all TrajectoryScalerProtocol implementations."""
+    """Enum for all TrajectoryScalerProtocol implementations.
+
+    A GuidanceType composes a TrajectoryScaler with StepScalers; the two are separate axes
+    (see #359).
+    """
 
     PURE_GUIDANCE = "pure_guidance"
     FK_STEERING = "fk_steering"

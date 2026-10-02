@@ -491,7 +491,7 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
 
         structure = annotate_structure_for_protenix(
             structure,
-            # Deferred to its own PR: affects every Protenix run, not just latent-opt.
+            # TODO(#404, #412): affects every Protenix run, not just latent-opt; own PR.
             # out_dir=str(Path(args.output_dir) / "protenix_input"),
             recycling_steps=recycling_steps,
             # Disable diffusion shared-vars cache for LATENT_OPT so gradients can

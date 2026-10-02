@@ -175,3 +175,9 @@ from the grid-search / save machinery.
 3. **Five proteins are excluded.** 6RP1, 7Z0E, 4OLE, 8Z76, 2I6H raise "No common atoms found"
    (chain/residue-naming mismatch). Fix with `scripts/patch_output_cif_files.py` (needs network for
    `rcsb.fetch`) or sequence-based atom matching.
+4. **The MSA representation `m` is out of reach as things stand.** In the AF2/OpenFold tradition you
+   could optimize `m`, but AF3-family models have no persistent MSA latent at the featurize→step
+   boundary: the MSA module writes only into `z`, and `s` is updated inside the Pairformer via
+   pair-biased attention, seeded from `s_inputs` rather than an MSA row. `m` is upstream of
+   featurize, rebuilt each recycle, and the trunk runs under `no_grad`, so reaching it would need
+   backprop through the trunk (ColabDesign/AfDesign territory).

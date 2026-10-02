@@ -4,10 +4,8 @@ Inference-time latent optimization (IT-opt) for sampleworks. This is the one doc
 understand the feature: **what it is, the as-built algorithm, the components and where they live in
 the code, per-model gradient readiness, and the design choices that make it correct.**
 
-Companions (read only if you need them):
-- [IT_OPT_TESTING.md](IT_OPT_TESTING.md) — how to run, debug, and verify it, plus the open problems.
-- [IT_OPT_REFERENCE_NOTES.md](developer_notes/IT_OPT_REFERENCE_NOTES.md) — deep dive on the external `it_opt/`
-  reference tree and its bug catalog (only relevant if you are re-porting from the reference).
+Companion (read only if you need it): [IT_OPT_TESTING.md](IT_OPT_TESTING.md) — how to run, debug,
+and verify it, plus the open problems.
 
 ---
 
@@ -129,6 +127,9 @@ All four models' conditioning is a `@dataclass(frozen=True, slots=True)`, swappe
 
 ## 6. Design choices and invariants
 
+"The reference" below is [it_opt](https://github.com/sai-advaith/it_opt), the code for
+[arXiv:2602.24007](https://arxiv.org/abs/2602.24007).
+
 **Kept from the reference (the algorithm):** `s`/`z` as the optimized variables with `s_inputs`
 frozen; one Adam step per diffusion step on the denoised `x̂₀`; latents persist across steps and
 rounds; an outer resample loop; an anchor to the trunk baseline; a final clean sampling pass.
@@ -154,16 +155,11 @@ than the reference's Frobenius norm (shape-agnostic, so `w_s`/`w_z` are comparab
 - **Optimization is not sampling.** An optimized `(s, z)` is a point estimate; reporting it as a
   single state collapses the Boltzmann/population weighting. If populations matter, sample the latent
   rather than optimizing it. Ensembles here come from fresh prior noise per member, not from a
-  posterior over latents.
+  posterior over latents. Sampling the latent instead is tracked in
+  [#419](https://github.com/prism-science/sampleworks/issues/419).
 - **On-manifold discipline.** Pushing `z` hard buys density fit with broken geometry; the anchor and
   `BondGeometryReward` are the counter-pressure. Efficacy must be judged on held-out fit against
   matched-compute baselines, not train-set loss (see [IT_OPT_TESTING.md](IT_OPT_TESTING.md)).
-- **`s`/`z` are the only post-trunk levers.** In the AF2/OpenFold tradition you could optimize the
-  MSA representation `m`, but AF3-family models have no persistent MSA latent at the featurize→step
-  boundary: the MSA module writes only into `z`, and `s` is updated inside the Pairformer via
-  pair-biased attention, seeded from `s_inputs` rather than an MSA row. `m` is upstream of featurize,
-  rebuilt each recycle, and the trunk runs under `no_grad`, so optimizing it would need backprop
-  through the trunk (ColabDesign/AfDesign territory) — out of scope.
 
 ## 7. Running it
 

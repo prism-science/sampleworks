@@ -276,6 +276,28 @@ class LatentOptimization:
             (``"s"``/``"z"`` for Boltz, ``"s_trunk"``/``"z_trunk"`` for
             Protenix/RF3).
         """
+        # Reject unusable settings here rather than at the CLI. An invalid value does not fail
+        # loudly downstream -- outer_steps <= 0 skips optimization entirely and still writes an
+        # ensemble, and a negative weight turns a penalty into a reward -- so both would read as a
+        # successful run. Both paths that build this scaler (GuidanceConfig.from_cli and the grid
+        # search's populate_config_for_guidance_type) converge on this constructor.
+        for name, value in (
+            ("ensemble_size", ensemble_size),
+            ("num_steps", num_steps),
+            ("outer_steps", outer_steps),
+            ("learning_rate", learning_rate),
+            ("max_grad_norm", max_grad_norm),
+        ):
+            if value <= 0:
+                raise ValueError(f"LatentOptimization requires {name} > 0, got {value!r}.")
+        for name, value in (
+            ("anchor_weight_single", anchor_weight_single),
+            ("anchor_weight_pair", anchor_weight_pair),
+            ("bond_length_weight", bond_length_weight),
+        ):
+            if value < 0:
+                raise ValueError(f"LatentOptimization requires {name} >= 0, got {value!r}.")
+
         logger.info(
             f"Initialized LatentOptimization (IT-opt): outer_steps={outer_steps}, "
             f"num_steps={num_steps}, lr={learning_rate}, "
@@ -571,10 +593,12 @@ class LatentOptimization:
         baselines: Sequence[Tensor],
         bond_geometry: BondGeometryReward | None = None,
     ) -> float:
-        """Score the denoised structure, backprop to the latents, take one Adam step.
+        """Score the denoised structure, backprop to the latents, take one optimizer step.
 
         ``denoised`` is the sampler's aligned prediction and carries a graph back to
-        the latent leaves. When ``bond_geometry`` is supplied, its bond-length/clash
+        the latent leaves. Any ``torch.optim.Optimizer`` works here; the wiring passes
+        Adam because that is the reference's choice (Maddipatla et al.,
+        arXiv:2602.24007). When ``bond_geometry`` is supplied, its bond-length/clash
         penalty is added to the loss alongside the anchor. Each latent is
         gradient-clipped **separately** so ``s``'s step is not scaled down by ``z``'s
         much larger gradient. Returns the data-only reward for logging.
@@ -609,6 +633,7 @@ class LatentOptimization:
         optimizer.step()
         return float(data_loss.detach())
 
+    # TODO(#433): this and _optimize_one_round repeat PureGuidance's/FKSteering's schedule walk.
     def _sample_with_frozen_latents(
         self,
         *,

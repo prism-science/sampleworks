@@ -20,6 +20,13 @@ _SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "patch_output_c
 
 @pytest.fixture(scope="module")
 def script():
+    """Load ``scripts/patch_output_cif_files.py`` as an importable module.
+
+    Returns
+    -------
+    ModuleType
+        The patching script, loaded once per test module.
+    """
     return load_script(_SCRIPT_PATH)
 
 
