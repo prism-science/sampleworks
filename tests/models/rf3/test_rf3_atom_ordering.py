@@ -133,18 +133,16 @@ class TestRF3AtomOrdering:
 
         # Check that unresolved atoms (still exist) in .coord
         unresolved_coord_mask = (
-            np.any(np.isnan(cond.model_atom_array.coord), axis=-1) or # >= 1 NaN coordinate
-            (cond.model_atom_array.occupancy <= 0.0) # 0 occupancy
+            np.any(np.isnan(cond.model_atom_array.coord), axis=-1)  # >= 1 NaN coordinate
+            or (cond.model_atom_array.occupancy <= 0.0)  # 0 occupancy
         )
-        assert unresolved_coord_mask.sum() > 0, (
-            "unresolved atoms in .coord have been modified"
-        )
+        assert unresolved_coord_mask.sum() > 0, "unresolved atoms in .coord have been modified"
 
         # Check .coord_to_be_noised no longer has any unresolved atoms
         cleaned_coords = cond.model_atom_array.coord_to_be_noised
         unresolved_coord_to_be_noised_mask = (
-            np.any(np.isnan(cleaned_coords), axis=-1) or # >= 1 NaN coordinate
-            (cleaned_coords <= 0.0) # 0 occupancy
+            np.any(np.isnan(cleaned_coords), axis=-1)  # >= 1 NaN coordinate
+            or (cleaned_coords <= 0.0)  # 0 occupancy
         )
         assert not np.isnan(unresolved_coord_to_be_noised_mask).any(), (
             "model.coord_to_be_noised has unplaced unresolved atoms"

@@ -12,7 +12,6 @@ from atomworks.ml.transforms.featurize_unresolved_residues import (
     place_unresolved_token_atoms_on_token_representative_atom,
     place_unresolved_token_on_closest_resolved_token_in_sequence,
 )
-from atomworks.ml.transforms.atom_array import copy_annotation
 from biotite.structure import AtomArray, AtomArrayStack
 from jaxtyping import Float
 from loguru import logger
@@ -456,8 +455,8 @@ class RF3Wrapper:
         # the chain's sequence (defaulting to left token when both are present).
 
         unresolved_coord_mask = (
-            np.any(np.isnan(model_aa.coord), axis=-1) or # >= 1 NaN coordinate
-            (model_aa.occupancy <= 0.0) # 0 occupancy
+            np.any(np.isnan(model_aa.coord), axis=-1)  # >= 1 NaN coordinate
+            or (model_aa.occupancy <= 0.0)  # 0 occupancy
         )
         if unresolved_coord_mask.any():
             # Place unresolved atoms on resolved atom in the same token,
