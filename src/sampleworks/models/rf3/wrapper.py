@@ -8,6 +8,10 @@ import numpy as np
 import torch
 from atomworks.enums import ChainType
 from atomworks.ml.samplers import LoadBalancedDistributedSampler
+from atomworks.ml.transforms.featurize_unresolved_residues import (
+    place_unresolved_token_atoms_on_token_representative_atom,
+    place_unresolved_token_on_closest_resolved_token_in_sequence,
+)
 from biotite.structure import AtomArray, AtomArrayStack
 from jaxtyping import Float
 from loguru import logger
@@ -440,18 +444,38 @@ class RF3Wrapper:
         # atomworks's add_missing_atoms adds unresolved atoms with
         # occupancy=0.0 and NaN coordinates when we get our atom array with
         # InferenceInput.from_atom_array. RF3 operates on these atoms (they're
-        # in atom_to_token_map), so initialize their coordinates with noise and
-        # set occupancy to 1.0 so they participate in guidance and don't get
-        # masked out in reward functions.
+        # in atom_to_token_map), so we need to place these atoms in the
+        # structure so they participate in guidance and don't get
+        # masked out in reward functions. We follow atomworks convention of placing
+        # an unresolved atom on (1) the representative atom for the token, or (2)
+        # the center atom for the token, or (3) the closest neighboring token in
+        # the chain's sequence (defaulting to left token when both are present).
+
+        # Copy over existing coords to coord_to_be_noised if category
+        # has not been instantiated, so that additional transforms
+        # added upstream will be retained. (Even if model has all
+        # resolved residues, we want to populate this annotation category for
+        # more consistent downstream operations).
+        if "coord_to_be_noised" not in model_aa.get_annotation_categories():
+            model_aa.set_annotation("coord_to_be_noised", model_aa.coord.copy())
+
         nan_coord_mask = np.any(np.isnan(model_aa.coord), axis=-1)
         if nan_coord_mask.any():
-            resolved_coords = model_aa.coord[~nan_coord_mask]
-            centroid = resolved_coords.mean(axis=0) if len(resolved_coords) > 0 else np.zeros(3)
+            # Place unresolved atoms on resolved atom in the same token,
+            # if possible.
+            model_aa = place_unresolved_token_atoms_on_token_representative_atom(
+                model_aa, annotation_to_update="coord_to_be_noised"
+            )
+
+            # For remaining unresolved atoms, place them on the
+            # closest token in the sequence.
+            model_aa = place_unresolved_token_on_closest_resolved_token_in_sequence(
+                model_aa,
+                annotation_to_update="coord_to_be_noised",
+                annotation_to_copy="coord_to_be_noised",
+            )
+
             n_nan = int(nan_coord_mask.sum())
-            noise = np.random.normal(loc=0.0, scale=1.0, size=(n_nan, 3)).astype(np.float32)
-            new_coords = model_aa.coord.copy()
-            new_coords[nan_coord_mask] = centroid + noise
-            model_aa.coord = new_coords
             logger.info(
                 f"Initialized {n_nan} unresolved atoms with noise "
                 f"(had NaN coordinates from add_missing_atoms)"
