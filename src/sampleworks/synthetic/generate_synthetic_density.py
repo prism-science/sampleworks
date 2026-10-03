@@ -4,7 +4,6 @@ import sys
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import ClassVar
 
 import torch
 from loguru import logger
@@ -14,6 +13,7 @@ from sampleworks.synthetic.synthetic_utils import (
     load_structure_for_synthetic_reward,
     resolve_parallel_jobs,
     validate_occupancy_values,
+    validate_structure_extension,
 )
 from sampleworks.utils.atom_array_utils import save_structure_to_cif
 from sampleworks.utils.density_utils import compute_density_from_atomarray
@@ -36,27 +36,13 @@ class BatchRow:
         Optional custom output filename for the density map
     """
 
-    VALID_EXTENSIONS: ClassVar[frozenset[str]] = frozenset({".cif", ".mmcif"})
-    LEGACY_EXTENSIONS: ClassVar[frozenset[str]] = frozenset({".pdb", ".ent"})
-
     filename: str
     selection: str | None = None
     occupancy_values: list[float] = field(default_factory=list)
     mapfile: str | None = None
 
     def __post_init__(self) -> None:
-        ext = Path(self.filename).suffix.lower()
-        all_supported = self.VALID_EXTENSIONS | self.LEGACY_EXTENSIONS
-        if ext not in all_supported:
-            raise ValueError(
-                f"Invalid file extension '{ext}' for '{self.filename}'. "
-                f"Expected one of: {', '.join(sorted(all_supported))}"
-            )
-        if ext in self.LEGACY_EXTENSIONS:
-            logger.warning(
-                f"'{ext}' is a legacy PDB format and support may be removed in a future version. "
-                "Prefer .cif or .mmcif (mmCIF format)."
-            )
+        validate_structure_extension(self.filename)
         validate_occupancy_values(self.occupancy_values)
 
     @classmethod

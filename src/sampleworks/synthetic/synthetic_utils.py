@@ -31,6 +31,9 @@ from sampleworks.utils.atom_array_utils import (
 # How many explicit duplicates to show in an error message when converting atomarray to gemmi.
 MAX_REPORTED_DUPLICATES = 3
 
+VALID_EXTENSIONS = frozenset({".cif", ".mmcif"})
+LEGACY_EXTENSIONS = frozenset({".pdb", ".ent"})
+
 
 def resolve_parallel_jobs(device: torch.device | str, n_jobs: int) -> int:
     """Choose a safe job count for synthetic calculations on a device.
@@ -116,6 +119,33 @@ def resolve_mtz_column(
             "pass an explicit column to disambiguate."
         )
     return candidates[0]
+
+
+def validate_structure_extension(filename: Path | str) -> None:
+    """Check that a structure file has a supported extension, warning on legacy PDB.
+
+    Parameters
+    ----------
+    filename
+        Structure file name or path.
+
+    Raises
+    ------
+    ValueError
+        If the extension is not a supported mmCIF or PDB extension.
+    """
+    ext = Path(filename).suffix.lower()
+    all_supported = VALID_EXTENSIONS | LEGACY_EXTENSIONS
+    if ext not in all_supported:
+        raise ValueError(
+            f"Invalid file extension '{ext}' for '{filename}'. "
+            f"Expected one of: {', '.join(sorted(all_supported))}"
+        )
+    if ext in LEGACY_EXTENSIONS:
+        logger.warning(
+            f"'{ext}' is a legacy PDB format and support may be removed in a future version. "
+            "Prefer .cif or .mmcif (mmCIF format)."
+        )
 
 
 def validate_occupancy_values(occupancy_values: list[float]) -> None:
