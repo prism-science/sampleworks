@@ -31,6 +31,9 @@ from sampleworks.utils.atom_array_utils import (
 # How many explicit duplicates to show in an error message when converting atomarray to gemmi.
 MAX_REPORTED_DUPLICATES = 3
 
+VALID_EXTENSIONS = frozenset({".cif", ".mmcif"})
+LEGACY_EXTENSIONS = frozenset({".pdb", ".ent"})
+
 
 def resolve_parallel_jobs(device: torch.device | str, n_jobs: int) -> int:
     """Choose a safe job count for synthetic calculations on a device.
@@ -116,6 +119,33 @@ def resolve_mtz_column(
             "pass an explicit column to disambiguate."
         )
     return candidates[0]
+
+
+def validate_structure_extension(filename: Path | str) -> None:
+    """Check that a structure file has a supported extension, warning on legacy PDB.
+
+    Parameters
+    ----------
+    filename
+        Structure file name or path.
+
+    Raises
+    ------
+    ValueError
+        If the extension is not a supported mmCIF or PDB extension.
+    """
+    ext = Path(filename).suffix.lower()
+    all_supported = VALID_EXTENSIONS | LEGACY_EXTENSIONS
+    if ext not in all_supported:
+        raise ValueError(
+            f"Invalid file extension '{ext}' for '{filename}'. "
+            f"Expected one of: {', '.join(sorted(all_supported))}"
+        )
+    if ext in LEGACY_EXTENSIONS:
+        logger.warning(
+            f"'{ext}' is a legacy PDB format and support may be removed in a future version. "
+            "Prefer .cif or .mmcif (mmCIF format)."
+        )
 
 
 def validate_occupancy_values(occupancy_values: list[float]) -> None:
@@ -211,13 +241,14 @@ def load_structure_for_synthetic_reward(
     strip_waters: bool = False,
     strip_ligands: bool = False,
     selection: str | None = None,
+    b_factor: float | None = None,
 ) -> AtomArray | None:
     """Load and prepare a structure for synthetic reward generation.
 
     Handles loading, optional atom selection, stripping of unwanted atom classes,
-    and occupancy assignment. Returns None on load or selection errors (logged);
-    raises ValueError on invalid occupancy_mode or occupancy assignment errors (logged
-    before raising).
+    occupancy assignment, and removal of zero-occupancy atoms. Returns None on load
+    or selection errors (logged); raises ValueError on invalid occupancy_mode or
+    occupancy assignment errors (logged before raising).
 
     Parameters
     ----------
@@ -237,6 +268,9 @@ def load_structure_for_synthetic_reward(
         If True, keep only polymer amino-acid atoms
     selection
         Optional atom selection string. If None, the full structure is used.
+    b_factor
+        Optional isotropic B-factor assigned to every retained atom. If None,
+        preserve the values from the input structure.
 
     Returns
     -------
@@ -292,6 +326,18 @@ def load_structure_for_synthetic_reward(
     else:
         logger.error(f"Invalid occupancy mode '{occupancy_mode}' for {structure_path}")
         raise ValueError(f"Invalid occupancy mode '{occupancy_mode}'")
+
+    zero_occupancy = atom_array.occupancy == 0.0
+    if zero_occupancy.any():
+        logger.info(f"Removed {zero_occupancy.sum()} zero-occupancy atoms")
+        atom_array = atom_array[~zero_occupancy]
+        assert isinstance(atom_array, AtomArray)
+
+    if b_factor is not None:
+        if not math.isfinite(b_factor) or b_factor < 0.0:
+            raise ValueError(f"B-factor must be finite and non-negative, got {b_factor}")
+        atom_array.b_factor = np.full(len(atom_array), b_factor, dtype=np.float32)
+        logger.info(f"Assigned B-factor {b_factor:g} to {len(atom_array)} atoms")
 
     return atom_array
 
@@ -364,9 +410,9 @@ def _check_no_repeated_atoms(atom_array: AtomArray, altlocs: list[str]) -> None:
     gemmi (0.6.7) identifies an atom within a residue by that pair (seqid.hpp:124-141),
     so a repeat yields two indistinguishable atoms.
 
-    Keyed on the full ``(chain_id, res_id, atom_name, altloc)`` for informative error
-    message. Assumes that each ``(chain_id, res_id)`` occupies exactly one span, which
-    should have been established by ``_prepare_residue_spans``.
+    Keyed on the full ``(chain_id, res_id, ins_code, atom_name, altloc)`` for an
+    informative error message. Assumes each residue occupies exactly one span,
+    which should have been established by ``_prepare_residue_spans``.
 
     Parameters
     ----------
@@ -380,10 +426,16 @@ def _check_no_repeated_atoms(atom_array: AtomArray, altlocs: list[str]) -> None:
     ValueError
         If any ``(atom_name, altloc)`` pair repeats within a residue.
     """
+    ins_codes = (
+        atom_array.ins_code.tolist()
+        if "ins_code" in atom_array.get_annotation_categories()
+        else [""] * len(atom_array)
+    )
     _check_keys_unique(
         {
             "chain_id": atom_array.chain_id.tolist(),
             "res_id": atom_array.res_id.tolist(),
+            "ins_code": ins_codes,
             "atom_name": atom_array.atom_name.tolist(),
             "altloc": altlocs,
         },
@@ -399,9 +451,8 @@ def _prepare_residue_spans(atom_array: AtomArray) -> Iterator[tuple[int, int]]:
     the chain loop in ``atomarray_to_gemmi`` assumes contiguous chains and residues.
     This function checks both assumptions and raises an error if they are violated.
 
-    Residues are keyed on ``(chain_id, res_id)``, the only fields identifying a residue
-    that ``_build_gemmi_residue`` writes. ``ins_code`` is not among them until issue #306
-    is resolved, so a span it splits off is reported as a duplicate rather than kept.
+    Residues are keyed on ``(chain_id, res_id, ins_code)``, matching the fields
+    ``_build_gemmi_residue`` writes into Gemmi's hierarchy.
 
     Parameters
     ----------
@@ -412,7 +463,8 @@ def _prepare_residue_spans(atom_array: AtomArray) -> Iterator[tuple[int, int]]:
     -------
     Iterator of tuple of int
         One ``(start_idx, stop_idx)`` per residue, covering the atoms
-        ``atom_array[start_idx:stop_idx]`` that share the same ``(chain_id, res_id)``.
+        ``atom_array[start_idx:stop_idx]`` that share the same
+        ``(chain_id, res_id, ins_code)``.
 
     Raises
     ------
@@ -427,10 +479,15 @@ def _prepare_residue_spans(atom_array: AtomArray) -> Iterator[tuple[int, int]]:
 
     residue_span_idx = get_residue_starts(atom_array, add_exclusive_stop=True)
     span_start_idx = residue_span_idx[:-1]  # (n_residues,)
+    if "ins_code" in atom_array.get_annotation_categories():
+        span_ins_codes = atom_array.ins_code[span_start_idx].tolist()
+    else:
+        span_ins_codes = [""] * len(span_start_idx)
     _check_keys_unique(
         {
             "chain_id": chain_id[span_start_idx].tolist(),
             "res_id": atom_array.res_id[span_start_idx].tolist(),
+            "ins_code": span_ins_codes,
         },
         level="residue",
     )
@@ -475,9 +532,14 @@ def _build_gemmi_residue(
         Residue populated with the atoms ``atom_array[start_idx:stop_idx]``.
     """
     res_id = int(atom_array.res_id[start_idx])
+    ins_code = (
+        atom_array.ins_code[start_idx]
+        if "ins_code" in atom_array.get_annotation_categories()
+        else ""
+    )
     residue = gemmi.Residue()
     residue.name = atom_array.res_name[start_idx]
-    residue.seqid = gemmi.SeqId(str(res_id))  # writes auth_seq_id
+    residue.seqid = gemmi.SeqId(res_id, ins_code or " ")  # writes auth_seq_id and insertion code
     residue.label_seq = res_id  # writes label_seq_id, important for saving mmCIF
     # writes label_asym_id; nothing else assigns it, since atomarray_to_gemmi
     # deliberately skips setup_entities(). Must stay single-char -- SFcalculator's
