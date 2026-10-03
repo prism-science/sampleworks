@@ -15,7 +15,10 @@ import pandas as pd
 from loguru import logger
 from sampleworks.eval.constants import OCCUPANCY_LEVELS
 from sampleworks.eval.eval_dataclasses import ProteinConfig, Trial, TrialList
-from sampleworks.eval.occupancy_utils import extract_protein_and_occupancy
+from sampleworks.eval.occupancy_utils import (
+    extract_protein_and_occupancy,
+    rcsb_id_from_protein_name,
+)
 from sampleworks.utils.guidance_constants import StructurePredictor
 
 
@@ -276,6 +279,9 @@ def scan_grid_search_results(
         method, path_model = get_method_and_model_name(model_dir.name)
         protein_value = _metadata_value(metadata, "protein", path_protein)
         protein = str(protein_value) if protein_value is not None else None
+        if protein is not None:
+            # Older job_metadata.json files record the full protein name, e.g. 3T94_1.0occA.
+            protein = rcsb_id_from_protein_name(protein) or protein
         altloc_occupancies = _metadata_occupancies(metadata, path_altloc_occupancies)
         model_value = _metadata_value(metadata, "model_name", path_model, aliases=("model",))
         model = str(model_value)

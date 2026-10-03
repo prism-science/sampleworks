@@ -1,5 +1,15 @@
 import re
 
+from sampleworks.utils.cif_utils import RCSB_ID_PATTERN
+
+
+# `{value}occ{label}` altloc occupancy token, e.g. `0.25occA`, as written by occupancy_to_str.
+OCCUPANCY_TOKEN_PATTERN = re.compile(r"(\d+\.?\d*)(?i:occ)([A-Za-z])")
+# Grid-search protein name: an RCSB id followed only by occupancy tokens, e.g. `1VME_0.5occA`.
+PROTEIN_NAME_PATTERN = re.compile(
+    rf"(?P<rcsb_id>{RCSB_ID_PATTERN.pattern})(?:_{OCCUPANCY_TOKEN_PATTERN.pattern})*"
+)
+
 
 def extract_protein_and_occupancy(dir_name: str) -> tuple[str, dict[str, float]]:
     """Extract protein name and altloc occupancies from a directory name.
@@ -34,11 +44,43 @@ def extract_protein_and_occupancy(dir_name: str) -> tuple[str, dict[str, float]]
     protein = dir_name.split("_")[0].lower()
 
     altloc_occupancies: dict[str, float] = {}
-    for match in re.finditer(r"(\d+\.?\d*)occ([A-Za-z])", dir_name, re.IGNORECASE):
+    for match in OCCUPANCY_TOKEN_PATTERN.finditer(dir_name):
         label = match.group(2).upper()
         altloc_occupancies[label] = float(match.group(1))
 
     return protein, altloc_occupancies
+
+
+def rcsb_id_from_protein_name(protein_name: str) -> str | None:
+    """Extract the RCSB id from a grid-search protein name.
+
+    The whole name must be an RCSB id followed only by occupancy tokens, so names such as
+    ``4hhb_final`` or ``1abc_pdb_1000abcd`` return None rather than a wrong entry. Unlike
+    ``extract_protein_and_occupancy``, the letter case of the id is kept.
+
+    Parameters
+    ----------
+    protein_name : str
+        Protein name from a ``--proteins`` CSV or a trial directory, e.g.
+        ``"1VME_0.25occA_0.75occB"``.
+
+    Returns
+    -------
+    str | None
+        The legacy (``"1VME"``) or extended (``"pdb_00001vme"``) RCSB id, or None when the
+        name is not of that form.
+
+    Examples
+    --------
+    >>> rcsb_id_from_protein_name('3T94_1.0occA')
+    '3T94'
+    >>> rcsb_id_from_protein_name('pdb_00003t94_0.5occA_0.5occB')
+    'pdb_00003t94'
+    >>> rcsb_id_from_protein_name('lysozyme_1.0occA') is None
+    True
+    """
+    match = PROTEIN_NAME_PATTERN.fullmatch(protein_name)
+    return match["rcsb_id"] if match else None
 
 
 def occupancy_to_str(**altloc_occupancies: float) -> str:
