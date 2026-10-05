@@ -5,12 +5,13 @@ from typing import cast
 
 import numpy as np
 import pytest
-from biotite.structure import AtomArray, AtomArrayStack
+from biotite.structure import AtomArray, AtomArrayStack, stack
 from sampleworks.eval.eval_dataclasses import ProteinConfig
 from sampleworks.utils.atom_array_utils import (
     apply_selection,
     map_altlocs_to_stack,
     parse_selection_string,
+    save_structure_to_cif,
 )
 from sampleworks.utils.structure_utils import (
     _closest_canonical_amino_acid,
@@ -330,6 +331,23 @@ class TestGetReferenceAtomArrayStack:
         for i in range(stacked.stack_depth()):
             frame_atom_names = list(cast(np.ndarray, stacked[i].atom_name))
             assert len(frame_atom_names) == len(set(frame_atom_names))  # unique atom identities
+
+    def test_keeps_every_model(self, tmp_path, basic_atom_array_multichain):
+        """A multi-model ensemble reference keeps one frame per model."""
+        ensemble = stack([basic_atom_array_multichain, basic_atom_array_multichain])
+        save_structure_to_cif(ensemble, tmp_path / "0.5occA_0.5occB.cif")
+        config = ProteinConfig(
+            protein="test",
+            base_map_dir=tmp_path,
+            selection=["chain A"],
+            resolution=2.0,
+            map_pattern="{occ_str}.ccp4",
+            structure_pattern="{occ_str}.cif",
+        )
+
+        _, struct = get_reference_atomarraystack(config, {"A": 0.5, "B": 0.5})
+        assert struct is not None
+        assert struct.stack_depth() == 2
 
 
 class TestGetReferenceStructureCoords:

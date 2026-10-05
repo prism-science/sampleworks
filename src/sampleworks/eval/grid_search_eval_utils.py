@@ -11,11 +11,14 @@ import warnings
 from importlib.resources import files
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+from biotite.structure import AtomArray, AtomArrayStack
 from loguru import logger
 from sampleworks.eval.constants import OCCUPANCY_LEVELS
 from sampleworks.eval.eval_dataclasses import ProteinConfig, Trial, TrialList
 from sampleworks.eval.occupancy_utils import extract_protein_and_occupancy
+from sampleworks.utils.atom_array_utils import BLANK_ALTLOC_IDS, map_altlocs_to_stack
 from sampleworks.utils.guidance_constants import StructurePredictor
 
 
@@ -352,6 +355,41 @@ def scan_grid_search_results(
             trials.extend(grid_search_trials)
 
     return trials
+
+
+def build_reference_frames(reference: AtomArray | AtomArrayStack, selection: str) -> AtomArrayStack:
+    """Split a reference into one frame per conformer, keeping anchor atoms plus the selection.
+
+    Anchors are the blank-altloc atoms, which every conformer shares. Each frame holds the
+    anchors plus that conformer's copy of the selection, so a prediction aligned to it is
+    superimposed on the shared atoms and the segment of interest together.
+
+    Two reference layouts are supported:
+
+    - A single-model reference with altlocs (e.g. a deposited structure) is split with
+      ``map_altlocs_to_stack``, one frame per altloc in sorted altloc ID order.
+    - A multi-model ensemble reference already holds one model per conformer, with one
+      ``altloc_id`` annotation shared by all models: blank on anchor atoms and a non-blank
+      label (e.g. ``"X"``) elsewhere. Its frames are its models, in file order, masked to
+      the anchors plus the selection. Each frame keeps its own copy of the anchors.
+
+    Parameters
+    ----------
+    reference
+        Reference structure, as returned by ``get_reference_atomarraystack``.
+    selection
+        Atomworks-style selection of the scored region.
+
+    Returns
+    -------
+    AtomArrayStack
+        Reference stack with one frame per conformer.
+    """
+    if isinstance(reference, AtomArrayStack) and reference.stack_depth() > 1:
+        anchors = np.isin(reference.altloc_id, list(BLANK_ALTLOC_IDS))
+        return reference[:, anchors | reference.mask(selection)]
+    stack, _ = map_altlocs_to_stack(reference, selection=selection, return_full_array=True)
+    return stack
 
 
 def translate_selection(selection: str) -> str:

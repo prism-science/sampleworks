@@ -29,6 +29,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+from biotite.structure import AtomArrayStack
 
 # Import local modules for density calculation
 from joblib import delayed, Parallel
@@ -140,9 +141,12 @@ def process_group(
             raise ValueError(
                 f"Could not find reference structure for occupancy {trials[0].altloc_occupancies}"
             )
-        # parse_structure() returns only the first altloc.
+        # parse_structure() returns only the first altloc. A multi-model ensemble reference
+        # holds one conformer per model; keep the first, the same conformer.
         ref_structure = parse_structure(ref_path)
         ref_atom_array = get_asym_unit_from_structure(ref_structure)
+        if isinstance(ref_atom_array, AtomArrayStack):
+            ref_atom_array = ref_atom_array[:1]
         ref_atom_array = remove_atoms_with_any_nan_coords(ref_atom_array)
     except (FileNotFoundError, OSError, ValueError, RuntimeError, AttributeError, TypeError) as e:
         logger.error(f"ERROR setting up group {protein}/{trials[0].altloc_occupancies}: {e}")
