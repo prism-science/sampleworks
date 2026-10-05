@@ -22,12 +22,12 @@ from joblib import delayed, Parallel
 from loguru import logger
 from sampleworks.eval.eval_dataclasses import ProteinConfig, Trial
 from sampleworks.eval.grid_search_eval_utils import (
+    build_reference_frames,
     parse_eval_args,
     setup_evaluation_parameters,
     translate_selection,
 )
 from sampleworks.metrics.rmsd import AllAtomRMSD
-from sampleworks.utils.atom_array_utils import map_altlocs_to_stack
 from sampleworks.utils.structure_utils import get_reference_atomarraystack
 
 
@@ -105,8 +105,9 @@ def process_trial_with_selection(
     protein_config
         Protein configuration; carried through for context only.
     reference_atom_array_stack
-        Reference AtomArrayStack with one frame per altloc, ordered by sorted
-        altloc ID. ``map_altlocs_to_stack`` produces this ordering.
+        Reference AtomArrayStack with one frame per conformer (anchor atoms plus the
+        selection), as ``build_reference_frames`` produces: sorted altloc ID order for a
+        single-model reference, model order for a multi-model ensemble reference.
     selection_string
         Pymol-style or atomworks-style selection string from the protein
         configs CSV.
@@ -120,8 +121,7 @@ def process_trial_with_selection(
     -----
     Extending to >2 altlocs (e.g. A/B/C) will require generalizing the output
     columns: like the LDDT eval script, the current schema is hard coded to the canonical A/B case
-    and the row order produced by ``map_altlocs_to_stack`` (alphabetical altloc
-    ID).
+    and the frame order produced by ``build_reference_frames``.
     """
     logger.debug(f"Evaluating selection {selection_string} for protein {protein_config.protein}")
     result: dict[str, str | float | list[float]] = trial.__dict__.copy()
@@ -167,10 +167,8 @@ def main(args: argparse.Namespace):
                     f"Loaded ref structure for {protein_key} "
                     f"and occupancies {altloc_occ}: {ref_path}"
                 )
-                reference_protein_stack, _ = map_altlocs_to_stack(
-                    reference_proteins,
-                    selection=translate_selection(sel),
-                    return_full_array=True,
+                reference_protein_stack = build_reference_frames(
+                    reference_proteins, translate_selection(sel)
                 )
                 if (protein_key, occ_key) not in reference_atom_arrays:
                     reference_atom_arrays[(protein_key, occ_key)] = {}
