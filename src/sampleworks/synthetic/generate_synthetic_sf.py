@@ -376,7 +376,7 @@ def _process_single_row(
         protein set is written. One set contains F{label}/SIGF{label}/PHIF{label}.
     save_structure
         If True, save the processed structure (after selection and occupancy assignment)
-        as mmCIF to output_dir. Unit cell and space group are preserved. Default is False.
+        as mmCIF beside the MTZ. Unit cell and space group are preserved. Default is False.
     b_factor
         Optional isotropic B-factor assigned to every retained atom.
     """
@@ -412,9 +412,10 @@ def _process_single_row(
         )
         return
 
+    output_path = output_dir / (row.mtzfile or f"{structure_path.stem}_{resolution:.2f}A.mtz")
     if save_structure:
         try:
-            write_sf_input_structure(gemmi_structure, structure_path, output_dir)
+            write_sf_input_structure(gemmi_structure, structure_path, output_path.parent)
         except Exception as e:
             logger.error(
                 f"Failed to save structure for {row.filename} ({type(e).__name__}): {e}\n"
@@ -448,8 +449,6 @@ def _process_single_row(
         )
         return
 
-    # Output MTZ file
-    output_path = output_dir / (row.mtzfile or f"{structure_path.stem}_{resolution:.2f}A.mtz")
     try:
         process_amplitudes_to_dataset(
             sfc,
