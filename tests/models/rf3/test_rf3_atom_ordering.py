@@ -144,8 +144,9 @@ class TestRF3UnresolvedAtom:
         # Check .coord_to_be_noised no longer has any unresolved atoms
         cleaned_coords = cond.model_atom_array.coord_to_be_noised
         unresolved_coord_to_be_noised_mask = (
-            (np.isnan(cleaned_coords))  # >= 1 NaN coordinate
-            | (cleaned_coords <= 0.0)  # 0 occupancy
+            (np.any(np.isnan(cleaned_coords), axis=-1))  # >= 1 NaN coordinate
+            | (np.any(cleaned_coords <= 0.0, axis=-1))  # since nan coords can be imputed as -1
+            | (cond.model_atom_array.occupancy <= 0.0)  # 0 occupancy
         )
         assert np.sum(unresolved_coord_to_be_noised_mask) <= 0, (
             "model.coord_to_be_noised has unplaced unresolved atoms"
