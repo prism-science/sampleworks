@@ -9,9 +9,15 @@ Even though they can be trivially merged back as one structure where all atoms h
 altlocs, such a structure easily leads to OOM.
 
 This script computes Fprotein from one model at a time to reduce memory usage, and then
-sums Fprotein. Every model must have the same atoms in the same order. The occupancy each
-model contributes is set here. Bulk solvent is currently excluded; it will be added in a
-future PR.
+sums Fprotein weighted by each model's population. Every model must have the same atoms in
+the same order.
+
+Bulk solvent is optional (``--bulk-solvent``), with the same modes as the structure-factor
+reward. Both masks are built from Fprotein rather than from atoms, so neither needs a merged
+structure: ``combined`` masks the population-weighted Fprotein sum (one mask from the
+ensemble density), and ``per_conformer`` masks each model's Fprotein separately and takes
+the population-weighted mean of those masks' structure factors. Either mode adds an Ftotal
+set (default, unrefined SFcalculator scales) beside Fprotein in the MTZ.
 
 The command-line interface mirrors ``generate_synthetic_sf.py``, including CSV batch mode,
 with ``--occupancy-values`` (or the ``occupancy_values`` CSV column) giving one population
@@ -49,7 +55,11 @@ from sampleworks.synthetic.synthetic_utils import (
 from sampleworks.utils.torch_utils import try_gpu
 
 
-def compute_ensemble_fprotein(
+# Same modes as the structure-factor reward's ``bulk_solvent`` option.
+BULK_SOLVENT_MODES = ("off", "combined", "per_conformer")
+
+
+def compute_ensemble_structure_factors(
     structure_path: Path,
     occupancies: list[float],
     cell: gemmi.UnitCell,
@@ -63,8 +73,9 @@ def compute_ensemble_fprotein(
     selection: str | None = None,
     b_factor: float | None = None,
     save_structure_dir: Path | None = None,
+    bulk_solvent: str = "off",
 ) -> SFcalculator:
-    """Sum each model's Fprotein onto one reflection list.
+    """Sum each model's Fprotein onto one reflection list, optionally adding bulk solvent.
 
     Parameters
     ----------
@@ -95,27 +106,48 @@ def compute_ensemble_fprotein(
     save_structure_dir
         Optional directory in which to save the processed ensemble as mmCIF, one model
         per conformer at occupancy 1.0 so each model is a standalone structure.
+    bulk_solvent
+        ``"off"`` (Fprotein only), ``"combined"`` (one mask from the population-weighted
+        Fprotein sum), or ``"per_conformer"`` (population-weighted mean of per-model
+        masks).
 
     Returns
     -------
     SFcalculator
-        The last model's sfcalculator, carrying the ensemble sum in ``Fprotein_asu``
-        and a zero ``Fmask_asu``, ready for ``process_amplitudes_to_dataset``.
+        The last model's sfcalculator, carrying the ensemble sum in ``Fprotein_asu``,
+        the solvent in ``Fmask_asu`` (zero when ``bulk_solvent="off"``), and, unless
+        ``"off"``, ``Ftotal_asu`` at default scales. Ready for
+        ``process_amplitudes_to_dataset``.
 
     Raises
     ------
     ValueError
-        If a model cannot be loaded or the models do not land on the same reflection list.
+        If a model cannot be loaded, the models do not land on the same reflection list,
+        or ``bulk_solvent`` is not a known mode.
 
     Notes
     -----
     Only one model's scattering table is alive at a time; each is released before the
-    next is built, which is the whole point of summing rather than merging.
+    next is built. Each model's Fprotein is computed at occupancy 1.0 and weighted by
+    its population afterwards.
+
+    The solvent fraction is estimated from model 1's atom positions, as the
+    structure-factor reward estimates it from the guidance reference, which is model 1
+    of a multi-model input. ``per_conformer`` goes through
+    ``SFcalculator.calc_fsolvent_batch``, the path the structure-factor reward uses, so
+    it inherits that path's batch behavior:
+    the density is normalized over the whole partition of (at most 10) models and the
+    solvent cutoff comes from the partition's first model. Unlike the reward, which
+    weights every conformer's mask by ``1/batch_size``, the masks here are weighted by
+    population; the two agree for uniform populations.
     """
-    total = None  # [n_hkl] complex ASU amplitudes accumulated over models
+    if bulk_solvent not in BULK_SOLVENT_MODES:
+        raise ValueError(f"bulk_solvent must be one of {BULK_SOLVENT_MODES}, got {bulk_solvent!r}")
+    model_fproteins = []  # one [n_hkl] complex Fprotein_asu per model, at occupancy 1.0
     sfcalculator = None
     reference_hkl = None  # [n_hkl, 3] ASU Miller indices every model must land on
     saved_structure = None
+    reference_solventpct = None  # solvent fraction of model 1, estimated from its atoms
     for model, occupancy in enumerate(occupancies):
         sfcalculator = None  # release the previous model's scattering table first
         torch.cuda.empty_cache()
@@ -132,17 +164,16 @@ def compute_ensemble_fprotein(
         )
         if atom_array is None:
             raise ValueError(f"Failed to load model {model + 1} of {structure_path}")
+        # Each model stands alone at full occupancy; its population lives in ``occupancies``.
+        atom_array.occupancy[:] = 1.0
         if save_structure_dir is not None:
-            # A saved model stands alone; its population lives in ``occupancies``.
-            atom_array.occupancy[:] = 1.0
             conformer = atomarray_to_gemmi(atom_array, cell, space_group)
             if saved_structure is None:
                 saved_structure = conformer
             else:
                 conformer[0].name = str(model + 1)
                 saved_structure.add_model(conformer[0])
-        atom_array.occupancy[:] = occupancy
-        logger.info(f"Model {model + 1}: {len(atom_array)} atoms at occupancy {occupancy:g}")
+        logger.info(f"Model {model + 1}: {len(atom_array)} atoms at population {occupancy:g}")
         gemmi_structure = atomarray_to_gemmi(atom_array, cell, space_group)
         sfcalculator = build_sfcalculator(
             gemmi_structure, resolution, scattering_factor_mode, device
@@ -154,15 +185,33 @@ def compute_ensemble_fprotein(
                 f"Model {model + 1} of {structure_path} produced a different reflection "
                 "list than model 1; the models cannot be summed."
             )
+        if model == 0 and bulk_solvent != "off":
+            sfcalculator.inspect_data()
+            reference_solventpct = sfcalculator.solventpct
         sfcalculator.calc_fprotein()
-        total = sfcalculator.Fprotein_asu if total is None else total + sfcalculator.Fprotein_asu
+        model_fproteins.append(sfcalculator.Fprotein_asu)
 
     if save_structure_dir is not None and saved_structure is not None:
         write_sf_input_structure(saved_structure, structure_path, save_structure_dir)
     # The loop always runs: _process_single_row requires one occupancy per model.
-    assert sfcalculator is not None and total is not None
-    sfcalculator.Fprotein_asu = total
-    sfcalculator.Fmask_asu = torch.zeros_like(total)
+    assert sfcalculator is not None
+    populations = torch.tensor(occupancies, device=sfcalculator.device)[:, None]  # [n_models, 1]
+    fprotein_batch = torch.stack(model_fproteins)  # [n_models, n_hkl] complex
+    sfcalculator.Fprotein_asu = (populations * fprotein_batch).sum(dim=0)
+    if bulk_solvent == "off":
+        sfcalculator.Fmask_asu = torch.zeros_like(sfcalculator.Fprotein_asu)
+        return sfcalculator
+
+    sfcalculator.inspect_data()  # grid size, from the shared reflection list
+    sfcalculator.solventpct = reference_solventpct
+    if bulk_solvent == "combined":
+        sfcalculator.calc_fsolvent()  # sets Fmask_asu from the summed Fprotein_asu
+    else:
+        sfcalculator.Fprotein_asu_batch = fprotein_batch
+        fmask_batch = sfcalculator.calc_fsolvent_batch(Return=True)  # [n_models, n_hkl] complex
+        sfcalculator.Fmask_asu = (populations * fmask_batch).sum(dim=0)
+    sfcalculator.init_scales(requires_grad=False)
+    sfcalculator.calc_ftotal()  # sets Ftotal_asu
     return sfcalculator
 
 
@@ -180,8 +229,9 @@ def _process_single_row(
     strip_ligands: bool = False,
     save_structure: bool = False,
     b_factor: float | None = None,
+    bulk_solvent: str = "off",
 ) -> None:
-    """Compute and write the summed protein structure factors of one ensemble.
+    """Compute and write the summed structure factors of one ensemble.
 
     Failures are logged rather than raised so one bad row does not stop a batch.
 
@@ -215,12 +265,16 @@ def _process_single_row(
         the MTZ.
     b_factor
         Optional isotropic B-factor assigned to every retained atom.
+    bulk_solvent
+        Bulk-solvent mode: ``"off"``, ``"combined"``, or ``"per_conformer"``; see
+        ``compute_ensemble_structure_factors``.
 
     Notes
     -----
     Writes the MTZ ``row.mtzfile`` (default ``<input_stem>_<res>A.mtz``) to output_dir.
     The columns are ``Fprotein``/``SIGFprotein``/``PHIFprotein`` plus optional R-free
-    flags, the layout ``generate_synthetic_sf.py`` writes without
+    flags, and, unless ``bulk_solvent="off"``, ``Ftotal``/``SIGFtotal``/``PHIFtotal``:
+    the layouts ``generate_synthetic_sf.py`` writes without and with
     ``--simulate-solvent-and-scale``.
     """
     structure_path = base_dir / row.filename
@@ -235,7 +289,7 @@ def _process_single_row(
         cell = row.unit_cell if row.unit_cell is not None else gemmi_meta.cell
         space_group = row.space_group if row.space_group is not None else gemmi_meta.spacegroup_hm
         logger.info(f"Ensemble cell {cell.parameters}, space group '{space_group}'")
-        sfcalculator = compute_ensemble_fprotein(
+        sfcalculator = compute_ensemble_structure_factors(
             structure_path,
             row.occupancy_values,
             cell,
@@ -249,6 +303,7 @@ def _process_single_row(
             selection=row.selection,
             b_factor=b_factor,
             save_structure_dir=output_path.parent if save_structure else None,
+            bulk_solvent=bulk_solvent,
         )
     except Exception as e:
         logger.error(
@@ -257,10 +312,13 @@ def _process_single_row(
         )
         return
 
+    structure_factor_columns = {"protein": "Fprotein_asu"}
+    if bulk_solvent != "off":
+        structure_factor_columns["total"] = "Ftotal_asu"
     try:
         process_amplitudes_to_dataset(
             sfcalculator,
-            structure_factor_columns={"protein": "Fprotein_asu"},
+            structure_factor_columns=structure_factor_columns,
             test_fraction=test_fraction,
             seed=seed,
             output_path=output_path,
@@ -273,7 +331,7 @@ def _process_single_row(
         return
     logger.info(
         f"Summed {len(row.occupancy_values)} models at occupancies "
-        f"{row.occupancy_values!r} into {output_path}"
+        f"{row.occupancy_values!r} (bulk solvent {bulk_solvent}) into {output_path}"
     )
 
 
@@ -292,6 +350,7 @@ def process_batch(
     strip_ligands: bool = False,
     save_structure: bool = False,
     b_factor: float | None = None,
+    bulk_solvent: str = "off",
 ) -> None:
     """Process multiple ensembles from a CSV file in batch mode.
 
@@ -325,6 +384,8 @@ def process_batch(
         If True, save each processed ensemble as mmCIF beside its MTZ.
     b_factor
         Optional isotropic B-factor assigned to every retained atom.
+    bulk_solvent
+        Bulk-solvent mode: ``"off"``, ``"combined"``, or ``"per_conformer"``.
     """
     from joblib import delayed, Parallel
 
@@ -347,6 +408,7 @@ def process_batch(
             strip_ligands=strip_ligands,
             save_structure=save_structure,
             b_factor=b_factor,
+            bulk_solvent=bulk_solvent,
         )
         for row in rows
     )
@@ -362,8 +424,9 @@ def parse_args() -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser(
         description=(
-            "Sum Fprotein over the models of a multi-model ensemble file and write one "
-            "synthetic MTZ, without building a merged altloc structure"
+            "Sum Fprotein (and optionally bulk solvent) over the models of a multi-model "
+            "ensemble file and write one synthetic MTZ, without building a merged altloc "
+            "structure"
         )
     )
 
@@ -430,6 +493,16 @@ def parse_args() -> argparse.Namespace:
         "--remove-ligands",
         action="store_true",
         help="Remove ligand molecules (non-water heteroatoms) before computing structure factors",
+    )
+    sf_group.add_argument(
+        "--bulk-solvent",
+        choices=BULK_SOLVENT_MODES,
+        default="off",
+        help=(
+            "Bulk-solvent treatment: off (Fprotein only), combined (one mask from the "
+            "population-weighted ensemble density), or per_conformer (population-weighted "
+            "mean of per-model masks). Either solvent mode also writes Ftotal at default scales"
+        ),
     )
 
     rfree_group = parser.add_argument_group("R-free Options")
@@ -501,6 +574,7 @@ def main() -> None:
             strip_ligands=args.remove_ligands,
             save_structure=args.save_structure,
             b_factor=args.b_factor,
+            bulk_solvent=args.bulk_solvent,
         )
     elif args.structure:
         row = BatchRowForMTZ.from_dict(
@@ -527,6 +601,7 @@ def main() -> None:
             strip_ligands=args.remove_ligands,
             save_structure=args.save_structure,
             b_factor=args.b_factor,
+            bulk_solvent=args.bulk_solvent,
         )
     else:
         logger.error("Please specify --structure or --batch-csv")

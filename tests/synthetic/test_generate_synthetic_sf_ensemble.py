@@ -5,6 +5,7 @@ from typing import Any
 
 import gemmi
 import numpy as np
+import pytest
 import reciprocalspaceship as rs
 import torch
 from sampleworks.synthetic.generate_synthetic_sf import (
@@ -140,6 +141,108 @@ def test_summed_models_match_merged_altloc_structure(tmp_path: Path) -> None:
     merged_f = merged.to_structurefactor("Fprotein", "PHIFprotein").to_numpy()
     ensemble_f = ensemble.to_structurefactor("Fprotein", "PHIFprotein").to_numpy()
     np.testing.assert_allclose(ensemble_f, merged_f, atol=1e-4 * np.abs(merged_f).max())
+
+
+def _complex_column(dataset: rs.DataSet, label: str) -> np.ndarray:
+    """Return one structure-factor set of an MTZ dataset as complex values.
+
+    Parameters
+    ----------
+    dataset
+        Dataset holding ``F{label}`` and ``PHIF{label}`` columns.
+    label
+        Structure-factor label, e.g. ``"protein"`` or ``"total"``.
+
+    Returns
+    -------
+    np.ndarray
+        Complex structure factors ``[n_hkl]``. Comparing these rather than phases keeps
+        near-zero amplitudes from failing on phase wrap-around.
+    """
+    return dataset.to_structurefactor(f"F{label}", f"PHIF{label}").to_numpy()
+
+
+@pytest.mark.parametrize("bulk_solvent", ["combined", "per_conformer"])
+def test_identical_models_match_single_structure_with_solvent(
+    tmp_path: Path, bulk_solvent: str
+) -> None:
+    """Verify both solvent modes reproduce the single-structure Ftotal for a degenerate ensemble.
+
+    Two identical models at populations 0.4/0.6 are one structure, so the combined mask,
+    the population-weighted per-model masks, and the single-structure mask must agree.
+
+    Parameters
+    ----------
+    tmp_path
+        Temporary directory for structures and generated outputs.
+    bulk_solvent
+        Bulk-solvent mode under test.
+    """
+    _write_structure(tmp_path / "single.pdb", [[(0.0, 1.0, " ")]])
+    _write_structure(tmp_path / "ensemble.pdb", [[(0.0, 1.0, " ")]] * 2)
+
+    process_single_structure(
+        row=BatchRowForMTZ(filename="single.pdb", mtzfile="single.mtz"),
+        base_dir=tmp_path,
+        output_dir=tmp_path,
+        occupancy_mode="default",
+        simulate_solvent_and_scale=True,
+        **SHARED_SETTINGS,
+    )
+    process_single_ensemble(
+        row=BatchRowForMTZ(
+            filename="ensemble.pdb", occupancy_values=OCCUPANCIES, mtzfile="ensemble.mtz"
+        ),
+        base_dir=tmp_path,
+        output_dir=tmp_path,
+        bulk_solvent=bulk_solvent,
+        **SHARED_SETTINGS,
+    )
+
+    single = rs.read_mtz(str(tmp_path / "single.mtz")).sort_index()
+    ensemble = rs.read_mtz(str(tmp_path / "ensemble.mtz")).sort_index()
+    assert list(ensemble.columns) == list(single.columns)
+    assert ensemble.index.equals(single.index)
+    for label in ("protein", "total"):
+        single_f = _complex_column(single, label)
+        np.testing.assert_allclose(
+            _complex_column(ensemble, label), single_f, atol=1e-4 * np.abs(single_f).max()
+        )
+
+
+def test_solvent_modes_leave_fprotein_unchanged(tmp_path: Path) -> None:
+    """Verify bulk solvent only adds an Ftotal set beside an unchanged Fprotein set.
+
+    Parameters
+    ----------
+    tmp_path
+        Temporary directory for the ensemble and generated outputs.
+    """
+    _write_ensemble(tmp_path / "ensemble.pdb")
+
+    datasets = {}
+    for bulk_solvent in ("off", "combined", "per_conformer"):
+        process_single_ensemble(
+            row=BatchRowForMTZ(
+                filename="ensemble.pdb",
+                occupancy_values=OCCUPANCIES,
+                mtzfile=f"{bulk_solvent}.mtz",
+            ),
+            base_dir=tmp_path,
+            output_dir=tmp_path,
+            bulk_solvent=bulk_solvent,
+            **SHARED_SETTINGS,
+        )
+        datasets[bulk_solvent] = rs.read_mtz(str(tmp_path / f"{bulk_solvent}.mtz")).sort_index()
+
+    assert "Ftotal" not in datasets["off"].columns
+    for bulk_solvent in ("combined", "per_conformer"):
+        dataset = datasets[bulk_solvent]
+        assert {"Ftotal", "SIGFtotal", "PHIFtotal"} <= set(dataset.columns)
+        assert np.isfinite(dataset["Ftotal"].to_numpy()).all()
+        np.testing.assert_array_equal(
+            _complex_column(dataset, "protein"), _complex_column(datasets["off"], "protein")
+        )
 
 
 def test_batch_csv_matches_single_ensemble_mode(tmp_path: Path) -> None:
