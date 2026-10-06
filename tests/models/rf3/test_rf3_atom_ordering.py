@@ -8,9 +8,9 @@ on the closest resolved atom/token in the ``coord_to_be_noised`` annotation.
 
 import numpy as np
 import pytest
-from sampleworks.utils.imports import require_rf3, RF3_AVAILABLE
-from biotite.structure import rmsd, filter_intersection
 from atomworks.io.parser import parse_atom_array
+from biotite.structure import filter_intersection, rmsd
+from sampleworks.utils.imports import require_rf3, RF3_AVAILABLE
 
 
 if RF3_AVAILABLE:
@@ -107,12 +107,13 @@ class TestRF3AtomOrdering:
             "should have removed."
         )
 
+
 @pytest.mark.gpu
 @pytest.mark.slow
 class TestRF3UnresolvedAtom:
-    '''Validate that RF3 correctly handles placing unresolved atoms to the nearest
+    """Validate that RF3 correctly handles placing unresolved atoms to the nearest
     atom/token in the coord_to_be_noised annotation
-    '''
+    """
 
     @require_rf3()
     @pytest.mark.parametrize(
@@ -127,8 +128,8 @@ class TestRF3UnresolvedAtom:
     def test_coord_to_be_noised_in_model_atom_array(self, rf3_wrapper, structure_fixture, request):
         """model_atom_array has valid .coord_to_be_noised annotations.
 
-        RF3.wrapper.featurize() should place cleaned coordinates under the .coord_to_be_noised annotation
-        rather than modifying the ground truth .coord attribute.
+        RF3.wrapper.featurize() should place cleaned coordinates under the .coord_to_be_noised
+        annotation rather than modifying the ground truth .coord attribute.
         """
         # Pass structure through RF3 Wrapper featurize()
         structure = request.getfixturevalue(structure_fixture)
@@ -152,19 +153,21 @@ class TestRF3UnresolvedAtom:
 
     @require_rf3()
     def test_unresolved_atom_placement(
-        self, 
-        rf3_wrapper, 
+        self,
+        rf3_wrapper,
         structure_5i09_prediction,
         structure_5i09_prediction_deleted_atoms,
-        structure_5i09_prediction_deleted_atoms_idxs
+        structure_5i09_prediction_deleted_atoms_idxs,
     ):
-        """RF3.wrapper.featurize() should place all unresolved atoms on a nearby resolved atom/token. This
-        behavior is indirectly tested for by checking whether the RMSD(nearest atom/token placement, true structure)
-        < RMSD (centroid placement, true structure).
+        """RF3.wrapper.featurize() should place all unresolved atoms on a nearby resolved
+        atom/token. This behavior is indirectly tested for by checking whether the
+        RMSD(nearest atom/token placement, true structure) < RMSD (centroid placement,
+        true structure).
 
-        This test utilizes structure_5i09_prediction_deleted_atoms, which is structure_5i09_prediction (one
-        model only) with 6 atoms deleted from the structure. Identifying annotations for the deleted atoms are
-        listed in structure_5i09_prediction_deleted_atoms_idxs.
+        This test utilizes structure_5i09_prediction_deleted_atoms, which is
+        structure_5i09_prediction (one model only) with 6 atoms deleted from the structure.
+        Identifying annotations for the deleted atoms are listed in
+        structure_5i09_prediction_deleted_atoms_idxs.
         """
         # Rename fixtures for convenience
         structure = structure_5i09_prediction
@@ -178,52 +181,44 @@ class TestRF3UnresolvedAtom:
         test_unresolved_model = features_unresolved.conditioning.model_atom_array
 
         for unresolved_atom_idx in unresolved_atom_idxs:
-
             # Get target atom
             unresolved_atom_array = test_unresolved_model[
-                (test_unresolved_model.chain_id == unresolved_atom_idx['chain_id'])
-                & (test_unresolved_model.res_id == unresolved_atom_idx['res_id'])
-                & (test_unresolved_model.atom_name == unresolved_atom_idx['atom_name'])
+                (test_unresolved_model.chain_id == unresolved_atom_idx["chain_id"])
+                & (test_unresolved_model.res_id == unresolved_atom_idx["res_id"])
+                & (test_unresolved_model.atom_name == unresolved_atom_idx["atom_name"])
             ]
             assert len(unresolved_atom_array) == 1, "More than 1 atom matched description"
             unresolved_atom = unresolved_atom_array[0]
 
             # Unresolved atoms are resolved in coord_to_be_noised annotation
-            assert not np.any(np.isnan(
-                unresolved_atom.coord_to_be_noised
-            )),(
-                f'{unresolved_atom_idx} is not resolved in coord_to_be_noised'
+            assert not np.any(np.isnan(unresolved_atom.coord_to_be_noised)), (
+                f"{unresolved_atom_idx} is not resolved in coord_to_be_noised"
             )
             assert unresolved_atom.occupancy > 0, (
-                f'{unresolved_atom_idx} is not resolved in coord_to_be_noised'
+                f"{unresolved_atom_idx} is not resolved in coord_to_be_noised"
             )
 
             # and unchanged in the coord annotation
             assert np.any(
-                np.isnan(unresolved_atom.coord) 
-                | (unresolved_atom.coord == -1) # RF3 inference pipeline imputes NaNs as -1
-            ), (
-                f'{unresolved_atom_idx} is resolved in coord'
-            )
+                np.isnan(unresolved_atom.coord)
+                | (unresolved_atom.coord == -1)  # RF3 inference pipeline imputes NaNs as -1
+            ), f"{unresolved_atom_idx} is resolved in coord"
 
         # (2) Alternatively, we test against previous centroid placement strategy
-        centroid_unresolved_model = structure_unresolved['asym_unit'][0]
+        centroid_unresolved_model = structure_unresolved["asym_unit"][0]
 
         # add missing atoms manually, since we do not run through inference pipeline
         centroid_unresolved_model = parse_atom_array(
-            centroid_unresolved_model,
-            add_missing_atoms=True,
-            hydrogen_policy='keep'
-        )['asym_unit'][0]
+            centroid_unresolved_model, add_missing_atoms=True, hydrogen_policy="keep"
+        )["asym_unit"][0]
 
         # calculate centroid
         centroid = np.nanmean(centroid_unresolved_model.coord, axis=0)
-        centroid_unresolved_mask = (~np.isfinite(centroid_unresolved_model.coord))
+        centroid_unresolved_mask = ~np.isfinite(centroid_unresolved_model.coord)
 
         # replace any unresolved with centroid
         centroid_unresolved_model.coord[centroid_unresolved_mask] = np.broadcast_to(
-            centroid,
-            centroid_unresolved_model.coord.shape
+            centroid, centroid_unresolved_model.coord.shape
         )[centroid_unresolved_mask]
 
         # then set occupancy to 1 and b-factor to 20 (to match atoms from reference structure)
@@ -234,53 +229,54 @@ class TestRF3UnresolvedAtom:
         # (3) Find RMSD of closest atom/token strategy
         # only measure RMSD between atoms in both structures
         reference_test_mask = filter_intersection(
-            array = structure['asym_unit'][0],
-            intersect = test_unresolved_model
+            array=structure["asym_unit"][0], intersect=test_unresolved_model
         )
         # Double check that the mask includes the 6 atoms which were manually deleted ("unresolved")
         # from the original structure
-        assert reference_test_mask.sum() - (
-            filter_intersection(
-                structure_unresolved['asym_unit'][0],
-                test_unresolved_model
-            ).sum()) == 6, (
-                "Number of manually removed atoms does not match constructed expectation"
+        assert (
+            reference_test_mask.sum()
+            - (
+                filter_intersection(
+                    structure_unresolved["asym_unit"][0], test_unresolved_model
+                ).sum()
             )
+            == 6
+        ), "Number of manually removed atoms does not match constructed expectation"
         # (create two masks of atom intersection here, since AtomArrays are different lengths)
         test_reference_mask = filter_intersection(
-            array = test_unresolved_model,
-            intersect = structure['asym_unit'][0]
+            array=test_unresolved_model, intersect=structure["asym_unit"][0]
         )
         # calculate RMSD
         test_rmsd = rmsd(
-            reference = structure['asym_unit'][0].coord[reference_test_mask],
-            subject = test_unresolved_model.coord_to_be_noised[test_reference_mask]
+            reference=structure["asym_unit"][0].coord[reference_test_mask],
+            subject=test_unresolved_model.coord_to_be_noised[test_reference_mask],
         )
 
         # (4) RMSD of centroid strategy
         reference_centroid_mask = filter_intersection(
-            structure['asym_unit'][0],
-            centroid_unresolved_model
+            structure["asym_unit"][0], centroid_unresolved_model
         )
-        assert reference_centroid_mask.sum() - (
-            filter_intersection(
-                structure_unresolved['asym_unit'][0],
-                centroid_unresolved_model
-            ).sum()) == 6, (
-                "Number of manually removed atoms does not match constructed expectation"
+        assert (
+            reference_centroid_mask.sum()
+            - (
+                filter_intersection(
+                    structure_unresolved["asym_unit"][0], centroid_unresolved_model
+                ).sum()
             )
+            == 6
+        ), "Number of manually removed atoms does not match constructed expectation"
         centroid_reference_mask = filter_intersection(
-            centroid_unresolved_model,
-            structure['asym_unit'][0]
+            centroid_unresolved_model, structure["asym_unit"][0]
         )
         centroid_rmsd = rmsd(
-            reference = structure['asym_unit'][0].coord[reference_centroid_mask],
-            subject = centroid_unresolved_model[centroid_reference_mask]
+            reference=structure["asym_unit"][0].coord[reference_centroid_mask],
+            subject=centroid_unresolved_model[centroid_reference_mask],
         )
 
-        # (5) RMSD of closest atom/token strategy should be lower (when compared to original structure with
-        # all atoms present), since we are not moving unresolved atom as far from its ground truth position
+        # (5) RMSD of closest atom/token strategy should be lower (when
+        # compared to original structure with all atoms present), since we are not
+        # moving unresolved atom as far from its ground truth position
         assert test_rmsd < centroid_rmsd, (
             "Placing unresolved atoms on centroid has higher RMSD than nearest token/atom",
-            f'RMSD: nearest atom/token {test_rmsd:.3f} vs centroid {centroid_rmsd:.3f}'
+            f"RMSD: nearest atom/token {test_rmsd:.3f} vs centroid {centroid_rmsd:.3f}",
         )

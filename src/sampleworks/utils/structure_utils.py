@@ -236,7 +236,9 @@ def process_structure_to_trajectory_input(
                 )
                 bad = ~np.isfinite(model_template_np)
                 model_template_np = model_template_np.copy()
-                model_template_np[bad] = np.broadcast_to(struct_centroid, model_template_np.shape)[bad]
+                model_template_np[bad] = np.broadcast_to(struct_centroid, model_template_np.shape)[
+                    bad
+                ]
         else:
             # use RF3 unresolved atom placement strategy
             model_template_np = cast(np.ndarray, model_atom_array.coord_to_be_noised)
