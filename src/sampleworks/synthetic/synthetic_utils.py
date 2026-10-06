@@ -242,6 +242,7 @@ def load_structure_for_synthetic_reward(
     strip_ligands: bool = False,
     selection: str | None = None,
     b_factor: float | None = None,
+    model: int = 0,
 ) -> AtomArray | None:
     """Load and prepare a structure for synthetic reward generation.
 
@@ -271,6 +272,8 @@ def load_structure_for_synthetic_reward(
     b_factor
         Optional isotropic B-factor assigned to every retained atom. If None,
         preserve the values from the input structure.
+    model
+        0-based index of the model to load from a multi-model file.
 
     Returns
     -------
@@ -282,7 +285,7 @@ def load_structure_for_synthetic_reward(
         return None
 
     try:
-        atom_array = load_structure_with_altlocs(structure_path)
+        atom_array = load_structure_with_altlocs(structure_path, model=model)
     except Exception as e:
         logger.error(
             f"Failed to load {structure_path} ({type(e).__name__}): {e}\n"
