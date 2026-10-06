@@ -156,15 +156,15 @@ def parse_structure(path: str | Path) -> dict[str, Any]:
     )
 
 
-def load_structure_with_altlocs(path: Path) -> AtomArray:
+def load_structure_with_altlocs(path: Path, model: int = 0) -> AtomArray:
     """Load a structure file with alternate conformations and occupancy data.
-
-    Takes the first model if multiple models are present.
 
     Parameters
     ----------
     path
         Path to the structure file (PDB, mmCIF, etc.)
+    model
+        0-based index of the model to take if multiple models are present.
 
     Returns
     -------
@@ -174,7 +174,7 @@ def load_structure_with_altlocs(path: Path) -> AtomArray:
     # Currently, we need to specify extra_fields=["occupancy"] to load altlocs properly
     atom_array = load_any(path, altloc="all", extra_fields=["occupancy", "b_factor"])
     if isinstance(atom_array, AtomArrayStack):
-        atom_array = cast(AtomArray, atom_array[0])
+        atom_array = cast(AtomArray, atom_array[model])
     return atom_array
 
 
