@@ -517,6 +517,58 @@ def structure_5i09_density(resources_dir: Path) -> dict:
 
 
 @pytest.fixture(scope="session")
+def structure_5i09_prediction(resources_dir: Path) -> dict:
+    return parse_and_remove_hydrogens(resources_dir / "5I09" / "5I09_prediction.cif")
+
+
+@pytest.fixture(scope="session")
+def structure_5i09_prediction_deleted_atoms(resources_dir: Path) -> dict:
+    return parse_and_remove_hydrogens(resources_dir / "5I09" / "5I09_prediction_deleted_atoms.cif")
+
+
+@pytest.fixture(scope="session")
+def structure_5i09_prediction_deleted_atoms_idxs() -> list[dict]:
+    return [
+        {
+            "chain_id": "A",
+            "res_id": 32,
+            "res_name": "MET",
+            "atom_name": "CE",
+        },
+        {
+            "chain_id": "A",
+            "res_id": 223,
+            "res_name": "PHE",
+            "atom_name": "CG",
+        },
+        {
+            "chain_id": "A",
+            "res_id": 368,
+            "res_name": "GLY",
+            "atom_name": "N",
+        },
+        {
+            "chain_id": "A",
+            "res_id": 368,
+            "res_name": "GLY",
+            "atom_name": "CA",
+        },
+        {
+            "chain_id": "A",
+            "res_id": 368,
+            "res_name": "GLY",
+            "atom_name": "C",
+        },
+        {
+            "chain_id": "A",
+            "res_id": 368,
+            "res_name": "GLY",
+            "atom_name": "O",
+        },
+    ]
+
+
+@pytest.fixture(scope="session")
 def structure_6b8x_with_altlocs(resources_dir: Path) -> AtomArray | AtomArrayStack:
     return load_any(
         resources_dir / "6b8x" / "6b8x_final.pdb", altloc="all", extra_fields=["occupancy"]

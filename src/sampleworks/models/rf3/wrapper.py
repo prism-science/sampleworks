@@ -8,6 +8,10 @@ import numpy as np
 import torch
 from atomworks.enums import ChainType
 from atomworks.ml.samplers import LoadBalancedDistributedSampler
+from atomworks.ml.transforms.featurize_unresolved_residues import (
+    place_unresolved_token_atoms_on_token_representative_atom,
+    place_unresolved_token_on_closest_resolved_token_in_sequence,
+)
 from biotite.structure import AtomArray, AtomArrayStack
 from jaxtyping import Float
 from loguru import logger
@@ -316,6 +320,9 @@ class RF3Wrapper:
         """From an Atomworks structure, calculate RF3 input features.
 
         Runs the trunk forward pass to produce conditioning features.
+        Any unresolved atoms (NaN coordinates or 0 occupancy) are moved to the
+        coordinates of the nearest resolved atom or token under the
+        coord_to_be_noised annotation.
 
         Parameters
         ----------
@@ -440,20 +447,35 @@ class RF3Wrapper:
         # atomworks's add_missing_atoms adds unresolved atoms with
         # occupancy=0.0 and NaN coordinates when we get our atom array with
         # InferenceInput.from_atom_array. RF3 operates on these atoms (they're
-        # in atom_to_token_map), so initialize their coordinates with noise and
-        # set occupancy to 1.0 so they participate in guidance and don't get
-        # masked out in reward functions.
-        nan_coord_mask = np.any(np.isnan(model_aa.coord), axis=-1)
-        if nan_coord_mask.any():
-            resolved_coords = model_aa.coord[~nan_coord_mask]
-            centroid = resolved_coords.mean(axis=0) if len(resolved_coords) > 0 else np.zeros(3)
-            n_nan = int(nan_coord_mask.sum())
-            noise = np.random.normal(loc=0.0, scale=1.0, size=(n_nan, 3)).astype(np.float32)
-            new_coords = model_aa.coord.copy()
-            new_coords[nan_coord_mask] = centroid + noise
-            model_aa.coord = new_coords
+        # in atom_to_token_map), so we need to place these atoms in the
+        # structure so they participate in guidance and don't get
+        # masked out in reward functions. We follow atomworks convention of placing
+        # an unresolved atom on (1) the representative atom for the token, or (2)
+        # the center atom for the token, or (3) the closest neighboring token in
+        # the chain's sequence (defaulting to left token when both are present).
+
+        unresolved_coord_mask = (
+            np.any(np.isnan(model_aa.coord), axis=-1)  # >= 1 NaN coordinate
+            | (model_aa.occupancy <= 0.0)  # 0 occupancy
+        )
+        if unresolved_coord_mask.any():
+            # Place unresolved atoms on resolved atom in the same token,
+            # if possible.
+            model_aa = place_unresolved_token_atoms_on_token_representative_atom(
+                model_aa, annotation_to_update="coord_to_be_noised"
+            )
+
+            # For remaining unresolved atoms, place them on the
+            # closest token in the sequence.
+            model_aa = place_unresolved_token_on_closest_resolved_token_in_sequence(
+                model_aa,
+                annotation_to_update="coord_to_be_noised",
+                annotation_to_copy="coord_to_be_noised",
+            )
+
+            n_nan = int(unresolved_coord_mask.sum())
             logger.info(
-                f"Initialized {n_nan} unresolved atoms with noise "
+                f"Initialized {n_nan} unresolved atoms at nearest atom or token before noising"
                 f"(had NaN coordinates from add_missing_atoms)"
             )
 

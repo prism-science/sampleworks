@@ -220,22 +220,30 @@ def process_structure_to_trajectory_input(
         device=coords_from_prior.device,
     )
     if model_atom_array is not None:
-        model_template_np = cast(np.ndarray, model_atom_array.coord)
+        if "coord_to_be_noised" not in model_atom_array.get_annotation_categories():
+            # safely still allows other models to use original coordinates
+            model_template_np = cast(np.ndarray, model_atom_array.coord)
 
-        # Replace non-finite coords with the common-atom centroid
-        # TODO: use something like the RF3 processing where they put things on the nearest token
-        # (this is in atomworks RF3 transform pipeline)
-        struct_centroid = struct_coords_np.mean(axis=0)
-        if not np.isfinite(model_template_np).all():
-            logger.warning(
-                "Model atom array contains non-finite coordinates; replacing with "
-                "structure centroid for model-only template atoms."
-            )
-            bad = ~np.isfinite(model_template_np)
-            model_template_np = model_template_np.copy()
-            model_template_np[bad] = np.broadcast_to(struct_centroid, model_template_np.shape)[bad]
+            # Replace non-finite coords with the common-atom centroid
+            # TODO: apply RF3 nearest atom/token placement strategy to all models
+            # (currently this section should not trigger any changes, as
+            # models have np.nan coordinates imputed inside the model wrapper call)
+            struct_centroid = struct_coords_np.mean(axis=0)
+            if not np.isfinite(model_template_np).all():
+                logger.warning(
+                    "Model atom array contains non-finite coordinates; replacing with "
+                    "structure centroid for model-only template atoms."
+                )
+                bad = ~np.isfinite(model_template_np)
+                model_template_np = model_template_np.copy()
+                model_template_np[bad] = np.broadcast_to(struct_centroid, model_template_np.shape)[
+                    bad
+                ]
+        else:
+            # use RF3 unresolved atom placement strategy
+            model_template_np = cast(np.ndarray, model_atom_array.coord_to_be_noised)
+
         model_template_np = np.ascontiguousarray(model_template_np)
-
         model_template = torch.from_numpy(model_template_np).to(
             dtype=coords_from_prior.dtype,
             device=coords_from_prior.device,
