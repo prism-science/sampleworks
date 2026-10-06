@@ -456,7 +456,7 @@ class RF3Wrapper:
 
         unresolved_coord_mask = (
             np.any(np.isnan(model_aa.coord), axis=-1)  # >= 1 NaN coordinate
-            or (model_aa.occupancy <= 0.0)  # 0 occupancy
+            | (model_aa.occupancy <= 0.0)  # 0 occupancy
         )
         if unresolved_coord_mask.any():
             # Place unresolved atoms on resolved atom in the same token,
