@@ -247,6 +247,37 @@ class TestFeaturize:
         np.testing.assert_array_equal(array.res_name, template.res_name)
         np.testing.assert_array_equal(array.atom_name, template.atom_name)
 
+    def test_override_template_builds_reward_inputs(
+        self, protpardelle_wrapper, structure_5i09_density, seq_5i09_deposited
+    ):
+        """Unobserved template atoms get finite defaults so reward inputs can be built.
+
+        Parameters
+        ----------
+        protpardelle_wrapper : ProtpardelleWrapper
+            Wrapper backed by the small randomly initialized model.
+        structure_5i09_density : dict
+            Atomworks-parsed structure with missing residues.
+        seq_5i09_deposited : str
+            Full deposited sequence including the unobserved residues.
+        """
+        from sampleworks.utils.sequence import apply_sequence_override
+        from sampleworks.utils.structure_utils import process_structure_to_trajectory_input
+
+        structure = apply_sequence_override(structure_5i09_density, seq_5i09_deposited)
+        annotated = annotate_structure_for_protpardelle(structure)
+        features = protpardelle_wrapper.featurize(annotated)
+        template = features.conditioning.model_atom_array
+        assert template is not None
+        assert np.isfinite(template.coord).all()
+        assert np.isfinite(template.b_factor).all()
+
+        prior = protpardelle_wrapper.initialize_from_prior(1, features=features)
+        processed = process_structure_to_trajectory_input(annotated, prior, features, 1)
+        reward_inputs = processed.to_reward_inputs()
+        assert reward_inputs.b_factors.shape[-1] == len(template)
+        assert torch.isfinite(reward_inputs.b_factors).all()
+
     def test_returns_generative_model_input(self, protpardelle_wrapper):
         structure = _protein_structure(SEQ_A)
         features = protpardelle_wrapper.featurize(structure)

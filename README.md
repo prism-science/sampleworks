@@ -3,8 +3,9 @@
 > This repository is under active development. Please always use the latest version. If you encounter any problems, please [create an issue on GitHub](https://github.com/prism-science/sampleworks/issues) and include: the PDB ID, the CIF file you used, your density map(s), and log information.
 
 > We would welcome contributions from the community. We are most interested in:
- - new ModelWrappers for additional structure prediction models (especially smaller models which may be more steerable)
- - fast, differentiable modules to allow guidance from other experimental data modalities besides X-ray electron density.
+
+- new ModelWrappers for additional structure prediction models (especially smaller models which may be more steerable)
+- fast, differentiable modules to allow guidance from other experimental data modalities besides X-ray electron density.
 
 **Sampleworks** is a Python framework for integrating generative biomolecular structure models with experimental data. Read our [blog post](https://diffuse.science/posts/sampleworks/) for an introduction.
 
@@ -15,6 +16,7 @@ Biomolecular structure prediction and design models are currently trained on sin
 Currently, each structure prediction model has a different implementation, requiring bespoke boilerplate code to plug each model into experimental guidance. Our goal is to resolve this and expand the experimental methods we can provide guidance with. This will open new opportunities for model evaluation directly against experimental data, and help unlock new sources of data for training the next generation of biomolecular structure predictors.
 
 ## Citation
+
 If you use **sampleworks**, please cite:
 
 Chrispens, K., Collins, M., Mai, D., Wankowicz, S. A., Fraser, J. S., & van den Bedem, H. (2026). sampleworks: A Modular Platform for Experimentally Guided Biomolecular Ensemble Generation. https://doi.org/10.82153/jkxj-tw08
@@ -70,7 +72,6 @@ download_boltz2(cache)
 
 **RosettaFold3** (RF3): see the [RC-Foundry repository](https://github.com/RosettaCommons/foundry) for instructions. Default path: `~/.foundry/checkpoints/rf3_foundry_01_24_latest.ckpt`
 
-
 ## Quick Start
 
 Run Boltz-2 pure guidance on the included 1VME example:
@@ -99,14 +100,14 @@ Output files appear in `output/boltz2_pure_guidance/`: `refined.cif` (final ense
 
 **Required arguments:**
 
-| Argument | Description |
-|---|---|
-| `--model` | `boltz1`, `boltz2`, `protenix`, or `rf3` |
-| `--guidance-type` | `pure_guidance`, `fk_steering`, or `latent_opt` |
-| `--protein` | Protein identifier (should match naming used in grid search / evaluation) |
-| `--structure` | Path to input structure file (CIF) |
-| `--density` | Path to density map (CCP4/MRC/MAP) — required by the default reward |
-| `--resolution` | Map resolution in Angstroms — required by the default reward |
+| Argument          | Description                                                               |
+| ----------------- | ------------------------------------------------------------------------- |
+| `--model`         | `boltz1`, `boltz2`, `protenix`, or `rf3`                                  |
+| `--guidance-type` | `pure_guidance`, `fk_steering`, or `latent_opt`                           |
+| `--protein`       | Protein identifier (should match naming used in grid search / evaluation) |
+| `--structure`     | Path to input structure file (CIF)                                        |
+| `--density`       | Path to density map (CCP4/MRC/MAP) — required by the default reward       |
+| `--resolution`    | Map resolution in Angstroms — required by the default reward              |
 
 Model-specific arguments (e.g. `--method` for boltz2, `--msa-path` for rf3) and guidance-type-specific arguments (e.g. `--num-particles` for fk_steering) are included automatically. Run `sampleworks-guidance --model <model> --guidance-type <type> --help` to see all available options.
 
@@ -129,14 +130,14 @@ pixi run -e protenix sampleworks-guidance \
     --outer-steps 2
 ```
 
-| Argument | Description | Default |
-|---|---|---|
-| `--which-latent` | Which latent to optimize: `single`, `pair`, or `both` | `pair` |
-| `--learning-rate` | Adam learning rate | `0.05` |
-| `--outer-steps` | Optimization rounds, fresh prior noise each | `2` |
-| `--anchor-weight` | Penalty on drift from the trunk baseline; `0` disables it | `0.0` |
-| `--max-grad-norm` | Per-latent gradient clip | `1.0` |
-| `--bond-length-weight` | Bond-length and steric-clash penalty; `0` disables it | `5e-5` |
+| Argument               | Description                                               | Default |
+| ---------------------- | --------------------------------------------------------- | ------- |
+| `--which-latent`       | Which latent to optimize: `single`, `pair`, or `both`     | `pair`  |
+| `--learning-rate`      | Adam learning rate                                        | `0.05`  |
+| `--outer-steps`        | Optimization rounds, fresh prior noise each               | `2`     |
+| `--anchor-weight`      | Penalty on drift from the trunk baseline; `0` disables it | `0.0`   |
+| `--max-grad-norm`      | Per-latent gradient clip                                  | `1.0`   |
+| `--bond-length-weight` | Bond-length and steric-clash penalty; `0` disables it     | `5e-5`  |
 
 See [docs/IT_OPT_DESIGN.md](docs/IT_OPT_DESIGN.md) for the algorithm and the per-model gradient
 readiness table, and [docs/IT_OPT_TESTING.md](docs/IT_OPT_TESTING.md) for how to run and debug it.
@@ -145,10 +146,10 @@ readiness table, and [docs/IT_OPT_TESTING.md](docs/IT_OPT_TESTING.md) for how to
 
 `--reward-type` chooses what the run is guided by, and each reward brings its own options:
 
-| Reward | Guided by | Its options |
-|---|---|---|
-| `real_space_density` (default) | Fit to a density map | `--density`, `--resolution`, `--loss-order`, `--em` |
-| `structure_factor` | Fit to structure-factor amplitudes from an MTZ | `--mtzfile`, `--expcolumns`, `--resolution`, `--bulk-solvent`, `--scattering-factor-mode`, ... |
+| Reward                         | Guided by                                      | Its options                                                                                    |
+| ------------------------------ | ---------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `real_space_density` (default) | Fit to a density map                           | `--density`, `--resolution`, `--loss-order`, `--em`                                            |
+| `structure_factor`             | Fit to structure-factor amplitudes from an MTZ | `--mtzfile`, `--expcolumns`, `--resolution`, `--bulk-solvent`, `--scattering-factor-mode`, ... |
 
 ```bash
 sampleworks-guidance --model boltz2 --guidance-type pure_guidance \
@@ -175,8 +176,6 @@ structure_factor:
 Weights default to `1/N` when omitted, so combining rewards leaves the meaning of the
 guidance step size intact.
 
-
-
 ## Grid Search
 
 `run_grid_search.py` sweeps a model across scalers, ensemble sizes, and gradient weights:
@@ -197,28 +196,31 @@ pixi run -e boltz python run_grid_search.py \
 
 **`proteins.csv` format**
 
-Required columns and format. Supported density map formats: `.ccp4`, `.mrc`, `.map` (not MTZ or SF-CIF yet).
+Required columns are `name`, `structure`, `density`, and `resolution`. Supported density map formats: `.ccp4`, `.mrc`, `.map` (not MTZ or SF-CIF yet).
+The optional `sequence` column overrides the protein sequence, for example for cases where the structure is missing full sequence metadata and there are missing termini or gaps. Give either a one-letter
+amino-acid string or a path to a single-record FASTA file (relative paths resolve against the CSV's directory). Leave it empty to use the structure's own sequence.
+
 ```csv
-name,structure,density,resolution
-1abc,/data/structures/1abc.cif,/data/maps/1abc.ccp4,2.0
-2xyz,/data/structures/2xyz.cif,/data/maps/2xyz.mrc,1.8
+name,structure,density,resolution,sequence
+1abc,/data/structures/1abc.cif,/data/maps/1abc.ccp4,2.0,
+2xyz,/data/structures/2xyz.cif,/data/maps/2xyz.mrc,1.8,sequences/2xyz.fasta
 ```
 
 **Key arguments:**
 
-| Argument | Description | Default |
-|---|---|---|
-| `--proteins` | CSV with structure/density/resolution columns | required |
-| `--models` | Model to run. One of `boltz1`, `boltz2`, `protenix`, `rf3` | required |
-| `--scalers` | Guidance method(s) to sweep | `pure_guidance fk_steering` |
-| `--ensemble-sizes` | Space-separated values, e.g. `"1 4"` | `"1 2 4 8"` |
-| `--gradient-weights` | Space-separated values, e.g. `"0.1 0.2"` | `"0.01 0.1 0.2"` |
-| `--methods` | Boltz-2 sampling method (required for boltz2) | `X-RAY DIFFRACTION` |
-| `--max-parallel` | Parallel workers (default: number of GPUs) | `auto` |
-| `--dry-run` | Print jobs without running them | off |
-| `--force-all` | Re-run including already-successful jobs | off |
-| `--only-failed` | Re-run only failed jobs | off |
-| `--only-missing` | Run only jobs not yet started | off |
+| Argument             | Description                                                | Default                     |
+| -------------------- | ---------------------------------------------------------- | --------------------------- |
+| `--proteins`         | CSV of name/structure/density/resolution(/sequence)        | required                    |
+| `--models`           | Model to run. One of `boltz1`, `boltz2`, `protenix`, `rf3` | required                    |
+| `--scalers`          | Guidance method(s) to sweep                                | `pure_guidance fk_steering` |
+| `--ensemble-sizes`   | Space-separated values, e.g. `"1 4"`                       | `"1 2 4 8"`                 |
+| `--gradient-weights` | Space-separated values, e.g. `"0.1 0.2"`                   | `"0.01 0.1 0.2"`            |
+| `--methods`          | Boltz-2 sampling method (required for boltz2)              | `X-RAY DIFFRACTION`         |
+| `--max-parallel`     | Parallel workers (default: number of GPUs)                 | `auto`                      |
+| `--dry-run`          | Print jobs without running them                            | off                         |
+| `--force-all`        | Re-run including already-successful jobs                   | off                         |
+| `--only-failed`      | Re-run only failed jobs                                    | off                         |
+| `--only-missing`     | Run only jobs not yet started                              | off                         |
 
 Output layout: `grid_search_results/<protein>/<model>[_<method>]/<scaler>/ens<N>_gw<W>/`
 
@@ -226,7 +228,6 @@ Output layout: `grid_search_results/<protein>/<model>[_<method>]/<scaler>/ens<N>
 
 Evaluation and metrics scripts can be run through `run_analysis`; see the ACTL
 section below and `scripts/eval/EVALUATION.md`.
-
 
 ## Running preset experiments on ACTL (`run_experiments`)
 
@@ -321,7 +322,6 @@ debugging only, opt into an on-pod pixi update with
 `RUNTIME_PIXI=1 run_experiments ...`; reproducible scientist runs should use a
 rebuilt `pixi-with-checkpoints:sampleworks` image instead.
 
-
 ## Running preset analyses on ACTL (`run_analysis`)
 
 `run_analysis` uses the same TOML runner as `run_experiments`, but loads presets
@@ -354,7 +354,6 @@ The `altloc_find` and `altloc_classify` presets are independent of grid-search
 outputs; override `ALTLOC_ANALYSIS_DIR` and `ALTLOC_INPUTS_DIR` when their input
 or output roots differ from the defaults.
 
-
 ## Docker
 
 Sampleworks now has a two-layer image split:
@@ -366,16 +365,16 @@ Sampleworks now has a two-layer image split:
 
 Image names:
 
-| Purpose | Image |
-|---|---|
-| Public Sampleworks runtime | `diffuseproject/pixi-with-checkpoints` |
-| Astera/ACTL runtime | `sampleworks` alias; run `actl pod images` for the resolved, digest-pinned ref |
+| Purpose                    | Image                                                                          |
+| -------------------------- | ------------------------------------------------------------------------------ |
+| Public Sampleworks runtime | `diffuseproject/pixi-with-checkpoints`                                         |
+| Astera/ACTL runtime        | `sampleworks` alias; run `actl pod images` for the resolved, digest-pinned ref |
 
 CI publishes these tags:
 
-| Image | Tags |
-|---|---|
-| Public | `latest` on `main`, `sha-<short-sha>`, release semver tags |
+| Image         | Tags                                                                         |
+| ------------- | ---------------------------------------------------------------------------- |
+| Public        | `latest` on `main`, `sha-<short-sha>`, release semver tags                   |
 | Astera/Harbor | `latest` and `sampleworks` on `main`, `sha-<short-sha>`, release semver tags |
 
 The Astera image is always built from the exact public `sha-<short-sha>` image
@@ -384,13 +383,13 @@ small workspace tools on top.
 
 CI configuration variables:
 
-| Variable | Purpose |
-|---|---|
-| `SAMPLEWORKS_PUBLIC_REGISTRY` | Public registry host; defaults to `docker.io` |
-| `SAMPLEWORKS_PUBLIC_IMAGE` | Public image path; defaults to `diffuseproject/pixi-with-checkpoints` |
-| `SAMPLEWORKS_CHECKPOINTS_DOCKERHUB_IMAGE` | Optional public Docker Hub checkpoint mirror destination tag; defaults to `docker.io/diffuseproject/sampleworks-checkpoints:latest` |
-| `SAMPLEWORKS_CUDA_BASE_IMAGE` | Optional digest-pinned CUDA base override |
-| `SAMPLEWORKS_CHECKPOINTS_SOURCE_PATH` | **Required.** Digest-pinned path of the private checkpoint image CI mirrors to Docker Hub, without the registry host (e.g. `library/foo@sha256:...`) |
+| Variable                                  | Purpose                                                                                                                                              |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SAMPLEWORKS_PUBLIC_REGISTRY`             | Public registry host; defaults to `docker.io`                                                                                                        |
+| `SAMPLEWORKS_PUBLIC_IMAGE`                | Public image path; defaults to `diffuseproject/pixi-with-checkpoints`                                                                                |
+| `SAMPLEWORKS_CHECKPOINTS_DOCKERHUB_IMAGE` | Optional public Docker Hub checkpoint mirror destination tag; defaults to `docker.io/diffuseproject/sampleworks-checkpoints:latest`                  |
+| `SAMPLEWORKS_CUDA_BASE_IMAGE`             | Optional digest-pinned CUDA base override                                                                                                            |
+| `SAMPLEWORKS_CHECKPOINTS_SOURCE_PATH`     | **Required.** Digest-pinned path of the private checkpoint image CI mirrors to Docker Hub, without the registry host (e.g. `library/foo@sha256:...`) |
 
 One CI secret, `ASTERA_REGISTRY`, holds the internal registry host. It is a
 secret rather than a variable because this repo is public, which makes its
@@ -425,7 +424,6 @@ checkpoint image ref. In CI, the Docker workflow first mirrors the private Harbo
 checkpoint source to Docker Hub, verifies the digest, and passes the resulting
 digest-pinned Docker Hub ref to the public build so that build never needs Harbor
 credentials.
-
 
 ## Development
 
@@ -464,7 +462,6 @@ pixi run -e [model]-dev prek run --all-files
 
 See [`tests/README.md`](tests/README.md) for full testing instructions.
 
-
 ## macOS (experimental)
 
 On macOS, use uv for source-checkout development and avoid Linux/CUDA-only model
@@ -478,7 +475,6 @@ uv run pytest tests -m 'not slow'
 
 `protenix` currently requires `triton`/NVIDIA GPU support and is not expected to
 work on macOS. Some RF3/Boltz workflows may also require Linux/CUDA packages.
-
 
 ## Commit Messages
 

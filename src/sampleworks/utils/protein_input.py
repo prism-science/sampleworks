@@ -10,6 +10,28 @@ from sampleworks.utils.sequence import resolve_sequence_arg
 class ProteinInput:
     """
     Parse and validate protein input from a CSV file.
+
+    Each CSV row maps to one instance. ``name``, ``structure``, ``density`` and
+    ``resolution`` columns are required, and ``sequence`` is optional.
+
+    Attributes
+    ----------
+    name : str
+        Protein identifier; must be non-empty.
+    structure : Path
+        Structure file (``.cif``/``.pdb``). Relative CSV paths resolve against
+        the CSV's directory.
+    density : Path
+        Density map (``.ccp4``/``.mrc``/``.map``). Relative CSV paths resolve
+        against the CSV's directory.
+    resolution : float
+        Map resolution in Angstrom; must be positive and finite.
+    sequence : str or None
+        Full one-letter protein sequence overriding the structure's, may be useful when
+        termini or internal residues are unresolved. In the CSV this may be a
+        raw sequence or a path to a single-record FASTA file. ``None`` (empty
+        cell or missing column) keeps the sequence from the coordinates in the
+        structure file.
     """
 
     name: str

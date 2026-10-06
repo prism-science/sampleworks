@@ -633,6 +633,13 @@ class ProtpardelleWrapper:
                 fix_bond_types=False,
             )
             expanded.occupancy[:] = 1.0
+            # add_missing_atoms leaves unobserved atoms with NaN coordinates and
+            # B-factors, which RewardInputs rejects. Use the observed centroid and
+            # the same 20.0 B-factor default as the RF3/Protenix wrappers.
+            # TODO: address with issue ref #444
+            unobserved = np.isnan(expanded.coord).any(axis=-1)
+            expanded.coord[unobserved] = expanded.coord[~unobserved].mean(axis=0)
+            expanded.b_factor[np.isnan(expanded.b_factor)] = 20.0
             expanded_seq_idx = np.empty(len(expanded), dtype=np.int64)
             for chain_id in protein_chain_ids:
                 chain_mask = np.asarray(expanded.chain_id) == chain_id
