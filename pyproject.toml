@@ -128,7 +128,7 @@ license = {file = "LICENSE"}
 name = "sampleworks"
 readme = "README.md"
 requires-python = ">= 3.11, <3.14"
-version = "0.19.0"
+version = "0.20.0"
 
 [project.urls]
 Changelog = "https://github.com/prism-science/sampleworks/blob/main/CHANGELOG.md"
