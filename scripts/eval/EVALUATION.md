@@ -12,18 +12,18 @@ on `PATH`: scripts/eval/run_and_process_tortoize.py checks for the `tortoize` ex
 running and raises an error if it is not available.
 
 ## phenix
-Information about the phenix package can be found at https://phenix-online.org/. Phenix requires a 
+Information about the phenix package can be found at https://phenix-online.org/. Phenix requires a
 license which is free to academic users. Others may have to pay a fee. Sampleworks makes use of the
 phenix.clashscore command and `run_and_process_phenix_clashscore.py` will check for it before
 running, raising an error if it is not available.
 
 # Running the evaluations
 ## Preparing the output CIF files
-As of this writing, Sampleworks outputs CIF files that primarily contain the output atomic 
-coordinates, and not the additional information that many programs, like `tortoize` and 
-`phenix.clashscore`, require. Furthermore, many protein structure predictors effectively 
-renumber residues. Since our metrics are frequently calculated by comparing selections of atoms or 
-residues, we must align to the original _sequence_ of the protein as well. Future versions of 
+As of this writing, Sampleworks outputs CIF files that primarily contain the output atomic
+coordinates, and not the additional information that many programs, like `tortoize` and
+`phenix.clashscore`, require. Furthermore, many protein structure predictors effectively
+renumber residues. Since our metrics are frequently calculated by comparing selections of atoms or
+residues, we must align to the original _sequence_ of the protein as well. Future versions of
 Sampleworks will handle these issues automatically. For direct script invocation, you should run
 the script `scripts/patch_output_cif_files.py`. This will use the original PDB inputs to
 reconstruct proper output CIF files that are numbered correctly and have all necessary metadata to
@@ -35,15 +35,15 @@ presets: a sequential `patch_outputs` pre-job runs before evaluation jobs and wr
 `PATCH_CIF_PATTERN`, or `PATCH_DEPTH` if your input or output layout differs.
 
 You can run the following command, which assumes:
-- your sampleworks output is stored in `/home/ubuntu/grid_search_results`, 
+- your sampleworks output is stored in `/home/ubuntu/grid_search_results`,
 - the output is organized by RCSB PDB ID in directories like `/home/ubuntu/grid_search_results/1VME/...`,
   see the `--rcsb-pattern` argument which is a regex to match the RCSB PDB ID
 - the input PDB cif files are stored in `/home/ubuntu/grid_search_inputs` as required for running the
   the grid search (see GRID_SEARCH.md)
 - the input PDB cif files are stored in `/home/ubuntu/grid_search_inputs` as required for running the
-  the grid search (see GRID_SEARCH.md). The files will have paths like, e.g., 
-  `/home/ubuntu/grid_search_inputs/1VME/1VME_original.cif`. See also the `--input-pdb-pattern` 
-  argument, which is a python format string which must use the `pdb_id` variable to refer to the 
+  the grid search (see GRID_SEARCH.md). The files will have paths like, e.g.,
+  `/home/ubuntu/grid_search_inputs/1VME/1VME_original.cif`. See also the `--input-pdb-pattern`
+  argument, which is a python format string which must use the `pdb_id` variable to refer to the
   RCSB PDB ID.
 
 ```shell
@@ -61,7 +61,7 @@ argument. It will output a patched CIF files named `refined-patched.cif` along e
 file. These `refined-patched.cif` files can be used as input to the remaining evaluation scripts.
 
 ## Running the scripts
-The evaluation scripts have a common interface defined by the method 
+The evaluation scripts have a common interface defined by the method
 `sampleworks.eval.grid_search_eval_utils.parse_eval_args`. The general form of these commands is:
 
 The preferred ACTL entrypoint is `run_analysis`, which reads TOML presets from `analyses/` and uses
@@ -97,7 +97,7 @@ pixi run -e analysis python scripts/eval/<script> \
 --n-jobs 16
 ```
 The `--occupancies` argument is a list of occupancy values to evaluate, which should correspond to
-what you used in the grid search. 
+what you used in the grid search.
 
 The `--n-jobs` argument is the number of parallel jobs to run; it is not used by all scripts yet but
 speeds some up considerably, especially for the tortoize and clashscore scripts.
@@ -107,24 +107,24 @@ The `--depth` argument is the maximum directory depth to recurse into when looki
 The `--protein-configs-csv` argument is a CSV file describes what parts of each protein to evaluate.
 Examples can be found in `sampleworks/data/`.
 The file has the following columns:
-- `protein`, the PDB id of the protein to evaluate. 
-- `selection`, a semicolon separated list of selections, with a (very) limited PyMOL like algebra 
-or a more complete atomworks-style selection syntax. See examples in the files in 
+- `protein`, the PDB id of the protein to evaluate.
+- `selection`, a semicolon separated list of selections, with a (very) limited PyMOL like algebra
+or a more complete atomworks-style selection syntax. See examples in the files in
 `sampleworks/data/`. Selections are only used by the RSCC and LDDT scripts.
-- `structure_pattern`, the filename of the reference PDB file passed to the sampleworks generation script, 
-  probably through an input configuration CSV file if you used the `run_grid_search.py` script. If a 
+- `structure_pattern`, the filename of the reference PDB file passed to the sampleworks generation script,
+  probably through an input configuration CSV file if you used the `run_grid_search.py` script. If a
   different reference structure was used for different occupancies, you can use the variable `occ_str`
   in the pattern, which is replaced with the occupancy values one by one.
 - `map_pattern`, Similar to `structure_pattern`, but for the density map files.
-- `base_map_dir` The code assumes the maps for each protein are in their own subdirectory of the inputs 
+- `base_map_dir` The code assumes the maps for each protein are in their own subdirectory of the inputs
 directory specified by `grid_search_inputs_path`, e.g., `processed/1VME`.
 
 ## Evaluation scripts you can run.
-All evaluation scripts are in the `scripts/eval` directory. 
+All evaluation scripts are in the `scripts/eval` directory.
 
 ### `run_and_process_tortoize.py`
 Uses the PDB-REDO tortoize program to compute backbone and sidechain dihedral angle outliers.
-It produces two files in the directory where it is run: 
+It produces two files in the directory where it is run:
 - `tortoize_residues.csv`, detailed information about the each residue's backbone (ramachandran) and
 sidechain (\chi_1, \chi_2) angle z-scores. See PDB-REDO tortoize documentation for more details.
 - `tortoize_protein_stats.csv` Protein-level aggregations of the tortoize results.
@@ -149,10 +149,10 @@ each CIF file. It produces four files:
 - `bond_angle_violation_fractions.csv`, one row per model per CIF file, with the fraction of outlier angles in that model.
 
 ### `rscc_grid_search_script.py`
-This script computes the real-space (electron density) correlation coefficient (RSCC) for every 
-selection defined in the file passed to `--protein-configs-csv`, for every occupancy defined by 
-`--occupancies`. Model electron density is computed as an average over the models in the CIF file; 
-target electron density comes from the map file defined by the `base_map_dir` column in the 
+This script computes the real-space (electron density) correlation coefficient (RSCC) for every
+selection defined in the file passed to `--protein-configs-csv`, for every occupancy defined by
+`--occupancies`. Model electron density is computed as an average over the models in the CIF file;
+target electron density comes from the map file defined by the `base_map_dir` column in the
 `--protein-configs-csv` file and the occupancy. The code takes values from voxels in the maps
 within 2&#x212B; of the selected atoms' centers. It automatically aligns the maps to the original
 protein structure, but for now this requires the original PDB file (extracted again from the protein
@@ -182,22 +182,22 @@ The output file, `rscc_metrics.csv`, contains one row per selection per output C
 
 ### `lddt_evaluation_script.py`
 Similarly to the RSCC script, this script computes the LDDT for every selection defined in the file
-passed to `--protein-configs-csv`, for every occupancy defined by `--occupancies`. 
+passed to `--protein-configs-csv`, for every occupancy defined by `--occupancies`.
 
 This script produces a single file, `lddt_metrics.csv`, with each row as described in the table below.
 
 The script attempts to assign selections in each of the models in the CIF file to the altlocs defined
-in the input reference structure, using as a 
-pseudo-distance the LDDT scores computed over the selected atoms in each model. 
-In the example below, the CIF file is 
+in the input reference structure, using as a
+pseudo-distance the LDDT scores computed over the selected atoms in each model.
+In the example below, the CIF file is
 ```shell
 /mnt/diffuse-private/raw/sampleworks/initial_dataset_40/grid_search_results/1VME_native_occ/boltz2_MD/pure_guidance/ens8_gw0.1/refined.cif
 ```
 and it has 8 models. The selection is over all atoms that have altlocs in the reference structure (1VME).
 This includes a loop movement, and 5/8 models are closer, in this LDDT sense, to altloc A, while 3/8
-are closer to altloc B. The script then computes a silhouette score for this assumed clustering, 
+are closer to altloc B. The script then computes a silhouette score for this assumed clustering,
 which is reported as the `avg_silhouette` score. We also report a pseudo-silhouette score, which is
-a measure of how well the generated conformers match the reference altlocs. 1.0 is a perfect score, 
+a measure of how well the generated conformers match the reference altlocs. 1.0 is a perfect score,
 and 0.0 indicates a poor clustering. In the example provided, the pseudo-silhouette score is 0.0034,
 indicating that the generated conformers are not well separated and do not reflect the reference altlocs.
 

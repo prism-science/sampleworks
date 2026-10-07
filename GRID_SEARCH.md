@@ -1,19 +1,23 @@
 # Running the Sampleworks Grid Search
+
 One of the main tasks in the Sampleworks project is to run a hyperparameter search
 over parameters like the number of samples in an ensemble and the guidance weight.
 This document describes how to run the grid search, how the results are organized,
 and how to find and read logs if you need to debug the process.
 
 ## Optional: Setting up the docker container
+
 It is often useful to have a docker container with all the dependencies installed.
 Our script `run_experiments` for instance uses a docker container to manage all
 dependencies. To run that script, you will need to have docker installed. Build
 the container with
+
 ```shell
 docker build --platform linux/amd64 \
   --build-arg CHECKPOINTS_IMAGE=<checkpoint-image-ref> \
   -t diffuseproject/pixi-with-checkpoints:local .
 ```
+
 which will add an image to your local docker repository called
 `diffuseproject/pixi-with-checkpoints:local`. The top of the `Dockerfile` contains
 instructions on how to use the container as well. The container entrypoint
@@ -21,6 +25,7 @@ instructions on how to use the container as well. The container entrypoint
 script described below.
 
 ## Running the Grid Search
+
 To run grid search, you can use the `run_grid_search.py` script. It primarily sweeps
 supplied values of gradient weights and ensemble sizes. It requires a CSV file with
 protein structure, density map, and resolution columns, described below.
@@ -41,30 +46,33 @@ pixi run -e boltz python run_grid_search.py \
 
 **`proteins.csv` format**
 
-Required columns and format. Supported density map formats: `.ccp4`, `.mrc`, `.map` (not MTZ or SF-CIF yet).
+Required columns are `name`, `structure`, `density`, and `resolution`. Supported density map formats: `.ccp4`, `.mrc`, `.map` (not MTZ or SF-CIF yet).
+The optional `sequence` column overrides the protein sequence, for example for cases where the structure is missing full sequence metadata and there are missing termini or gaps. Give either a one-letter
+amino-acid string or a path to a single-record FASTA file (relative paths resolve against the CSV's directory). Leave it empty to use the structure's own sequence.
+
 ```csv
-name,structure,density,resolution
-1abc,/data/structures/1abc.cif,/data/maps/1abc.ccp4,2.0
-2xyz,/data/structures/2xyz.cif,/data/maps/2xyz.mrc,1.8
+name,structure,density,resolution,sequence
+1abc,/data/structures/1abc.cif,/data/maps/1abc.ccp4,2.0,
+2xyz,/data/structures/2xyz.cif,/data/maps/2xyz.mrc,1.8,sequences/2xyz.fasta
 ```
 
 **Key arguments:**
 
-| Argument             | Description                                                | Default                     |
-|----------------------|------------------------------------------------------------|-----------------------------|
-| `--proteins`         | CSV with structure/density/resolution columns              | required                    |
-| `--models`           | Model to run. One of `boltz1`, `boltz2`, `protenix`, `rf3` | required                    |
-| `--scalers`          | Guidance method(s) to sweep                                | `pure_guidance fk_steering` |
-| `--ensemble-sizes`   | Space-separated values, e.g. `"1 4"`                       | `"1 2 4 8"`                 |
-| `--gradient-weights` | Space-separated values, e.g. `"0.1 0.2"`                   | `"0.01 0.1 0.2"`            |
-| `--methods`          | Boltz-2 sampling method (required for boltz2)              | `X-RAY DIFFRACTION`         |
-| `--max-parallel`     | Parallel workers (default: number of GPUs)                 | `auto`                      |
-| `--dry-run`          | Print jobs without running them                            | off                         |
-| `--force-all`        | Re-run including already-successful jobs                   | off                         |
-| `--only-failed`      | Re-run only failed jobs                                    | off                         |
-| `--only-missing`     | Run only jobs not yet started                              | off                         |
-| `--disable-chiral-features` | Zero out RF3 chiral gradient features               | off                         |
-| `--track-chiral-features` | Track RF3 chiral gradient magnitude                   | off                         |
+| Argument                    | Description                                                | Default                     |
+| --------------------------- | ---------------------------------------------------------- | --------------------------- |
+| `--proteins`                | CSV of name/structure/density/resolution(/sequence)        | required                    |
+| `--models`                  | Model to run. One of `boltz1`, `boltz2`, `protenix`, `rf3` | required                    |
+| `--scalers`                 | Guidance method(s) to sweep                                | `pure_guidance fk_steering` |
+| `--ensemble-sizes`          | Space-separated values, e.g. `"1 4"`                       | `"1 2 4 8"`                 |
+| `--gradient-weights`        | Space-separated values, e.g. `"0.1 0.2"`                   | `"0.01 0.1 0.2"`            |
+| `--methods`                 | Boltz-2 sampling method (required for boltz2)              | `X-RAY DIFFRACTION`         |
+| `--max-parallel`            | Parallel workers (default: number of GPUs)                 | `auto`                      |
+| `--dry-run`                 | Print jobs without running them                            | off                         |
+| `--force-all`               | Re-run including already-successful jobs                   | off                         |
+| `--only-failed`             | Re-run only failed jobs                                    | off                         |
+| `--only-missing`            | Run only jobs not yet started                              | off                         |
+| `--disable-chiral-features` | Zero out RF3 chiral gradient features                      | off                         |
+| `--track-chiral-features`   | Track RF3 chiral gradient magnitude                        | off                         |
 
 > **Note**: Jobs are skipped if a `refined.cif` file already exists in the output directory.
 > Some flags (e.g., `--use-tweedie`, `--gradient-normalization`) are not reflected in the
@@ -72,12 +80,13 @@ name,structure,density,resolution
 > re-run all jobs regardless. This is under active development and will likely change soon.
 
 ## Location and contents of results
+
 Output layout: `grid_search_results/<protein>/<model>[_<method>]/<scaler>/ens<N>_gw<W>/`
 
 This layout is subject to change. Directory names are constructed as follows:
 
 | Name      | Description                                                         |
-|-----------|---------------------------------------------------------------------|
+| --------- | ------------------------------------------------------------------- |
 | `protein` | a name for the protein, from the proteins.csv file described above. |
 | `model`   | the model name, e.g. `boltz2` or `protenix`.                        |
 | `method`  | the sampling method, e.g. `X-RAY DIFFRACTION` for Boltz-2.          |
@@ -99,9 +108,11 @@ In that directory, you will find the following files generated by Sampleworks
 > We are tracking the issue https://github.com/prism-science/sampleworks/issues/68 and hope to fix it more generally soon.
 
 ## Finding and reading logs
+
 The script `run_grid_search.py` actually creates and runs several subprocesses.
 Its output primarily tells you where to find the rest of the output. The top of
 the script output will look like this:
+
 ```log
 2026-03-10 02:01:24.256 | INFO     | __main__:main:241 - Detected 2 GPUs: ['0', '1']
 2026-03-10 02:01:24.256 | INFO     | __main__:log_args:525 - ==================================================
@@ -128,6 +139,7 @@ the script output will look like this:
 2026-03-10 02:01:24.463 | INFO     | __mp_main__:run_guidance_queue_script:226 - Running worker 0: ['pixi', 'run', '-e', 'boltz', 'python', '/app/scripts/run_guidance_pipeline.py', '--job-queue-path', '/data/results/wjq_140704512577664.pkl'] on GPU 0
 2026-03-10 02:01:24.463 | INFO     | __mp_main__:run_guidance_queue_script:226 - Running worker 1: ['pixi', 'run', '-e', 'boltz', 'python', '/app/scripts/run_guidance_pipeline.py', '--job-queue-path', '/data/results/wjq_140704503117952.pkl'] on GPU 1
 ```
+
 This output contains basic output about the conditions it is trying, how many GPUs are available,
 how many jobs are being run, and where the output is being written.
 
@@ -137,25 +149,30 @@ how many jobs are being run, and where the output is being written.
 > linked to your host machine.
 
 As jobs complete, you will see rows like this:
+
 ```log
 2026-03-10 02:09:10.038 | INFO     | __main__:run_grid_search:204 - SUCCESS (5IMV_1.0occB, boltz2, X-RAY DIFFRACTION, pure_guidance 15.5s): /data/results/5IMV_1.0occB/boltz2_X-RAY_DIFFRACTION/pure_guidance/ens8_gw0.1/run.log
 2026-03-10 02:09:10.038 | INFO     | __main__:run_grid_search:204 - SUCCESS (5MC8_1.0occB, boltz2, X-RAY DIFFRACTION, pure_guidance 23.6s): /data/results/5MC8_1.0occB/boltz2_X-RAY_DIFFRACTION/pure_guidance/ens8_gw0.2/run.log
 2026-03-10 02:09:10.038 | INFO     | __main__:run_grid_search:204 - SUCCESS (5MHX_1.0occB, boltz2, X-RAY DIFFRACTION, pure_guidance 37.2s): /data/results/5MHX_1.0occB/boltz2_X-RAY_DIFFRACTION/pure_guidance/ens8_gw0.5/run.log
 ```
+
 which indicate where the log for a specific trial is located. Some debugging information
 can be found in those `run.log` files.
 However, if there is a serious failure you may not get that far, in which case you will need to look
 at the "worker job queue" logs. To find these, find the lines that say "Job failed with exception" in
 the output of `run_grid_search.py`, like this one:
+
 ```log
 2026-03-10 02:03:32.641 | ERROR    | __main__:run_grid_search:216 - Job failed with exception: [Errno 2] No such file or directory: '/data/results/wjq_140011687126848.results.pkl'
 ```
+
 The `wjq_140011687126848.results.pkl` file is the "worker job queue" results file.
 There is a corresponding `wjq_140011687126848.pkl` which contains a `TrialList`
 object that specifies the `Trials` that were attempted by a subprocess. The corresponding log file
 in this example is `wjq_140011687126848.log`. This file will contain the traceback
 of the exception that caused the "worker job queue" to fail. Looking through this file, you can
 see what trial is actually being run by looking for lines like this one:
+
 ```log
 2026-03-10 02:03:23.664 | INFO     | sampleworks.utils.guidance_script_utils:run_guidance_job_queue:589 - Running job 1/15: GuidanceConfig(protein='5I
 MV_1.0occB', structure='/data/inputs/processed/5IMV/5IMV_single_001_density_input.cif', density='/data/inputs/occ_sweeps/1.0occB/density_maps/5IMV_1.0
@@ -163,6 +180,7 @@ occB_1.00A.ccp4', model_name='boltz2', guidance_type='pure_guidance', log_path='
 1/run.log', output_dir='/data/results/5IMV_1.0occB/boltz2_X-RAY_DIFFRACTION/pure_guidance/ens8_gw0.1', partial_diffusion_step=120, loss_order=2, resol
 ution=1.0, device='cuda:0', gradient_normalization=True, em=False, guidance_start=-1, augmentation=True, align_to_input=True)
 ```
+
 which also gives you a path to the `run.log` file for that job. If that job fails, there will be
 information both in `run.log` in the trial output directory, as well as below in the worker job
 queue log.

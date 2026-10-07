@@ -14,6 +14,7 @@ from sampleworks.core.rewards.config import REWARD_OPTIONS_KEY, RewardConfig
 from sampleworks.core.rewards.options import option_type
 from sampleworks.core.rewards.registry import get_reward_spec, reward_type_names
 from sampleworks.utils.guidance_constants import GuidanceType, Rewards, StructurePredictor
+from sampleworks.utils.sequence import resolve_sequence_arg
 
 
 # Reward used when a run does not say which one it wants. Keeps every command
@@ -269,6 +270,7 @@ class GuidanceConfig:
     # in from the density fields below, which is how grid search and older
     # pickles keep working.
     reward_config: dict[str, Any] = field(default_factory=dict)
+    sequence: str | None = None
 
     # DO NOT remove the **kwargs, it is for compatibility with argparse.
     def add_argument(self, name: str, default: Any = None, **kwargs):
@@ -405,6 +407,7 @@ class GuidanceConfig:
             align_to_input=args.align_to_input,
             alignment_reverse_diffusion=args.alignment_reverse_diffusion,
             reward_config=reward_config.to_mapping(),
+            sequence=resolve_sequence_arg(args.sequence),
         )
 
         # __post_init__ already set defaults for model/guidance-specific
@@ -692,6 +695,15 @@ def reward_options_from_args(args: argparse.Namespace) -> dict[str, Any]:
 def add_generic_args(parser: argparse.ArgumentParser | GuidanceConfig):
     """Add CLI arguments shared by all models and guidance methods."""
     parser.add_argument("--structure", type=str, required=True, help="Input structure")
+    parser.add_argument(
+        "--sequence",
+        type=str,
+        default=None,
+        help="Reference sequence, e.g. the deposited PDB sequence (amino-acid string or path "
+        "to a single-record .fasta/.fa/.faa/.fas file). The structure predictor receives this "
+        "sequence, so unmodeled regions are generated. Only single-protein-chain structures are "
+        "supported currently.",
+    )
     parser.add_argument("--output-dir", type=str, default="output", help="Output directory")
     parser.add_argument(
         "--log-path", type=str, default=None, help="Log file path (default: output-dir/run.log)"
@@ -962,6 +974,7 @@ class JobConfig:
     method: str | None
     output_dir: str
     log_path: str
+    sequence: str | None = None
 
 
 @dataclass

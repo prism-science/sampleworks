@@ -742,21 +742,25 @@ def make_normalized_atom_id(arr: AtomArray | AtomArrayStack) -> np.ndarray:
     # Sorted so the index assignment is stable regardless of input ordering.
     unique_chains = sorted(set(chain_id))
     chain_to_idx = {c: i for i, c in enumerate(unique_chains)}
-    chain_res_to_seq: dict[tuple[str, int], int] = {}
+
+    # Assign sequential 0-based seq_pos per chain.
+    seq_pos = np.empty(len(res_id), dtype=np.int64)
     for chain in unique_chains:
         chain_mask = chain_id == chain
         chain_res_ids = res_id[chain_mask]
         _, first_idx = np.unique(chain_res_ids, return_index=True)
         ordered_unique = chain_res_ids[np.sort(first_idx)]
-        for seq_pos, rid in enumerate(ordered_unique):
-            chain_res_to_seq[(chain, int(rid))] = seq_pos
+        rid_to_pos = {int(rid): pos for pos, rid in enumerate(ordered_unique)}
+        seq_pos[chain_mask] = np.array([rid_to_pos[int(r)] for r in chain_res_ids])
 
-    return np.array(
-        [
-            f"{chain_to_idx[c]}_{chain_res_to_seq[(c, int(r))]}_{a}"
-            for c, r, a in zip(chain_id, res_id, atom_name)
-        ]
-    )
+    # Override with alignment-derived seq_idx when present (set by
+    # apply_sequence_override to handle gaps / missing residues).
+    if "seq_idx" in arr.get_annotation_categories():
+        override = cast(np.ndarray, arr.seq_idx)
+        mask = override >= 0
+        seq_pos[mask] = override[mask]
+
+    return np.array([f"{chain_to_idx[c]}_{s}_{a}" for c, s, a in zip(chain_id, seq_pos, atom_name)])
 
 
 @overload
