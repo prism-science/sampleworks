@@ -463,7 +463,9 @@ _5I09_FULL_SEQUENCE = (
 )
 
 
-def _single_chain_structure(res_ids: list[int], one_letter: str) -> dict:
+def _single_chain_structure(
+    res_ids: list[int], one_letter: str, ins_codes: list[str] | None = None
+) -> dict:
     """One CA atom per residue on chain A, with the observed sequence as chain_info."""
     from atomworks.enums import ChainType
     from biotite.sequence import ProteinSequence
@@ -474,6 +476,8 @@ def _single_chain_structure(res_ids: list[int], one_letter: str) -> dict:
     atoms.res_id[:] = res_ids
     atoms.res_name = np.array([ProteinSequence.convert_letter_1to3(c) for c in one_letter])
     atoms.atom_name[:] = "CA"
+    if ins_codes is not None:
+        atoms.ins_code = np.array(ins_codes)
     return {
         "asym_unit": atoms,
         "chain_info": {
@@ -507,3 +511,54 @@ def test_5i09_observed_residues_follow_author_numbering(structure_5i09_density: 
 
     protein = updated.seq_idx >= 0
     np.testing.assert_array_equal(updated.res_id[protein] - updated.seq_idx[protein], 1)
+
+
+@pytest.mark.parametrize(
+    ("full_sequence", "observed_positions"),
+    [
+        ("AAAAAA", [0, 1, 4, 5]),
+        # This example previously had a bug where the alignment offset was not applied correctly
+        # since the gap penalty is 0 at the ends:
+        # full:      I S M C G R I H C K N L F M P     (positions 0–14)
+        # observed:  I S _ C _ _ _ _ _ K N L F M P     (res_ids 1,2,4,10–15 -> should be aligned to
+        # true positions 0,1,3,9–14)
+        ("ISMCGRIHCKNLFMP", [0, 1, 3, 9, 10, 11, 12, 13, 14]),
+    ],
+)
+def test_ambiguous_alignment_follows_consistent_numbering(full_sequence, observed_positions):
+    """When the alignment ties, residue numbers (res_id = position + 1) decide the placement."""
+    observed = "".join(full_sequence[p] for p in observed_positions)
+    structure = _single_chain_structure([p + 1 for p in observed_positions], observed)
+
+    updated = apply_sequence_override(structure, full_sequence)["asym_unit"]
+
+    np.testing.assert_array_equal(updated.seq_idx, observed_positions)
+
+
+def test_insertion_codes_next_to_gap():
+    """Insertion-code residues share a res_id but still take consecutive sequence positions."""
+    structure = _single_chain_structure(
+        [1, 2, 3, 3, 3, 8, 9], "MACDEHI", ins_codes=["", "", "", "A", "B", "", ""]
+    )
+
+    updated = apply_sequence_override(structure, "MACDEFGHI")["asym_unit"]
+
+    np.testing.assert_array_equal(updated.seq_idx, [0, 1, 2, 3, 4, 7, 8])
+
+
+def test_reset_numbering_raises_malformed():
+    """A chain whose numbering restarts raises a malformed error."""
+    structure = _single_chain_structure([1, 2, 3, 1, 2], "MKLMK")
+
+    with pytest.raises(ValueError, match="malformed"):
+        apply_sequence_override(structure, "MKLMK")
+
+
+def test_ligand_in_protein_chain_raises_malformed(structure_1vme_density: dict):
+    """Ligands deposited inside the protein chain are reported and not silently misaligned."""
+    sequence = structure_1vme_density["chain_info"]["A"]["processed_entity_canonical_sequence"]
+
+    with pytest.raises(ValueError, match="malformed") as excinfo:
+        apply_sequence_override(structure_1vme_density, sequence.replace("X", ""))
+
+    assert "FEO" in str(excinfo.value)

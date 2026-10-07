@@ -137,10 +137,14 @@ def _snap_runs_to_numbering(
 
     A sequence-only alignment can tie when a residue next to a gap also occurs on the far
     side of the gap. In 5I09, for example, observed ``LYS 125 | SER 131 ARG 132 ...`` aligns
-    SER 131 directly after LYS 125 as readily as after the gap. Each run of consecutive
-    ``res_id`` is shifted to the first offset (``res_id - position``) that puts every residue
-    of the run on a matching letter, trying the run's own aligned offsets by frequency and
-    then the chain-wide most common offset.
+    SER 131 directly after LYS 125 as readily as after the gap. Treat each run of consecutive
+    ``res_id`` values as a block: one offset (``res_id - sequence index``) places every residue
+    in that run. For example, if K is residue 125 and a consecutive
+    ``S R G`` run is numbered 131–133, the shared numbering offset places that run six sequence
+    indices after K (offset 6). This can distinguish it from an earlier ``S R G`` that sequence
+    alignment might choose when a gap makes both placements plausible. Try the best-supported
+    chain-wide offset first, then the run's aligned offsets from most to least frequent, and accept
+    only a placement where every residue matches its sequence letter.
 
     Parameters
     ----------
@@ -157,8 +161,25 @@ def _snap_runs_to_numbering(
     Returns
     -------
     np.ndarray
-        Adjusted positions, shape ``(n_observed,)``. ``seq_idx`` is returned unchanged if
-        the adjusted positions would not be strictly increasing.
+        Adjusted positions, shape ``(n_observed,)``.
+
+    Raises
+    ------
+    ValueError
+        If the adjusted positions are not strictly increasing, which means the residue
+        numbering contradicts the sequence (e.g. duplicated or reset ``res_id`` in one chain).
+
+    Notes
+    -----
+    This function is a heuristic, and remains brittle. It assumes res_id steps match sequence
+    positions within a run and that most residues share one chain-wide offset.
+    align_optimal uses a linear -10 gap with free terminal gaps, so short runs beside a gap
+    can slide, and only runs whose numbering uniquely identifies them get rescued.
+    Homopolymer stretches stay ambiguous: every offset matches the letters, so a terminally-slid
+    run can still be misplaced silently.
+    Upgrade path: read label_seq_id / _pdbx_poly_seq_scheme when the CIF has them, or take
+    a user-supplied missing-residue mask (#441). This relies on additional input or a properly
+    formatted CIF.
     """
 
     def offsets_by_frequency(indices: np.ndarray) -> list[int]:
@@ -166,11 +187,22 @@ def _snap_runs_to_numbering(
         offsets, counts = np.unique(residue_ids[aligned] - seq_idx[aligned], return_counts=True)
         return offsets[np.argsort(-counts, kind="stable")].tolist()
 
-    chain_offset = offsets_by_frequency(np.arange(len(residue_ids)))[:1]
+    def letters_matched(offset: int) -> int:
+        positions = residue_ids - offset
+        return sum(
+            0 <= p < len(sequence) and sequence[p] == letter
+            for p, letter in zip(positions, observed_seq)
+        )
+
+    # The chain-wide offset is the one under which numbering explains the most letters.
+    # alignment frequency only breaks ties (a slid alignment can tie on frequency alone).
+    chain_offset = sorted(
+        offsets_by_frequency(np.arange(len(residue_ids))), key=letters_matched, reverse=True
+    )[:1]
     snapped = seq_idx.copy()
     run_breaks = np.flatnonzero(np.diff(residue_ids) != 1) + 1
     for run in np.split(np.arange(len(residue_ids)), run_breaks):
-        for offset in offsets_by_frequency(run) + chain_offset:
+        for offset in chain_offset + offsets_by_frequency(run):
             candidate = residue_ids[run] - offset
             in_range = candidate.min() >= 0 and candidate.max() < len(sequence)
             if in_range and all(sequence[c] == observed_seq[i] for i, c in zip(run, candidate)):
@@ -178,7 +210,12 @@ def _snap_runs_to_numbering(
                 break
 
     placed = snapped[snapped >= 0]
-    return snapped if np.all(np.diff(placed) > 0) else seq_idx
+    if not np.all(np.diff(placed) > 0):
+        raise ValueError(
+            "Sequence override failed: residue numbering is not consistent with the override "
+            "sequence (e.g. duplicated or reset res_ids in one chain). The CIF may be malformed."
+        )
+    return snapped
 
 
 def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> dict[str, Any]:
@@ -202,8 +239,10 @@ def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> 
     ------
     ValueError
         If a non-empty sequence is supplied but the structure has no protein
-        chains, has multiple protein chains, or contains invalid amino-acid
-        characters.
+        chains, has multiple protein chains, contains invalid amino-acid
+        characters, or if the protein chain looks malformed (non-amino-acid residues,
+        residue numbering that contradicts the sequence, or residues that cannot be
+        aligned to the override).
     """
     if sequence is None or not sequence.strip():
         return structure
@@ -233,10 +272,7 @@ def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> 
 
     # Align observed residues to override sequence so the AtomReconciler can
     # pair atoms correctly when missing residues are present.
-    arr = structure.get("asym_unit")
-    if arr is None:
-        return {**structure, "chain_info": updated_chain_info}
-
+    arr = structure["asym_unit"]
     chain_id_str = protein_chain_ids[0]
     chain_ids = np.asarray(arr.chain_id)
     res_ids = np.asarray(arr.res_id)
@@ -249,6 +285,19 @@ def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> 
         get_1_from_3_letter_code(n, ChainType.POLYPEPTIDE_L, use_closest_canonical=True)
         for n in chain_array.res_name[starts[:-1]]
     )
+    non_amino_acids = [
+        (int(res_id), str(res_name))
+        for letter, res_id, res_name in zip(
+            observed_seq, chain_array.res_id[starts[:-1]], chain_array.res_name[starts[:-1]]
+        )
+        if letter == "X"
+    ]
+    if non_amino_acids:
+        raise ValueError(
+            f"Sequence override failed: protein chain {chain_id_str} contains non-amino-acid "
+            f"residues {non_amino_acids[:10]}. The CIF may be malformed (non-polymer residues "
+            f"in a protein chain)."
+        )
 
     # Align observed → override to map each observed residue to its position
     # in the full (potentially longer) override sequence.
@@ -278,7 +327,8 @@ def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> 
             f"Sequence override failed: {len(unmapped)} observed residue(s) could not be "
             f"aligned to the override sequence (first 10 unmapped: {unmapped[:10]}). The override "
             f"sequence must be at least as long as, and compatible with, the observed "
-            f"structure sequence."
+            f"structure sequence. Otherwise, the CIF's residue numbering or sequence may be "
+            f"malformed."
         )
 
     # Annotate atoms with seq_idx: aligned position for the protein chain,

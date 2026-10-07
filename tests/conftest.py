@@ -472,6 +472,12 @@ def structure_1vme(resources_dir: Path) -> dict:
 
 
 @pytest.fixture(scope="session")
+def structure_1vme_density(resources_dir: Path) -> dict:
+    """1VME density input. Its chain A also carries CL/FEO ligand residues (malformed)."""
+    return parse_and_remove_hydrogens(resources_dir / "1vme" / "1VME_single_001_density_input.cif")
+
+
+@pytest.fixture(scope="session")
 def atom_array_1vme_with_missing_atoms(structure_1vme) -> AtomArray:
     """1VME atom array after parse_atom_array with add_missing_atoms=True.
 
