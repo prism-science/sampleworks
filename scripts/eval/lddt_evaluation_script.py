@@ -11,12 +11,13 @@ from joblib import delayed, Parallel
 from loguru import logger
 from sampleworks.eval.eval_dataclasses import ProteinConfig, Trial
 from sampleworks.eval.grid_search_eval_utils import (
+    build_reference_frames,
     parse_eval_args,
     setup_evaluation_parameters,
     translate_selection,
 )
 from sampleworks.metrics.lddt import AllAtomLDDT
-from sampleworks.utils.atom_array_utils import filter_to_common_atoms, map_altlocs_to_stack
+from sampleworks.utils.atom_array_utils import filter_to_common_atoms
 from sampleworks.utils.structure_utils import get_reference_atomarraystack
 from sklearn.metrics import silhouette_samples
 
@@ -209,10 +210,8 @@ def main(args: argparse.Namespace):
                     f"Loaded ref structure for {protein_key} "
                     f"and occupancies {altloc_occ}: {ref_path}"
                 )
-                reference_protein_stack, _ = map_altlocs_to_stack(
-                    reference_proteins,
-                    selection=translate_selection(sel),
-                    return_full_array=True,
+                reference_protein_stack = build_reference_frames(
+                    reference_proteins, translate_selection(sel)
                 )
                 # hierarchical dictionary cache makes it lighter weight to parallelize.
                 if (protein_key, occ_key) not in reference_atom_arrays:
