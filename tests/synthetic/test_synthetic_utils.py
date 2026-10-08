@@ -61,9 +61,7 @@ def test_load_structure_drops_zero_occupancy_atoms_after_assignment(
 
 
 @pytest.mark.parametrize("b_factor", [-1.0, float("inf"), float("nan")])
-def test_load_structure_rejects_invalid_b_factor(
-    resources_dir: Path, b_factor: float
-) -> None:
+def test_load_structure_rejects_invalid_b_factor(resources_dir: Path, b_factor: float) -> None:
     """B-factor overrides must be finite and non-negative."""
     with pytest.raises(ValueError, match="B-factor must be finite and non-negative"):
         load_structure_for_synthetic_reward(
