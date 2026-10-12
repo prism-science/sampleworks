@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 from sampleworks.core.rewards.options import (
+    DiffuseBraggOptions,
     RealSpaceDensityOptions,
     StructureFactorOptions,
 )
@@ -115,6 +116,14 @@ REWARD_SPECS: dict[Rewards, RewardSpec] = {
         resolution_option="resolution",
         # No resolution: the MTZ carries its own, and --resolution only truncates it.
         required_options=("mtzfile",),
+    ),
+    Rewards.DIFFUSE_BRAGG: RewardSpec(
+        name=Rewards.DIFFUSE_BRAGG,
+        options_cls=DiffuseBraggOptions,
+        builder_path="sampleworks.core.rewards.diffuse_bragg:build_diffuse_bragg_reward",
+        description="Bragg amplitudes plus anisotropic diffuse intensities, via lunus.sf.",
+        resolution_option="resolution",
+        # Which target is required depends on bragg_weight; the builder checks.
     ),
 }
 

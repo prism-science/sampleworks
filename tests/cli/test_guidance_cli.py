@@ -667,6 +667,29 @@ class TestRewardSelection:
         assert options["normalize_amplitude"] is True
         assert options["batch_partition"] == 10  # defaulted, and recorded as such
 
+    def test_diffuse_bragg_reward_takes_its_own_options(self):
+        config = GuidanceConfig.from_cli(
+            self.MODEL_ARGS
+            + self.STRUCTURE_ARGS
+            + [
+                "--reward-type",
+                "diffuse_bragg",
+                "--bragg-target",
+                "bragg.mtz",
+                "--diffuse-target",
+                "diffuse.mtz",
+                "--bragg-weight",
+                "0.3",
+            ]
+        )
+
+        assert list(config.reward_config) == ["diffuse_bragg"]
+        options = config.reward_config["diffuse_bragg"]["reward_options"]
+        assert options["bragg_target"] == "bragg.mtz"
+        assert options["diffuse_target"] == "diffuse.mtz"
+        assert options["bragg_weight"] == 0.3
+        assert options["normalize"] is True  # defaulted, and recorded as such
+
     def test_options_of_another_reward_are_rejected(self):
         """--density means nothing to the structure-factor reward, so it must not be accepted."""
         argv = (

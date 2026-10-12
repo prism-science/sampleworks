@@ -518,3 +518,69 @@ class TestBulkSolvent:
         assert torch.isfinite(loss_on)
         assert not torch.isclose(loss_on, loss_off)
         assert x.grad is not None and torch.isfinite(x.grad).all()
+
+
+class TestBuilder:
+    """The registry builder: options in, a reward out, with the target checks it owns."""
+
+    @staticmethod
+    def build(targets, **overrides):
+        from sampleworks.core.rewards.diffuse_bragg import build_diffuse_bragg_reward
+        from sampleworks.core.rewards.options import DiffuseBraggOptions
+        from sampleworks.core.rewards.registry import RewardBuildContext
+
+        bragg_path, diffuse_path, _, _ = targets
+        options = {"bragg_target": str(bragg_path), "diffuse_target": str(diffuse_path)}
+        options.update(overrides)
+        return build_diffuse_bragg_reward(
+            DiffuseBraggOptions(**options), RewardBuildContext(structure={})
+        )
+
+    def test_builds_from_options(self, targets):
+        from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
+
+        reward = self.build(targets, bragg_weight=0.3)
+
+        assert isinstance(reward, DiffuseBraggRewardFunction)
+        assert reward.bragg_weight == 0.3
+
+    def test_is_registered(self):
+        from sampleworks.core.rewards.registry import get_reward_spec
+
+        assert get_reward_spec("diffuse_bragg").options_cls.__name__ == "DiffuseBraggOptions"
+
+    def test_weighted_bragg_term_requires_its_target(self, targets):
+        with pytest.raises(ValueError, match="--bragg-weight is 0"):
+            self.build(targets, bragg_target=None)
+
+    def test_weighted_diffuse_term_requires_its_target(self, targets):
+        with pytest.raises(ValueError, match="--bragg-weight is 1"):
+            self.build(targets, diffuse_target=None)
+
+    def test_pure_diffuse_needs_no_bragg_target(self, targets):
+        reward = self.build(targets, bragg_target=None, bragg_weight=0.0)
+
+        assert reward.bragg_weight == 0.0
+
+    def test_weight_outside_the_unit_interval_is_rejected(self, targets):
+        with pytest.raises(ValueError, match=r"\[0, 1\]"):
+            self.build(targets, bragg_weight=1.5)
+
+
+def test_single_configuration_with_a_weighted_diffuse_term_warns(ensemble, targets, caplog):
+    """The diffuse term of one configuration is identically zero, so prepare() says so."""
+    atom_array, _ = ensemble
+    reward = build_reward(targets, 0.5)
+
+    prepare(reward, atom_array)
+
+    assert "identically zero" in caplog.text
+
+
+def test_pure_bragg_single_configuration_does_not_warn(ensemble, targets, caplog):
+    atom_array, _ = ensemble
+    reward = build_reward(targets, 1.0)
+
+    prepare(reward, atom_array)
+
+    assert "identically zero" not in caplog.text
