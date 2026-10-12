@@ -148,7 +148,7 @@ readiness table, and [docs/IT_OPT_TESTING.md](docs/IT_OPT_TESTING.md) for how to
 
 | Reward                         | Guided by                                      | Its options                                                                                    |
 | ------------------------------ | ---------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `real_space_density` (default) | Fit to a density map                           | `--density`, `--resolution`, `--loss-order`, `--em`                                            |
+| `real_space_density` (default) | Fit to a density map                           | `--density`, `--resolution`, `--loss-order`, `--em`, `--gemmi-tables`                          |
 | `structure_factor`             | Fit to structure-factor amplitudes from an MTZ | `--mtzfile`, `--expcolumns`, `--resolution`, `--bulk-solvent`, `--scattering-factor-mode`, ... |
 
 ```bash

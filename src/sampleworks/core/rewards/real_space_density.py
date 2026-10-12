@@ -364,8 +364,8 @@ def build_real_space_density_reward(
     Parameters
     ----------
     options
-        Density reward options: map path, resolution, loss order, and whether to
-        use electron scattering factors.
+        Density reward options: map path, resolution, loss order, and which
+        scattering factors to use.
     context
         Run-level inputs; the parsed input structure and the target device.
 
@@ -397,7 +397,9 @@ def build_real_space_density_reward(
 
     logger.debug("Setting up scattering parameters")
     atom_array = context.structure["asym_unit"]
-    scattering_params = setup_scattering_params(em_mode=options.em, device=device)
+    scattering_params = setup_scattering_params(
+        em_mode=options.em, device=device, gemmi_tables=options.gemmi_tables
+    )
 
     selection_mask = atom_array.occupancy > 0
     logger.info(f"Selected {selection_mask.sum()} atoms with occupancy > 0")

@@ -151,6 +151,7 @@ def _process_single_row(
     resolution: float,
     em_mode: bool,
     device: torch.device,
+    gemmi_tables: bool = False,
     strip_hydrogens: bool = False,
     strip_waters: bool = False,
     strip_ligands: bool = False,
@@ -174,6 +175,8 @@ def _process_single_row(
         If True, use electron scattering factors. If False, use X-ray factors.
     device
         PyTorch device for computation
+    gemmi_tables
+        If True, use gemmi's IT92 X-ray scattering factors instead of the built-in table.
     strip_hydrogens
         If True, remove hydrogen atoms before computing density. Default is False.
     strip_waters
@@ -202,7 +205,11 @@ def _process_single_row(
 
     try:
         density, xmap_torch = compute_density_from_atomarray(
-            atom_array, resolution=resolution, em_mode=em_mode, device=device
+            atom_array,
+            resolution=resolution,
+            em_mode=em_mode,
+            device=device,
+            gemmi_tables=gemmi_tables,
         )
     except Exception as e:
         logger.error(
@@ -250,6 +257,7 @@ def process_batch(
     occupancy_mode: str,
     em_mode: bool,
     device: torch.device,
+    gemmi_tables: bool = False,
     n_jobs: int = -1,
     strip_hydrogens: bool = False,
     strip_waters: bool = False,
@@ -272,6 +280,8 @@ def process_batch(
         If True, use electron scattering factors. If False, use X-ray factors.
     device
         PyTorch device for computation
+    gemmi_tables
+        If True, use gemmi's IT92 X-ray scattering factors instead of the built-in table.
     n_jobs
         Number of parallel jobs. -1 means use all available CPUs.
     strip_hydrogens
@@ -298,6 +308,7 @@ def process_batch(
             resolution=resolution,
             em_mode=em_mode,
             device=device,
+            gemmi_tables=gemmi_tables,
             strip_hydrogens=strip_hydrogens,
             strip_waters=strip_waters,
             strip_ligands=strip_ligands,
@@ -356,6 +367,11 @@ def parse_args() -> argparse.Namespace:
         "--em-mode", action="store_true", help="Use electron scattering factors (EM mode)"
     )
     density_group.add_argument(
+        "--gemmi-tables",
+        action="store_true",
+        help="Use gemmi's IT92 X-ray scattering factors instead of the built-in table",
+    )
+    density_group.add_argument(
         "--remove-hydrogens",
         action="store_true",
         help="Remove hydrogen atoms before computing density",
@@ -406,6 +422,7 @@ def main() -> None:
             occupancy_mode=args.occupancy_mode,
             em_mode=args.em_mode,
             device=device,
+            gemmi_tables=args.gemmi_tables,
             n_jobs=args.n_jobs,
             strip_hydrogens=args.remove_hydrogens,
             strip_waters=args.remove_waters,
@@ -429,6 +446,7 @@ def main() -> None:
             resolution=args.resolution,
             em_mode=args.em_mode,
             device=device,
+            gemmi_tables=args.gemmi_tables,
             strip_hydrogens=args.remove_hydrogens,
             strip_waters=args.remove_waters,
             strip_ligands=args.remove_ligands,
