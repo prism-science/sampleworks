@@ -55,7 +55,9 @@ from loguru import logger
 from lunus.sf import mean_and_diffuse
 from lunus.sf.symmetry_torch import supercell_factors
 from sampleworks.core.forward_models.xray import lunus_sf
+from sampleworks.core.rewards.options import DiffuseBraggOptions
 from sampleworks.core.rewards.protocol import RewardInputs
+from sampleworks.core.rewards.registry import RewardBuildContext
 from sampleworks.synthetic.synthetic_utils import resolve_mtz_column
 
 
@@ -523,6 +525,18 @@ class DiffuseBraggRewardFunction:
                 "DiffuseBraggRewardFunction.prepare() needs reward_inputs.atom_array "
                 "for the topology required to build the scattering kernels."
             )
+        # <|F|^2> - |<F>|^2 is identically zero for one configuration, so the
+        # diffuse term then contributes a constant and no gradient.
+        n_configs = (
+            reward_inputs.input_coords.shape[0] if reward_inputs.input_coords.ndim == 3 else 1
+        )
+        if self._scores_diffuse and n_configs < 2:
+            logger.warning(
+                "The diffuse term is weighted but the ensemble has one configuration, "
+                "whose diffuse intensity is identically zero: the term contributes no "
+                "gradient. Raise the ensemble size, or set bragg_weight=1.0 to score "
+                "Bragg alone."
+            )
         self.setup = lunus_sf.build_setup(
             reward_inputs.to_atom_array(),
             self.unit_cell,
@@ -722,3 +736,57 @@ class DiffuseBraggRewardFunction:
             )
 
         return total
+
+
+def build_diffuse_bragg_reward(
+    options: DiffuseBraggOptions, context: RewardBuildContext
+) -> DiffuseBraggRewardFunction:
+    """Build the combined Bragg + diffuse reward from its configured options.
+
+    Like the structure-factor reward this one binds to the model topology in
+    :meth:`DiffuseBraggRewardFunction.prepare`, so ``context`` is unused.
+
+    Parameters
+    ----------
+    options
+        Reward options; see :class:`~sampleworks.core.rewards.options.DiffuseBraggOptions`.
+    context
+        Run-level inputs. Unused here, kept for a uniform builder signature.
+
+    Returns
+    -------
+    DiffuseBraggRewardFunction
+        Reward scoring the ensemble against the MTZ targets.
+
+    Raises
+    ------
+    ValueError
+        If ``bragg_weight`` is outside [0, 1], or a weighted term has no target.
+    """
+    del context  # topology and device arrive in prepare()
+
+    if not 0.0 <= options.bragg_weight <= 1.0:
+        raise ValueError(
+            f"--bragg-weight must lie in [0, 1] to be a convex mixture; got {options.bragg_weight}."
+        )
+    if options.bragg_weight > 0.0 and options.bragg_target is None:
+        raise ValueError(
+            "The diffuse_bragg reward needs a Bragg target unless --bragg-weight is 0. "
+            "Pass --bragg-target, or set reward_options.bragg_target in a --reward-config file."
+        )
+    if options.bragg_weight < 1.0 and options.diffuse_target is None:
+        raise ValueError(
+            "The diffuse_bragg reward needs a diffuse target unless --bragg-weight is 1. "
+            "Pass --diffuse-target, or set reward_options.diffuse_target in a --reward-config file."
+        )
+
+    return DiffuseBraggRewardFunction(
+        bragg_target=options.bragg_target,
+        diffuse_target=options.diffuse_target,
+        bragg_weight=options.bragg_weight,
+        bragg_column=options.bragg_column,
+        diffuse_column=options.diffuse_column,
+        resolution=options.resolution,
+        normalize=options.normalize,
+        fit_scale=options.fit_scale,
+    )

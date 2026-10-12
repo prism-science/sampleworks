@@ -550,3 +550,81 @@ class TestBulkSolvent:
         with_solvent, without = loss("per_conformer"), loss("off")
         assert with_solvent < 1e-6
         assert without > 1e3 * max(with_solvent, 1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Registry builder and the single-configuration warning
+# ---------------------------------------------------------------------------
+
+
+class TestBuilder:
+    """The registry builder: options in, a reward out, with the target checks it owns."""
+
+    @staticmethod
+    def build(targets: DiffuseBraggTargets, **overrides):
+        """Build through the registry from both ensemble targets plus ``overrides``."""
+        from sampleworks.core.rewards.diffuse_bragg import build_diffuse_bragg_reward
+        from sampleworks.core.rewards.options import DiffuseBraggOptions
+        from sampleworks.core.rewards.registry import RewardBuildContext
+
+        options = {"bragg_target": str(targets.bragg), "diffuse_target": str(targets.diffuse)}
+        options.update(overrides)
+        return build_diffuse_bragg_reward(
+            DiffuseBraggOptions(**options), RewardBuildContext(structure={})
+        )
+
+    def test_builds_from_options(self, diffuse_bragg_targets):
+        """The options dataclass reaches the reward's constructor."""
+        from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
+
+        reward = self.build(diffuse_bragg_targets, bragg_weight=0.3)
+
+        assert isinstance(reward, DiffuseBraggRewardFunction)
+        assert reward.bragg_weight == 0.3
+
+    def test_is_registered(self):
+        """The registry knows the reward under its CLI name."""
+        from sampleworks.core.rewards.registry import get_reward_spec
+
+        assert get_reward_spec("diffuse_bragg").options_cls.__name__ == "DiffuseBraggOptions"
+
+    def test_weighted_bragg_term_requires_its_target(self, diffuse_bragg_targets):
+        """The builder's own check names the CLI flag."""
+        with pytest.raises(ValueError, match="--bragg-weight is 0"):
+            self.build(diffuse_bragg_targets, bragg_target=None)
+
+    def test_weighted_diffuse_term_requires_its_target(self, diffuse_bragg_targets):
+        """The builder's own check names the CLI flag."""
+        with pytest.raises(ValueError, match="--bragg-weight is 1"):
+            self.build(diffuse_bragg_targets, diffuse_target=None)
+
+    def test_pure_diffuse_needs_no_bragg_target(self, diffuse_bragg_targets):
+        """A zero Bragg weight builds without a Bragg target."""
+        reward = self.build(diffuse_bragg_targets, bragg_target=None, bragg_weight=0.0)
+
+        assert reward.bragg_weight == 0.0
+
+    def test_weight_outside_the_unit_interval_is_rejected(self, diffuse_bragg_targets):
+        """The builder rejects a non-convex weight before constructing the reward."""
+        with pytest.raises(ValueError, match=r"\[0, 1\]"):
+            self.build(diffuse_bragg_targets, bragg_weight=1.5)
+
+
+def test_single_configuration_with_a_weighted_diffuse_term_warns(
+    diffuse_bragg_ensemble, diffuse_bragg_targets, caplog
+):
+    """The diffuse term of one configuration is identically zero, so prepare() says so."""
+    atom_array, _ = diffuse_bragg_ensemble
+    prepared_reward(diffuse_bragg_targets, atom_array, 0.5)
+
+    assert "identically zero" in caplog.text
+
+
+def test_pure_bragg_single_configuration_does_not_warn(
+    diffuse_bragg_ensemble, diffuse_bragg_targets, caplog
+):
+    """A pure-Bragg reward has no diffuse term to warn about."""
+    atom_array, _ = diffuse_bragg_ensemble
+    prepared_reward(diffuse_bragg_targets, atom_array, 1.0)
+
+    assert "identically zero" not in caplog.text
