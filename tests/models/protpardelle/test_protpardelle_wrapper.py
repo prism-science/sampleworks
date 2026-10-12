@@ -49,7 +49,10 @@ from sampleworks.models.protpardelle.wrapper import (
     ProtpardelleConditioning,
     ProtpardelleConfig,
 )
-from sampleworks.utils.structure_utils import get_asym_unit_from_structure
+from sampleworks.utils.structure_utils import (
+    get_asym_unit_from_structure,
+    get_valid_atom_mask,
+)
 
 
 SEQ_A = "ACDEFGHIKL"
@@ -231,6 +234,7 @@ class TestFeaturize:
         assert template.res_name[starts].tolist() == [
             ProteinSequence.convert_letter_1to3(aa) for aa in seq_5i09_deposited
         ]
+
         prior = protpardelle_wrapper.initialize_from_prior(1, features=features)
         save_trajectory(
             scaler_type=GuidanceType.PURE_GUIDANCE,
@@ -246,6 +250,52 @@ class TestFeaturize:
         assert np.all(array.occupancy > 0)
         np.testing.assert_array_equal(array.res_name, template.res_name)
         np.testing.assert_array_equal(array.atom_name, template.atom_name)
+
+    def test_override_template_places_observed_atoms_in_model_slots(
+        self, protpardelle_wrapper, structure_5i09_density, seq_5i09_deposited
+    ):
+        """Each observed input atom lands in its own atom37 slot of the model template.
+
+        Reads the template the way the model reads ``x_t`` and compares coordinates
+        at each observed atom's slot. Atom names alone cannot tell CCD order (N, CA,
+        C, O, CB) from atom37 order (N, CA, C, CB, O), so the check compares coordinates.
+
+        Parameters
+        ----------
+        protpardelle_wrapper : ProtpardelleWrapper
+            Wrapper backed by the small randomly initialized model.
+        structure_5i09_density : dict
+            Atomworks-parsed structure with missing residues.
+        seq_5i09_deposited : str
+            Full deposited sequence including the unobserved residues.
+        """
+        from sampleworks.utils.sequence import apply_sequence_override
+
+        structure = apply_sequence_override(structure_5i09_density, seq_5i09_deposited)
+        annotated = annotate_structure_for_protpardelle(structure)
+        features = protpardelle_wrapper.featurize(annotated)
+        conditioning = features.conditioning
+        template = conditioning.model_atom_array
+        assert template is not None
+
+        # [1, L, 37, 3]: template coordinates scattered where the model reads each flat atom.
+        template_atom37 = _convert_to_atom37(
+            torch.as_tensor(template.coord)[None],
+            conditioning.atom37_residue_index.cpu(),
+            conditioning.atom37_atom_index.cpu(),
+            conditioning.seq_mask.shape[1],
+        )
+        observed = get_asym_unit_from_structure(structure, atom_array_index=0)
+        observed = observed[get_valid_atom_mask(observed) & (observed.atom_name != "OXT")]
+        observed_slots = [
+            residue_constants.atom_order[ATOM37_ATOM_NAME_ALIASES.get(str(name), str(name))]
+            for name in observed.atom_name
+        ]
+        # [n_observed, 3]
+        coords_at_observed_slots = template_atom37[0, observed.seq_idx, observed_slots]
+        np.testing.assert_allclose(
+            coords_at_observed_slots.numpy(), observed.coord, rtol=0, atol=1e-4
+        )
 
     def test_override_template_builds_reward_inputs(
         self, protpardelle_wrapper, structure_5i09_density, seq_5i09_deposited
