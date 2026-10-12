@@ -144,6 +144,20 @@ class TestApplySelection:
         basic_coord = cast(np.ndarray, basic_atom_array_multichain.coord)
         np.testing.assert_array_equal(result_coord[0], basic_coord[0])
 
+    def test_stack_keeps_every_model(self, basic_atom_array_multichain):
+        """A stack is filtered along atoms; each model matches the per-model result."""
+        shifted = basic_atom_array_multichain.copy()
+        shifted.coord = shifted.coord + 1.0
+        atom_stack = stack([basic_atom_array_multichain, shifted])
+        result = apply_selection(atom_stack, "chain A and resi 2-4")
+        assert isinstance(result, AtomArrayStack)
+        assert result.stack_depth() == 2
+        assert result.array_length() == 3
+        for model, source in zip(result, (basic_atom_array_multichain, shifted), strict=True):
+            np.testing.assert_array_equal(
+                model.coord, apply_selection(source, "chain A and resi 2-4").coord
+            )
+
 
 class TestExtractSelectionCoordinates:
     """Tests for extract_selection_coordinates function."""
