@@ -42,12 +42,14 @@ dependencies = [
   "atomworks[ml]==2.1.1",
   "joblib",
   "einx<0.4",
+  "gemmi",
   "hydra-core",
   "jax",
   "jaxtyping",
   "loguru",
   "omegaconf",
   "python-dotenv",
+  "reciprocalspaceship",
   "sfcalculator-torch>=0.3.3"
 ]
 description = "Experimentally guided biomolecular ensemble generation."

@@ -9,12 +9,10 @@ selection, and occupancy.
 """
 
 import argparse
-import csv
 import sys
 import traceback
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast, ClassVar
+from typing import cast
 
 import gemmi
 import reciprocalspaceship as rs
@@ -26,108 +24,13 @@ from SFC_Torch.io import PDBParser
 
 from sampleworks.synthetic.synthetic_utils import (
     atomarray_to_gemmi,
+    BatchRowForMTZ,
+    load_batch_csv,
     load_structure_for_synthetic_reward,
     resolve_mtz_column,
     resolve_parallel_jobs,
-    validate_occupancy_values,
 )
 from sampleworks.utils.torch_utils import try_gpu
-
-
-@dataclass
-class BatchRowForMTZ:
-    """A row from the batch processing CSV file. Each row represents one structure.
-
-    Attributes
-    ----------
-    filename
-        Path to the structure file (relative to base_dir, which is meant to be the
-        parent directory of all structures.)
-    mtzfile
-        Optional custom output filename for the MTZ
-    unit_cell
-        Optional unit cell to override the one in the structure file
-    space_group
-        Optional space group to override the one in the structure file. Accepts any
-        string (e.g. "P 21 21 2") or integer (space group number, e.g. 18) that gemmi
-        can convert to a SpaceGroup object, which is then converted to the international
-        notation (Hermann-Mauguin string). See gemmi documentation for more details
-        (https://gemmi.readthedocs.io/en/latest/symmetry.html#spacegroup).
-    selection
-        Optional atom selection string in pyMOL-like syntax (e.g., 'chain A and resi 10-50')
-    occupancy_values
-        Custom list of occupancy values for altlocs, must be in range [0.0, 1.0]
-    """
-
-    VALID_EXTENSIONS: ClassVar[frozenset[str]] = frozenset({".cif", ".mmcif"})
-    LEGACY_EXTENSIONS: ClassVar[frozenset[str]] = frozenset({".pdb", ".ent"})
-
-    filename: Path | str
-    mtzfile: str | None = None
-    unit_cell: gemmi.UnitCell | None = None
-    space_group: str | None = None
-    selection: str | None = None
-    occupancy_values: list[float] = field(default_factory=list)
-
-    def __post_init__(self) -> None:
-        ext = Path(self.filename).suffix.lower()
-        all_supported = self.VALID_EXTENSIONS | self.LEGACY_EXTENSIONS
-        if ext not in all_supported:
-            raise ValueError(
-                f"Invalid file extension '{ext}' for '{self.filename}'. "
-                f"Expected one of: {', '.join(sorted(all_supported))}"
-            )
-        if ext in self.LEGACY_EXTENSIONS:
-            logger.warning(
-                f"'{ext}' is a legacy PDB format and support may be removed in a future version. "
-                "Prefer .cif or .mmcif (mmCIF format)."
-            )
-        validate_occupancy_values(self.occupancy_values)
-
-    @classmethod
-    def from_dict(cls, row: dict[str, Any]) -> "BatchRowForMTZ":
-        """Create a BatchRowForMTZ from a CSV row dictionary.
-
-        CSV columns:
-        - filename (required): e.g. '1abc.cif', relative to base_dir
-        - mtzfile: e.g. 'output/1abc.mtz'
-        - unit_cell (six floats separated by ':'): e.g. '1.0:1.0:1.0:90.0:90.0:90.0'
-          in units of Angstroms and degrees
-        - space_group (number or Hermann-Mauguin string): e.g. '18' or 'P 21 21 2'
-        - occupancy_values (colon-separated floats summing to 1.0): e.g. '0.3:0.7'
-        - selection (PyMOL-like syntax): e.g. 'chain A'
-        """
-        if "filename" not in row:
-            raise KeyError("CSV is missing required 'filename' column")
-
-        unit_cell: gemmi.UnitCell | None = None
-        if row.get("unit_cell"):
-            parts = [float(v.strip()) for v in row["unit_cell"].split(":")]
-            if len(parts) != 6:
-                raise ValueError(
-                    f"unit_cell must be 6 colon-separated values (a:b:c:alpha:beta:gamma), "
-                    f"got {len(parts)}: {row['unit_cell']!r}"
-                )
-            unit_cell = gemmi.UnitCell(*parts)
-
-        space_group: str | None = None
-        if row.get("space_group"):
-            space_group = row["space_group"]
-            if space_group.isdigit():
-                space_group = gemmi.SpaceGroup(int(space_group)).hm
-
-        occupancy_values: list[float] = []
-        if row.get("occupancy_values"):
-            occupancy_values = [float(v.strip()) for v in row["occupancy_values"].split(":")]
-
-        return cls(
-            filename=row["filename"],
-            mtzfile=row.get("mtzfile") or None,
-            unit_cell=unit_cell,
-            space_group=space_group,
-            selection=row.get("selection") or None,
-            occupancy_values=occupancy_values,
-        )
 
 
 def _build_rs_dataset_for_one_label(
@@ -419,35 +322,6 @@ def _process_single_row(
             f"({type(e).__name__}): {e}\n"
             f"{''.join(traceback.format_tb(e.__traceback__))}"
         )
-
-
-def load_batch_csv(csv_path: Path) -> list[BatchRowForMTZ]:
-    """Load and parse a CSV file for batch processing.
-
-    Parameters
-    ----------
-    csv_path
-        Path to CSV file with columns: filename (required), mtzfile, unit_cell,
-        space_group, selection, occupancy_values (all optional)
-
-    Returns
-    -------
-    list[BatchRowForMTZ]
-        List of validated batch processing rows
-
-    Raises
-    ------
-    KeyError
-        If the CSV is missing the required 'filename' column
-    """
-    rows = []
-    with open(csv_path) as f:
-        reader = csv.DictReader(f)
-        if reader.fieldnames is None or "filename" not in reader.fieldnames:
-            raise KeyError(f"CSV file '{csv_path}' is missing required 'filename' column")
-        for row in reader:
-            rows.append(BatchRowForMTZ.from_dict(row))
-    return rows
 
 
 def process_batch(
