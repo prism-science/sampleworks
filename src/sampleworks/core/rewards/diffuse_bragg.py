@@ -3,7 +3,7 @@
 One forward pass gives both observables: ``structure_factors_batch`` returns
 ``F`` per configuration, and ``mean_and_diffuse`` reduces that to ``<F>`` (Bragg)
 and ``<|F|²> − |<F>|²`` (diffuse). Scoring them in one reward rather than two
-avoids paying for the splat and FFT twice.
+avoids paying for the grid evaluation and FFT twice.
 
 The two terms are combined convexly, ``bragg_weight`` running from 1.0 (pure
 Bragg) to 0.0 (pure diffuse). For that dial to mean anything, each term is
@@ -119,7 +119,7 @@ class DiffuseBraggRewardFunction:
             # access (PEP 562), and IsotropicBackground is the only name here
             # from aniso_torch, so a caller injecting its own factory never
             # loads it. mean_and_diffuse is at module scope because it shares
-            # structure_factor_torch with the splat, already loaded by lunus_sf.
+            # structure_factor_torch with the grid evaluation, already loaded by lunus_sf.
             from lunus.sf import IsotropicBackground
 
             isotropic_background = IsotropicBackground
@@ -375,7 +375,7 @@ class DiffuseBraggRewardFunction:
 
         ``occupancies`` arrive as ``1/N`` from ``RewardInputs``, a convention the
         sum-based rewards rely on. Diffuse is a *variance*, so each configuration
-        must be splatted at its own occupancy and the moments taken afterwards —
+        must be evaluated on the grid at its own occupancy and the moments taken afterwards;
         leaving the ``1/N`` in place would scale both moments by ``1/N²`` and
         collapse the variance toward zero, which looks like guidance doing
         nothing rather than like an error. The factor is divided out here.
@@ -389,7 +389,7 @@ class DiffuseBraggRewardFunction:
         n_configs = coordinates.shape[0]
         occupancies = occupancies * n_configs
 
-        # Before the splat and FFT, not after: _weight() raises for an unset
+        # Before the grid evaluation and FFT, not after: _weight() raises for an unset
         # current_time or a callable that returns a weight outside [0, 1], and
         # there is no reason to pay for a forward pass first.
         weight = self._weight()
