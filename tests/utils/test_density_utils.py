@@ -243,7 +243,7 @@ class TestComputeDensityFromAtomarray:
             simple_atom_array, resolution=2.0, em_mode=False, device=device, gemmi_tables=True
         )
         assert density_gemmi.shape == density.shape
-        torch.testing.assert_close(density_gemmi, density, rtol=0.05, atol=0.05 * density.max())
+        torch.testing.assert_close(density_gemmi, density, rtol=0, atol=0.005 * density.max())
         assert not torch.equal(density_gemmi, density)
 
     def test_device_parameter(self, simple_atom_array: AtomArray, device: torch.device):
