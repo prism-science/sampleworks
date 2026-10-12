@@ -598,8 +598,11 @@ def structure_5i09_prediction_deleted_atoms_idxs() -> list[dict]:
 
 @pytest.fixture(scope="session")
 def structure_6b8x_with_altlocs(resources_dir: Path) -> AtomArray | AtomArrayStack:
+    # b_factor: the lunus structure-factor tests need it per atom.
     return load_any(
-        resources_dir / "6b8x" / "6b8x_final.pdb", altloc="all", extra_fields=["occupancy"]
+        resources_dir / "6b8x" / "6b8x_final.pdb",
+        altloc="all",
+        extra_fields=["occupancy", "b_factor"],
     )
 
 
