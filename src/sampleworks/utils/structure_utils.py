@@ -637,10 +637,23 @@ def get_reference_structure_coords(
                 try:
                     # TODO: enumerate actual exceptions this can raise.
                     # One coordinate set per model: a multi-model ensemble reference holds
-                    # each conformer in its own model rather than as altloc atoms.
-                    coords = np.vstack(
-                        [extract_selection_coordinates(model, selection) for model in ref_struct]
-                    )
+                    # each conformer in its own model rather than as altloc atoms. A model with
+                    # no usable coordinates is skipped so the others still define the region.
+                    model_coords = []
+                    for model_index, model in enumerate(ref_struct):
+                        try:
+                            model_coords.append(extract_selection_coordinates(model, selection))
+                        except RuntimeError as e:
+                            logger.warning(
+                                f"  Skipping model {model_index} of {ref_path} "
+                                f"for selection '{selection}': {e}"
+                            )
+                    if not model_coords:
+                        raise RuntimeError(
+                            f"No model in {ref_path} has usable coordinates "
+                            f"for selection '{selection}'"
+                        )
+                    coords = np.vstack(model_coords)
                     if not len(coords):
                         logger.warning(f"  No atoms in selection '{selection}' for {protein_key}")
                     elif not np.isfinite(coords).all():

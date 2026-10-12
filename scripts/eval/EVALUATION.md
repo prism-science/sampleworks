@@ -39,8 +39,6 @@ You can run the following command, which assumes:
 - the output is organized by RCSB PDB ID in directories like `/home/ubuntu/grid_search_results/1VME/...`,
   see the `--rcsb-pattern` argument which is a regex to match the RCSB PDB ID
 - the input PDB cif files are stored in `/home/ubuntu/grid_search_inputs` as required for running the
-  the grid search (see GRID_SEARCH.md)
-- the input PDB cif files are stored in `/home/ubuntu/grid_search_inputs` as required for running the
   the grid search (see GRID_SEARCH.md). The files will have paths like, e.g.,
   `/home/ubuntu/grid_search_inputs/1VME/1VME_original.cif`. See also the `--input-pdb-pattern`
   argument, which is a python format string which must use the `pdb_id` variable to refer to the
