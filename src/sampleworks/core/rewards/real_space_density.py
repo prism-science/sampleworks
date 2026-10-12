@@ -1,5 +1,6 @@
 from typing import Any, cast
 
+import gemmi
 import numpy as np
 import torch
 from biotite.structure import AtomArray, AtomArrayStack
@@ -23,7 +24,29 @@ from sampleworks.utils.elements import elements_to_scattering_indices
 from sampleworks.utils.torch_utils import try_gpu
 
 
-def setup_scattering_params(em_mode: bool, device: torch.device) -> torch.Tensor:
+def it92_structure_factors() -> dict[str, list[list[float]]]:
+    """IT92 X-ray scattering coefficients from gemmi, laid out like ATOM_STRUCTURE_FACTORS.
+
+    IT92 is four Gaussians plus a constant. The constant takes the sixth ``a``
+    slot and the fifth pair is zero, which is how the six-term integrand already
+    reads a row, so no change downstream. Symbols gemmi does not recognise -- the
+    ``'?'`` placeholder and qFit's valence pseudo-elements -- are left out and
+    fall to the caller's zero-fill.
+    """
+    factors = {}
+    for element in ELEMENT_TO_SCATTERING_INDEX:
+        # IT92 tabulates neutral atoms, so the charge suffix is dropped: Fe2+ -> Fe.
+        gemmi_element = gemmi.Element(element.rstrip("+-0123456789"))
+        if gemmi_element.atomic_number == 0:
+            continue
+        it92 = gemmi_element.it92
+        factors[element] = [[*it92.a, 0.0, it92.c], [*it92.b, 0.0, 0.0]]
+    return factors
+
+
+def setup_scattering_params(
+    em_mode: bool, device: torch.device, gemmi_tables: bool = False
+) -> torch.Tensor:
     """Set up atomic scattering parameters for density calculation.
 
     The returned tensor is indexed by the values in
@@ -39,14 +62,33 @@ def setup_scattering_params(em_mode: bool, device: torch.device) -> torch.Tensor
         ``False``, use X-ray scattering factors.
     device
         PyTorch device that should own the returned lookup tensor.
+    gemmi_tables
+        If ``True``, read the scattering factors from gemmi instead of the qFit
+        tables above. For X-ray that is IT92 (International Tables for
+        Crystallography Vol. C, Table 6.1.1.4). gemmi's electron table, C4322, is
+        not wired up, so this cannot yet be combined with ``em_mode``.
 
     Returns
     -------
     torch.Tensor
         Tensor of shape ``(n_indices, n_coeffs, 2)`` containing scattering
         coefficients.
+
+    Raises
+    ------
+    ValueError
+        If ``gemmi_tables`` is combined with ``em_mode``: gemmi's electron table is
+        not wired up yet.
     """
-    structure_factors = ELECTRON_SCATTERING_FACTORS if em_mode else ATOM_STRUCTURE_FACTORS
+    if em_mode and gemmi_tables:
+        raise ValueError(
+            "gemmi_tables with em_mode is not supported yet: gemmi's electron table "
+            "(C4322) is not wired up, only IT92 for X-ray."
+        )
+    if gemmi_tables:
+        structure_factors = it92_structure_factors()
+    else:
+        structure_factors = ELECTRON_SCATTERING_FACTORS if em_mode else ATOM_STRUCTURE_FACTORS
     n_coeffs = len(structure_factors["C"][0])
     n_elements = max(ELEMENT_TO_SCATTERING_INDEX.values()) + 1
     scattering_tensor = torch.zeros((n_elements, n_coeffs, 2), dtype=torch.float32, device=device)
