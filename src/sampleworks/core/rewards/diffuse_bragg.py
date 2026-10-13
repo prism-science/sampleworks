@@ -161,7 +161,7 @@ class DiffuseBraggRewardFunction:
         )
 
         self.setup: lunus_sf.LunusSetup | None = None
-        self._aniso = None
+        self._aniso: Callable | None = None
 
     def _load_targets(self, bragg_path, diffuse_path, bragg_column, diffuse_column):
         """Read the targets and reduce them to one shared reflection list.
@@ -295,7 +295,7 @@ class DiffuseBraggRewardFunction:
             # Shell thickness is d* of (1,1,1), the convention to_aniso uses.
             shell_thickness = float(np.sqrt(self.unit_cell.calculate_1_d2((1, 1, 1))))
             d_star = np.sqrt(self.unit_cell.calculate_1_d2_array(self._hkl))
-            self._aniso = self._isotropic_background(
+            aniso = self._isotropic_background(
                 d_star, shell_thickness, device=device, dtype=torch.float32
             )
             # The spline basis is (n_refl, n_bins) and is built in float64 before
@@ -303,16 +303,17 @@ class DiffuseBraggRewardFunction:
             # finally occupies. A diffuse map of a few million reflections puts
             # that in the hundreds of MB -- worth reporting rather than
             # discovering as an allocation failure.
-            basis_mb = len(self._hkl) * self._aniso.n_bins * 4 / 1e6
+            basis_mb = len(self._hkl) * aniso.n_bins * 4 / 1e6
             logger.info(
-                f"Anisotropic transform: {self._aniso.n_bins} shells of "
+                f"Anisotropic transform: {aniso.n_bins} shells of "
                 f"{shell_thickness:.5f} 1/A, basis {basis_mb:.0f} MB on {device}"
             )
             # The target is constant, so transform it once. Done in torch rather
             # than through the numpy one-shot so both sides pass through exactly
             # the same operator, leaving no room for the two to disagree.
             target = torch.as_tensor(self._diffuse_obs, dtype=torch.float32, device=device)
-            self._diffuse_t = self._aniso(target)
+            self._diffuse_t = aniso(target)
+            self._aniso = aniso
 
         logger.info(
             f"Prepared DiffuseBraggRewardFunction: {len(self._hkl)} reflections, "
@@ -326,7 +327,7 @@ class DiffuseBraggRewardFunction:
 
     def _weight(self) -> float:
         """The Bragg weight for this evaluation."""
-        if not callable(self.bragg_weight):
+        if isinstance(self.bragg_weight, (int, float)):
             return float(self.bragg_weight)
         if self.current_time is None:
             raise RuntimeError(
@@ -405,6 +406,8 @@ class DiffuseBraggRewardFunction:
         if weight > 0.0:
             total = total + weight * self._residual(torch.abs(mean_f), self._bragg_t)
         if weight < 1.0:
+            if self._aniso is None:
+                raise RuntimeError("prepare() built no anisotropic transform for the diffuse term.")
             total = total + (1.0 - weight) * self._residual(self._aniso(diffuse), self._diffuse_t)
 
         return total
