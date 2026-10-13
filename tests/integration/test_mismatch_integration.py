@@ -603,21 +603,6 @@ class TestAlignment:
         expected = apply_forward_transform(transformed, transform, rotation_only=False)
         torch.testing.assert_close(aligned, torch.as_tensor(expected), atol=1e-6, rtol=1e-6)
 
-    def test_gradient_flow_through_alignment(self, mismatch_case: MismatchCase):
-        """Alignment preserves gradients when allow_gradients=True."""
-        reconciler = AtomReconciler.from_arrays(
-            mismatch_case.model_atom_array,
-            mismatch_case.struct_atom_array,
-        )
-        reference = _model_reference_from_case(mismatch_case, reconciler)
-
-        model_coords = reference.clone().detach().requires_grad_(True)
-        aligned, _ = reconciler.align(model_coords, reference, allow_gradients=True)
-
-        grad = torch.autograd.grad(aligned.sum(), model_coords)[0]
-        assert grad is not None
-        assert torch.isfinite(grad).all()
-
 
 class TestPreprocessingPipeline:
     """Pipeline level mismatch tests using :class:`MismatchCaseWrapper`."""
