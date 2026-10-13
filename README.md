@@ -432,7 +432,7 @@ For lightweight source-checkout development, use [uv](https://docs.astral.sh/uv/
 ```bash
 uv sync --group dev
 uv run sampleworks-guidance --help
-uv run pytest tests -m 'not slow'
+uv run pytest tests -m 'not slow and not gpu'
 ```
 
 Additional uv dependency groups are available for development and analysis:
@@ -470,7 +470,7 @@ extras unless you know they are supported on your machine:
 ```bash
 brew install uv
 uv sync --group dev
-uv run pytest tests -m 'not slow'
+uv run pytest tests -m 'not slow and not gpu'
 ```
 
 `protenix` currently requires `triton`/NVIDIA GPU support and is not expected to

@@ -248,7 +248,7 @@ cmd = "f=0; pixi run -e boltz-dev tests || f=1; pixi run -e protenix-dev tests |
 # Per-env: pixi run -e rf3-dev tests "-k integration"
 [tool.pixi.tasks.tests]
 args = [{arg = "flags", default = ""}]
-cmd = "pytest -m 'not slow' {{ flags }}"
+cmd = "pytest -m 'not slow and not gpu' {{ flags }}"
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
