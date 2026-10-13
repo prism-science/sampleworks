@@ -1,7 +1,7 @@
 """Tests for synthetic density batch-row argument handling."""
 
 import pytest
-from sampleworks.synthetic.generate_synthetic_density import BatchRow
+from sampleworks.synthetic.generate_synthetic_density import BatchRow, main
 
 
 def test_batch_row_accepts_occupancy_values_column() -> None:
@@ -31,3 +31,20 @@ def test_batch_row_rejects_unsupported_extension() -> None:
     """Only mmCIF and legacy PDB-like structure extensions are supported."""
     with pytest.raises(ValueError, match="Invalid file extension"):
         BatchRow(filename="input.txt")
+
+
+def test_em_mode_with_gemmi_tables_exits_nonzero(monkeypatch, tmp_path) -> None:
+    """The pair is rejected before any row runs, not swallowed per row with exit 0."""
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "generate_synthetic_density",
+            "--structure",
+            str(tmp_path / "x.cif"),
+            "--em-mode",
+            "--gemmi-tables",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        main()
+    assert excinfo.value.code == 1

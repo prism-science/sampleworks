@@ -151,11 +151,11 @@ def _process_single_row(
     resolution: float,
     em_mode: bool,
     device: torch.device,
-    gemmi_tables: bool = False,
     strip_hydrogens: bool = False,
     strip_waters: bool = False,
     strip_ligands: bool = False,
     save_structure: bool = True,
+    gemmi_tables: bool = False,
 ) -> None:
     """Process a single structure row.
 
@@ -175,8 +175,6 @@ def _process_single_row(
         If True, use electron scattering factors. If False, use X-ray factors.
     device
         PyTorch device for computation
-    gemmi_tables
-        If True, use gemmi's IT92 X-ray scattering factors instead of the built-in table.
     strip_hydrogens
         If True, remove hydrogen atoms before computing density. Default is False.
     strip_waters
@@ -189,6 +187,8 @@ def _process_single_row(
         TODO: be more thorough with this? We could make this a transform
     save_structure
         If True, save the processed structure to a CIF file in the input directory. Default is True.
+    gemmi_tables
+        If True, use gemmi's IT92 X-ray scattering factors instead of the built-in table.
     """
     structure_path = base_dir / row.filename
     atom_array = load_structure_for_synthetic_reward(
@@ -257,12 +257,12 @@ def process_batch(
     occupancy_mode: str,
     em_mode: bool,
     device: torch.device,
-    gemmi_tables: bool = False,
     n_jobs: int = -1,
     strip_hydrogens: bool = False,
     strip_waters: bool = False,
     strip_ligands: bool = False,
     save_structure: bool = False,
+    gemmi_tables: bool = False,
 ) -> None:
     """Process multiple structures from a CSV file in batch mode.
 
@@ -280,8 +280,6 @@ def process_batch(
         If True, use electron scattering factors. If False, use X-ray factors.
     device
         PyTorch device for computation
-    gemmi_tables
-        If True, use gemmi's IT92 X-ray scattering factors instead of the built-in table.
     n_jobs
         Number of parallel jobs. -1 means use all available CPUs.
     strip_hydrogens
@@ -292,6 +290,8 @@ def process_batch(
         If True, remove ligand molecules (non-water heteroatoms) before computing density.
     save_structure
         If True, save the processed structure to a CIF file in the input directory.
+    gemmi_tables
+        If True, use gemmi's IT92 X-ray scattering factors instead of the built-in table.
     """
     from joblib import delayed, Parallel
 
@@ -411,6 +411,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.em_mode and args.gemmi_tables:
+        logger.error("--gemmi-tables is not supported with --em-mode (only IT92 for X-ray)")
+        sys.exit(1)
     device = try_gpu()
 
     if args.batch_csv:
