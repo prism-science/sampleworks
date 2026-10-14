@@ -86,7 +86,7 @@ def build_density_transformer(
     xmap: XMap,
     em_mode: bool,
     device: torch.device,
-    scattering_table: str = "wk1995",
+    scattering_table: str | None = None,
 ) -> tuple[DifferentiableTransformer, XMap_torch]:
     """Build a reusable DifferentiableTransformer bound to a grid.
 
@@ -104,8 +104,8 @@ def build_density_transformer(
         If True, use electron scattering factors. If False, use X-ray factors.
     device : torch.device
         PyTorch device for computation.
-    scattering_table : str
-        X-ray scattering table, ``"wk1995"`` (default) or ``"it1992"``.
+    scattering_table : str | None
+        ``"wk1995"``, ``"it1992"`` or ``"electron"``; ``None`` takes the mode's default.
 
     Returns
     -------
@@ -171,7 +171,7 @@ def compute_density_from_atomarray(
     resolution: float | None = None,
     em_mode: bool = False,
     device: torch.device | None = None,
-    scattering_table: str = "wk1995",
+    scattering_table: str | None = None,
 ) -> tuple[torch.Tensor, XMap_torch]:
     """Compute synthetic electron density from atomic coordinates.
 
@@ -200,8 +200,8 @@ def compute_density_from_atomarray(
         If True, use electron scattering factors. If False, use X-ray factors.
     device : torch.device | None
         PyTorch device for computation. If None, will try to use GPU.
-    scattering_table : str
-        X-ray scattering table, ``"wk1995"`` (default) or ``"it1992"``.
+    scattering_table : str | None
+        ``"wk1995"``, ``"it1992"`` or ``"electron"``; ``None`` takes the mode's default.
 
     Returns
     -------

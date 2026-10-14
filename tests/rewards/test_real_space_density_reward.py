@@ -172,6 +172,27 @@ class TestSetupScatteringParams:
         }
         assert zero_rows == {"?", "Cval"}
 
+    def test_em_mode_defaults_to_the_electron_table(self, device):
+        """``None`` resolves to the electron table with em_mode and WK1995 without."""
+        em_default = setup_scattering_params(em_mode=True, device=device)
+        em_named = setup_scattering_params(em_mode=True, device=device, scattering_table="electron")
+        xray_default = setup_scattering_params(em_mode=False, device=device)
+        xray_named = setup_scattering_params(
+            em_mode=False, device=device, scattering_table="wk1995"
+        )
+        assert torch.equal(em_default, em_named)
+        assert torch.equal(xray_default, xray_named)
+        assert not torch.equal(em_default, xray_default)
+
+    def test_tables_must_match_the_mode(self, device):
+        """An X-ray table with em_mode, or the electron table without, is rejected."""
+        with pytest.raises(ValueError, match="X-ray table"):
+            setup_scattering_params(em_mode=True, device=device, scattering_table="wk1995")
+        with pytest.raises(ValueError, match="needs em_mode"):
+            setup_scattering_params(em_mode=False, device=device, scattering_table="electron")
+        with pytest.raises(ValueError, match="Unknown scattering_table"):
+            setup_scattering_params(em_mode=False, device=device, scattering_table="n_gaussian")
+
     def test_it1992_reject_em_mode_until_c4322_is_wired(self, device):
         """gemmi carries an electron table too (C4322), but it is not wired up, so
         the combination fails loudly rather than silently using the X-ray one."""

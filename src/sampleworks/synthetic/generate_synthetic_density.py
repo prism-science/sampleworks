@@ -10,6 +10,10 @@ import torch
 from loguru import logger
 
 from sampleworks.core.forward_models.xray.real_space_density import XMap_torch
+from sampleworks.core.rewards.real_space_density import (
+    resolve_scattering_table,
+    SCATTERING_TABLES,
+)
 from sampleworks.synthetic.synthetic_utils import (
     load_structure_for_synthetic_reward,
     resolve_parallel_jobs,
@@ -155,7 +159,7 @@ def _process_single_row(
     strip_waters: bool = False,
     strip_ligands: bool = False,
     save_structure: bool = True,
-    scattering_table: str = "wk1995",
+    scattering_table: str | None = None,
 ) -> None:
     """Process a single structure row.
 
@@ -188,7 +192,7 @@ def _process_single_row(
     save_structure
         If True, save the processed structure to a CIF file in the input directory. Default is True.
     scattering_table
-        X-ray scattering table, ``"wk1995"`` (default) or ``"it1992"``.
+        ``"wk1995"``, ``"it1992"`` or ``"electron"``; ``None`` takes the mode's default.
     """
     structure_path = base_dir / row.filename
     atom_array = load_structure_for_synthetic_reward(
@@ -262,7 +266,7 @@ def process_batch(
     strip_waters: bool = False,
     strip_ligands: bool = False,
     save_structure: bool = False,
-    scattering_table: str = "wk1995",
+    scattering_table: str | None = None,
 ) -> None:
     """Process multiple structures from a CSV file in batch mode.
 
@@ -291,7 +295,7 @@ def process_batch(
     save_structure
         If True, save the processed structure to a CIF file in the input directory.
     scattering_table
-        X-ray scattering table, ``"wk1995"`` (default) or ``"it1992"``.
+        ``"wk1995"``, ``"it1992"`` or ``"electron"``; ``None`` takes the mode's default.
     """
     from joblib import delayed, Parallel
 
@@ -368,9 +372,9 @@ def parse_args() -> argparse.Namespace:
     )
     density_group.add_argument(
         "--scattering-table",
-        choices=["wk1995", "it1992"],
-        default="wk1995",
-        help="X-ray scattering table, as in Phenix",
+        choices=list(SCATTERING_TABLES),
+        default=None,
+        help="Scattering table, as in Phenix (default: electron with --em-mode, otherwise wk1995)",
     )
     density_group.add_argument(
         "--remove-hydrogens",
@@ -412,10 +416,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if args.em_mode and args.scattering_table == "it1992":
-        logger.error(
-            "--scattering-table it1992 is not supported with --em-mode (only IT92 for X-ray)"
-        )
+    try:
+        resolve_scattering_table(args.em_mode, args.scattering_table)
+    except ValueError as error:
+        logger.error(str(error))
         sys.exit(1)
     device = try_gpu()
 

@@ -74,8 +74,10 @@ class RealSpaceDensityOptions:
     resolution: float | None = opt(None, help="Map resolution in Angstroms")
     loss_order: int = opt(2, help="L1 or L2 loss", choices=(1, 2))
     em: bool = opt(False, help="Use electron (cryo-EM) scattering factors")
-    scattering_table: str = opt(
-        "wk1995", help="X-ray scattering table, as in Phenix", choices=("wk1995", "it1992")
+    scattering_table: str | None = opt(
+        None,
+        help="Scattering table, as in Phenix (default: electron with --em, otherwise wk1995)",
+        choices=("wk1995", "it1992", "electron"),
     )
 
 

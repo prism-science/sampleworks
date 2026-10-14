@@ -44,8 +44,49 @@ def it92_structure_factors() -> dict[str, list[list[float]]]:
     return factors
 
 
+SCATTERING_TABLES = ("wk1995", "it1992", "electron")
+
+
+def resolve_scattering_table(em_mode: bool, scattering_table: str | None) -> str:
+    """Pick the scattering table for a mode, and reject a table that does not fit it.
+
+    Parameters
+    ----------
+    em_mode
+        Whether electron scattering factors are wanted.
+    scattering_table
+        One of :data:`SCATTERING_TABLES`, or ``None`` for the mode's default:
+        ``"electron"`` with ``em_mode``, ``"wk1995"`` otherwise.
+
+    Returns
+    -------
+    str
+        The table name to use.
+
+    Raises
+    ------
+    ValueError
+        If the name is unknown, or an X-ray table is paired with ``em_mode`` or the
+        electron table without it.
+    """
+    if scattering_table is None:
+        return "electron" if em_mode else "wk1995"
+    if scattering_table not in SCATTERING_TABLES:
+        raise ValueError(
+            f"Unknown scattering_table {scattering_table!r}; use one of {SCATTERING_TABLES}."
+        )
+    if em_mode and scattering_table != "electron":
+        raise ValueError(
+            f"scattering_table={scattering_table!r} is an X-ray table and cannot be used "
+            "with em_mode; use 'electron' (gemmi's electron table, C4322, is not wired up)."
+        )
+    if not em_mode and scattering_table == "electron":
+        raise ValueError("scattering_table='electron' needs em_mode; use 'wk1995' or 'it1992'.")
+    return scattering_table
+
+
 def setup_scattering_params(
-    em_mode: bool, device: torch.device, scattering_table: str = "wk1995"
+    em_mode: bool, device: torch.device, scattering_table: str | None = None
 ) -> torch.Tensor:
     """Set up atomic scattering parameters for density calculation.
 
@@ -63,10 +104,11 @@ def setup_scattering_params(
     device
         PyTorch device that should own the returned lookup tensor.
     scattering_table
-        X-ray table, named as in Phenix: ``"wk1995"`` (Waasmaier & Kirfel 1995, the
-        qFit table above) or ``"it1992"`` (International Tables for Crystallography
-        Vol. C, Table 6.1.1.4, read from gemmi). gemmi's electron table, C4322, is
-        not wired up, so ``"it1992"`` cannot yet be combined with ``em_mode``.
+        Table name as in Phenix: ``"wk1995"`` (Waasmaier & Kirfel 1995, the qFit
+        table above), ``"it1992"`` (International Tables for Crystallography
+        Vol. C, Table 6.1.1.4, read from gemmi) or ``"electron"`` (Peng et al.
+        1996). ``None`` takes the mode's default, ``"electron"`` for ``em_mode``
+        and ``"wk1995"`` otherwise; see :func:`resolve_scattering_table`.
 
     Returns
     -------
@@ -77,22 +119,15 @@ def setup_scattering_params(
     Raises
     ------
     ValueError
-        If ``scattering_table`` is not a known name, or is ``"it1992"`` with
-        ``em_mode``: gemmi's electron table is not wired up yet.
+        If ``scattering_table`` is unknown or does not match ``em_mode``.
     """
-    if scattering_table not in ("wk1995", "it1992"):
-        raise ValueError(
-            f"Unknown scattering_table {scattering_table!r}; use 'wk1995' or 'it1992'."
-        )
-    if em_mode and scattering_table == "it1992":
-        raise ValueError(
-            "scattering_table='it1992' with em_mode is not supported yet: gemmi's electron "
-            "table (C4322) is not wired up, only IT92 for X-ray."
-        )
+    scattering_table = resolve_scattering_table(em_mode, scattering_table)
     if scattering_table == "it1992":
         structure_factors = it92_structure_factors()
+    elif scattering_table == "electron":
+        structure_factors = ELECTRON_SCATTERING_FACTORS
     else:
-        structure_factors = ELECTRON_SCATTERING_FACTORS if em_mode else ATOM_STRUCTURE_FACTORS
+        structure_factors = ATOM_STRUCTURE_FACTORS
     n_coeffs = len(structure_factors["C"][0])
     n_elements = max(ELEMENT_TO_SCATTERING_INDEX.values()) + 1
     scattering_tensor = torch.zeros((n_elements, n_coeffs, 2), dtype=torch.float32, device=device)
