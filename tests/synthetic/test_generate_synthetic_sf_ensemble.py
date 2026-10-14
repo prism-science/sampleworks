@@ -143,25 +143,6 @@ def test_summed_models_match_merged_altloc_structure(tmp_path: Path) -> None:
     np.testing.assert_allclose(ensemble_f, merged_f, atol=1e-4 * np.abs(merged_f).max())
 
 
-def _complex_column(dataset: rs.DataSet, label: str) -> np.ndarray:
-    """Return one structure-factor set of an MTZ dataset as complex values.
-
-    Parameters
-    ----------
-    dataset
-        Dataset holding ``F{label}`` and ``PHIF{label}`` columns.
-    label
-        Structure-factor label, e.g. ``"protein"`` or ``"total"``.
-
-    Returns
-    -------
-    np.ndarray
-        Complex structure factors ``[n_hkl]``. Comparing these rather than phases keeps
-        near-zero amplitudes from failing on phase wrap-around.
-    """
-    return dataset.to_structurefactor(f"F{label}", f"PHIF{label}").to_numpy()
-
-
 @pytest.mark.parametrize("bulk_solvent", ["combined", "per_conformer"])
 def test_identical_models_match_single_structure_with_solvent(
     tmp_path: Path, bulk_solvent: str
@@ -204,10 +185,10 @@ def test_identical_models_match_single_structure_with_solvent(
     assert list(ensemble.columns) == list(single.columns)
     assert ensemble.index.equals(single.index)
     for label in ("protein", "total"):
-        single_f = _complex_column(single, label)
-        np.testing.assert_allclose(
-            _complex_column(ensemble, label), single_f, atol=1e-4 * np.abs(single_f).max()
-        )
+        # Compare complex values so phases of near-zero amplitudes cannot fail on wrap-around.
+        single_f = single.to_structurefactor(f"F{label}", f"PHIF{label}").to_numpy()
+        ensemble_f = ensemble.to_structurefactor(f"F{label}", f"PHIF{label}").to_numpy()
+        np.testing.assert_allclose(ensemble_f, single_f, atol=1e-4 * np.abs(single_f).max())
 
 
 def test_solvent_modes_leave_fprotein_unchanged(tmp_path: Path) -> None:
@@ -241,7 +222,8 @@ def test_solvent_modes_leave_fprotein_unchanged(tmp_path: Path) -> None:
         assert {"Ftotal", "SIGFtotal", "PHIFtotal"} <= set(dataset.columns)
         assert np.isfinite(dataset["Ftotal"].to_numpy()).all()
         np.testing.assert_array_equal(
-            _complex_column(dataset, "protein"), _complex_column(datasets["off"], "protein")
+            dataset.to_structurefactor("Fprotein", "PHIFprotein").to_numpy(),
+            datasets["off"].to_structurefactor("Fprotein", "PHIFprotein").to_numpy(),
         )
 
 

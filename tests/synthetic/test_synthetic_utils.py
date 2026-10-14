@@ -27,7 +27,8 @@ def test_resolve_parallel_jobs_preserves_single_cuda_worker() -> None:
     assert resolve_parallel_jobs("cuda", 1) == 1
 
 
-def test_load_structure_overrides_b_factors(resources_dir: Path) -> None:
+@pytest.mark.parametrize("b_factor", [1.0, 37.5, 100.0])
+def test_load_structure_overrides_b_factors(resources_dir: Path, b_factor: float) -> None:
     """A flat B-factor override replaces every retained input value."""
     atom_array = load_structure_for_synthetic_reward(
         resources_dir / "6b8x" / "6b8x_final.pdb",
@@ -37,11 +38,11 @@ def test_load_structure_overrides_b_factors(resources_dir: Path) -> None:
         strip_waters=True,
         strip_ligands=True,
         selection="chain A",
-        b_factor=100.0,
+        b_factor=b_factor,
     )
 
     assert atom_array is not None
-    assert (atom_array.b_factor == 100.0).all()
+    assert (atom_array.b_factor == b_factor).all()
 
 
 def test_load_structure_drops_zero_occupancy_atoms_after_assignment(
