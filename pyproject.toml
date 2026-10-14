@@ -124,7 +124,7 @@ rf3 = {features = ["rf3"]}
 rf3-dev = {features = ["rf3", "dev"]}
 
 [tool.pixi.feature.boltz]
-platforms = ["linux-64"]
+platforms = ["linux-64-cuda-12"]
 pypi-dependencies = {"boltz" = "==2.2.1", "cuequivariance-ops-torch-cu12" = "*", "cuequivariance-torch" = "*", "rdkit" = ">=2025.3.6"}
 
 [tool.pixi.feature.boltz.pypi-options.dependency-overrides]
@@ -135,7 +135,7 @@ platforms = ["osx-arm64"]
 pypi-dependencies = {"boltz" = "*", "cuequivariance-torch" = "*", "joblib" = "*", "rdkit" = ">=2025.3.6", "sfcalculator-torch" = ">=0.3.2"}
 
 [tool.pixi.feature.dev]
-platforms = ["linux-64", "osx-arm64"]
+platforms = ["linux-64-cuda-12", "osx-arm64"]
 
 [tool.pixi.feature.dev.pypi-dependencies]
 mypy = "*"
@@ -152,7 +152,7 @@ ty = "==0.0.39"
 # feature so adding one does not re-solve the model environments, and bioconda
 # is scoped here so everything else keeps solving against conda-forge alone.
 channels = ["conda-forge", "bioconda"]
-platforms = ["linux-64", "osx-arm64"]
+platforms = ["linux-64-cuda-12", "osx-arm64"]
 
 [tool.pixi.feature.external-tools.dependencies]
 # PDB-REDO's ramachandran/torsion z-score tool, invoked as a binary on PATH by
@@ -160,14 +160,14 @@ platforms = ["linux-64", "osx-arm64"]
 tortoize = ">=2.0.16,<3"
 
 [tool.pixi.feature.protenix]
-platforms = ["linux-64"]
+platforms = ["linux-64-cuda-12"]
 pypi-dependencies = {"einx" = "*", "protenix" = "*", "triton" = "*"}
 
 [tool.pixi.feature.protenix.pypi-options.dependency-overrides]
 rdkit = ">=2024.3.5,<2025.9"
 
 [tool.pixi.feature.protpardelle]
-platforms = ["linux-64", "osx-arm64"]
+platforms = ["linux-64-cuda-12", "osx-arm64"]
 
 [tool.pixi.feature.protpardelle.dependencies]
 biopython = "*"
@@ -214,9 +214,6 @@ sampleworks = {editable = true, path = "."}
 gemmi = "==0.6.7"
 pandas = "==2.3.1"
 
-[tool.pixi.system-requirements]
-cuda = "12"
-
 [tool.pixi.target]
 
 [tool.pixi.target.linux-64.dependencies]
@@ -252,7 +249,8 @@ cmd = "pytest -m 'not slow and not gpu' {{ flags }}"
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = ["linux-64", "osx-arm64"]
+# Named to match the platform key in pixi.lock; features reference it by this name.
+platforms = [{cuda = "12", name = "linux-64-cuda-12", platform = "linux-64"}, "osx-arm64"]
 
 [tool.pytest.ini_options]
 addopts = "-v --strict-markers"
