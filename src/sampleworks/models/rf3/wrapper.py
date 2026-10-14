@@ -46,9 +46,11 @@ class RF3Conditioning:
     s_inputs : Tensor
         Input embeddings (S_inputs_I).
     s_trunk : Tensor
-        Single representation from trunk (S_I).
+        Single representation from trunk (S_I). With ``z_trunk``, this is what inference-time
+        latent optimization optimizes; ``AttrLatentIO`` addresses it by this attribute name
+        (see ``models/latent_adapter.py``).
     z_trunk : Tensor
-        Pair representation from trunk (Z_II).
+        Pair representation from trunk (Z_II). See ``s_trunk``.
     features : dict[str, Any]
         Raw feature dict (f tensor).
     true_atom_array : AtomArray | None

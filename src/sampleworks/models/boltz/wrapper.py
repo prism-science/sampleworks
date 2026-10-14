@@ -283,8 +283,11 @@ class BoltzConditioning:
         Relative position encoding tensor.
     feats : dict[str, Any]
         Raw batch dict from dataloader.
-    diffusion_conditioning : dict[str, Tensor] | None
-        Additional diffusion conditioning (Boltz2 only).
+    diffusion_conditioning : dict[str, Any] | None
+        Boltz2 only. The bundle ``DiffusionModule.forward`` indexes: ``q``, ``c``,
+        ``to_keys``, ``atom_enc_bias``, ``atom_dec_bias``, ``token_trans_bias``. The values
+        are not all tensors -- ``to_keys`` is a windowing closure over the atom-attention
+        index matrix -- so the value type is ``Any``.
     true_atom_array : AtomArray | None
         Original structure's atom array (occupancy-filtered) for reward computation.
         Boltz's internal atom representation may differ from this due to padding, etc.
@@ -299,7 +302,7 @@ class BoltzConditioning:
     s_inputs: Tensor
     relative_position_encoding: Tensor
     feats: dict[str, Any]
-    diffusion_conditioning: dict[str, Tensor] | None = None
+    diffusion_conditioning: dict[str, Any] | None = None
     true_atom_array: AtomArray | None = None
     model_atom_array: AtomArray | None = None
 
@@ -789,23 +792,12 @@ class Boltz2Wrapper:
 
             s, z = pairformer_module(s, z, mask=mask, pair_mask=pair_mask)
 
-        q, c, to_keys, atom_enc_bias, atom_dec_bias, token_trans_bias = (
-            self.model.diffusion_conditioning(
-                s_trunk=s,
-                z_trunk=z,
-                relative_position_encoding=relative_position_encoding,
-                feats=features,
-            )
+        diffusion_conditioning = self._build_diffusion_conditioning(
+            s_trunk=s,
+            z_trunk=z,
+            relative_position_encoding=relative_position_encoding,
+            feats=features,
         )
-
-        diffusion_conditioning = {
-            "q": q,
-            "c": c,
-            "to_keys": to_keys,
-            "atom_enc_bias": atom_enc_bias,
-            "atom_dec_bias": atom_dec_bias,
-            "token_trans_bias": token_trans_bias,
-        }
 
         return {
             "s": s,
@@ -814,6 +806,54 @@ class Boltz2Wrapper:
             "relative_position_encoding": relative_position_encoding,
             "feats": features,
             "diffusion_conditioning": diffusion_conditioning,
+        }
+
+    def _build_diffusion_conditioning(
+        self,
+        s_trunk: Tensor,
+        z_trunk: Tensor,
+        relative_position_encoding: Tensor,
+        feats: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Derive the diffusion module's conditioning bundle from the trunk latents.
+
+        Boltz2 collapses ``s`` and ``z`` into six coordinate-independent tensors that the
+        diffusion module reuses at every denoising step. ``featurize`` computes them once;
+        ``step`` recomputes them when a latent has to stay on the autograd path.
+
+        Parameters
+        ----------
+        s_trunk : Tensor
+            Single representation, shape [batch, tokens, dim].
+        z_trunk : Tensor
+            Pair representation, shape [batch, tokens, tokens, dim].
+        relative_position_encoding : Tensor
+            Relative position encoding, as produced by the trunk pass.
+        feats : dict[str, Any]
+            Raw batch dict from the dataloader.
+
+        Returns
+        -------
+        dict[str, Any]
+            The six entries ``DiffusionModule.forward`` indexes. ``to_keys`` is a closure,
+            not a tensor.
+        """
+        q, c, to_keys, atom_enc_bias, atom_dec_bias, token_trans_bias = (
+            self.model.diffusion_conditioning(
+                s_trunk=s_trunk,
+                z_trunk=z_trunk,
+                relative_position_encoding=relative_position_encoding,
+                feats=feats,
+            )
+        )
+
+        return {
+            "q": q,
+            "c": c,
+            "to_keys": to_keys,
+            "atom_enc_bias": atom_enc_bias,
+            "atom_dec_bias": atom_dec_bias,
+            "token_trans_bias": token_trans_bias,
         }
 
     def step(
@@ -869,6 +909,17 @@ class Boltz2Wrapper:
         else:
             raise ValueError("pad_len is negative, cannot pad x_t")
 
+        # The cached bundle freezes s and z, and the diffusion module reads z only through it.
+        # Rebuild from live latents when one is optimizable, or IT-opt's gradient goes nowhere.
+        diffusion_conditioning = cond.diffusion_conditioning
+        if torch.is_grad_enabled() and (cond.s.requires_grad or cond.z.requires_grad):
+            diffusion_conditioning = self._build_diffusion_conditioning(
+                s_trunk=cond.s,
+                z_trunk=cond.z,
+                relative_position_encoding=cond.relative_position_encoding,
+                feats=feats,
+            )
+
         padded_atom_coords_denoised = self.model.structure_module.preconditioned_network_forward(
             padded_x_t,
             t_tensor,
@@ -877,7 +928,7 @@ class Boltz2Wrapper:
                 s_inputs=cond.s_inputs,
                 s_trunk=cond.s,
                 feats=feats,
-                diffusion_conditioning=cond.diffusion_conditioning,
+                diffusion_conditioning=diffusion_conditioning,
             ),
         )
 
