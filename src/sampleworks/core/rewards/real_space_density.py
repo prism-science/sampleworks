@@ -75,6 +75,7 @@ def resolve_scattering_table(em_mode: bool, scattering_table: str | None) -> str
         raise ValueError(
             f"Unknown scattering_table {scattering_table!r}; use one of {SCATTERING_TABLES}."
         )
+    # TODO(#466): wire gemmi's electron table (C4322) so em_mode has a gemmi option.
     if em_mode and scattering_table != "electron":
         raise ValueError(
             f"scattering_table={scattering_table!r} is an X-ray table and cannot be used "
