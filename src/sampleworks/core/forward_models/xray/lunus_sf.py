@@ -335,7 +335,7 @@ def build_setup(
     )
 
     # IT92 coefficients from gemmi, the table the real-space density path reads
-    # with gemmi_tables, rather than lunus's IT92_COEFFS, which covers a default
+    # with scattering_table="it1992", rather than lunus's IT92_COEFFS, which covers a default
     # set and raises KeyError inside the kernel builder for Se, metals or halides.
     # IT92 tabulates neutral atoms, so the charge suffix is dropped; gemmi returns
     # atomic number 0 for a symbol it does not recognize.
@@ -466,8 +466,8 @@ def structure_factors(
     Raises
     ------
     ValueError
-        If ``coords`` is not 3-dimensional, or its atom count disagrees with the
-        setup's.
+        If ``coords`` is not 3-dimensional, its atom count disagrees with the
+        setup's, or it is on a different device from the setup.
     """
     if coords.ndim != 3:
         raise ValueError(
@@ -480,7 +480,13 @@ def structure_factors(
             f"{setup.n_atoms}. Rebuild the setup for this atom array."
         )
 
-    frac = coords @ setup.frac_matrix.to(dtype=coords.dtype, device=coords.device).T
+    if coords.device != setup.atom_A.device:
+        raise ValueError(
+            f"coords are on {coords.device} but the setup was built on {setup.atom_A.device}. "
+            "Build the setup on the device the coordinates will use."
+        )
+
+    frac = coords @ setup.frac_matrix.to(dtype=coords.dtype).T
 
     return structure_factors_batch(
         frac,
