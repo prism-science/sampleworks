@@ -113,8 +113,9 @@ class TestSetupScatteringParams:
         assert params[0].sum().item() == 0
 
     def test_it1992_reproduce_the_it92_scattering_factor(self, device):
-        """IT92 is four Gaussians plus a constant, padded into the six-term layout,
-        so f(s) read off the tensor must equal f(s) from gemmi's coefficients."""
+        """IT92 is four Gaussians plus a constant, padded into the six-term layout
+        with the constant as a Gaussian of b = 0, so summing all six terms must
+        equal f(s) from gemmi's coefficients."""
         from sampleworks.core.rewards.real_space_density import ELEMENT_TO_SCATTERING_INDEX
 
         params = setup_scattering_params(em_mode=False, device=device, scattering_table="it1992")
@@ -122,7 +123,7 @@ class TestSetupScatteringParams:
 
         for element in ["H", "C", "N", "O", "S", "Se"]:
             row = params[ELEMENT_TO_SCATTERING_INDEX[element]]
-            padded = (row[:5, 0:1] * torch.exp(-row[:5, 1:2] * s**2)).sum(0) + row[5, 0]
+            padded = (row[:, 0:1] * torch.exp(-row[:, 1:2] * s**2)).sum(0)
             it92 = gemmi.Element(element).it92
             a = torch.tensor(it92.a, device=device).unsqueeze(1)
             b = torch.tensor(it92.b, device=device).unsqueeze(1)
