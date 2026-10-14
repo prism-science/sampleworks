@@ -123,6 +123,8 @@ protpardelle = {features = ["protpardelle", "diffuse"]}
 protpardelle-dev = {features = ["protpardelle", "dev", "diffuse"]}
 rf3 = {features = ["rf3", "diffuse"]}
 rf3-dev = {features = ["rf3", "dev", "diffuse"]}
+# autoapi reads the source without importing it, so the docs env skips the default feature (torch, CUDA).
+docs = {features = ["docs"], no-default-feature = true}
 
 [tool.pixi.feature.boltz]
 platforms = ["linux-64-cuda-12", "osx-arm64"]
@@ -167,6 +169,16 @@ platforms = ["linux-64-cuda-12", "osx-arm64"]
 # time and never moves, so new work would never arrive. Bump the tag instead.
 # The `sf` extra pulls torch and gemmi, already in every environment.
 lunus = {extras = ["sf"], git = "https://github.com/lanl/lunus.git", tag = "v0.2.0"}
+
+[tool.pixi.feature.docs.dependencies]
+furo = "*"
+myst-parser = "*"
+python = ">=3.11,<3.14"
+sphinx = "*"
+sphinx-autoapi = "*"
+
+[tool.pixi.feature.docs.tasks]
+docs = "sphinx-build -b html docs docs/_build/html"
 
 [tool.pixi.feature.external-tools]
 # Binaries the eval scripts shell out to. Kept separate from the `analysis`
