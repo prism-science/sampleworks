@@ -84,7 +84,7 @@ def test_option_type_strips_optionality():
     assert option_type(RealSpaceDensityOptions, "resolution") is float
     assert option_type(RealSpaceDensityOptions, "loss_order") is int
     assert option_type(RealSpaceDensityOptions, "em") is bool
-    assert option_type(RealSpaceDensityOptions, "gemmi_tables") is bool
+    assert option_type(RealSpaceDensityOptions, "scattering_table") is str
 
 
 def test_option_type_keeps_a_generic_whole():

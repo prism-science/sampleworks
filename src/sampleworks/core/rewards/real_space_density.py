@@ -45,7 +45,7 @@ def it92_structure_factors() -> dict[str, list[list[float]]]:
 
 
 def setup_scattering_params(
-    em_mode: bool, device: torch.device, gemmi_tables: bool = False
+    em_mode: bool, device: torch.device, scattering_table: str = "wk1995"
 ) -> torch.Tensor:
     """Set up atomic scattering parameters for density calculation.
 
@@ -62,11 +62,11 @@ def setup_scattering_params(
         ``False``, use X-ray scattering factors.
     device
         PyTorch device that should own the returned lookup tensor.
-    gemmi_tables
-        If ``True``, read the scattering factors from gemmi instead of the qFit
-        tables above. For X-ray that is IT92 (International Tables for
-        Crystallography Vol. C, Table 6.1.1.4). gemmi's electron table, C4322, is
-        not wired up, so this cannot yet be combined with ``em_mode``.
+    scattering_table
+        X-ray table, named as in Phenix: ``"wk1995"`` (Waasmaier & Kirfel 1995, the
+        qFit table above) or ``"it1992"`` (International Tables for Crystallography
+        Vol. C, Table 6.1.1.4, read from gemmi). gemmi's electron table, C4322, is
+        not wired up, so ``"it1992"`` cannot yet be combined with ``em_mode``.
 
     Returns
     -------
@@ -77,15 +77,19 @@ def setup_scattering_params(
     Raises
     ------
     ValueError
-        If ``gemmi_tables`` is combined with ``em_mode``: gemmi's electron table is
-        not wired up yet.
+        If ``scattering_table`` is not a known name, or is ``"it1992"`` with
+        ``em_mode``: gemmi's electron table is not wired up yet.
     """
-    if em_mode and gemmi_tables:
+    if scattering_table not in ("wk1995", "it1992"):
         raise ValueError(
-            "gemmi_tables with em_mode is not supported yet: gemmi's electron table "
-            "(C4322) is not wired up, only IT92 for X-ray."
+            f"Unknown scattering_table {scattering_table!r}; use 'wk1995' or 'it1992'."
         )
-    if gemmi_tables:
+    if em_mode and scattering_table == "it1992":
+        raise ValueError(
+            "scattering_table='it1992' with em_mode is not supported yet: gemmi's electron "
+            "table (C4322) is not wired up, only IT92 for X-ray."
+        )
+    if scattering_table == "it1992":
         structure_factors = it92_structure_factors()
     else:
         structure_factors = ELECTRON_SCATTERING_FACTORS if em_mode else ATOM_STRUCTURE_FACTORS
@@ -398,7 +402,7 @@ def build_real_space_density_reward(
     logger.debug("Setting up scattering parameters")
     atom_array = context.structure["asym_unit"]
     scattering_params = setup_scattering_params(
-        em_mode=options.em, device=device, gemmi_tables=options.gemmi_tables
+        em_mode=options.em, device=device, scattering_table=options.scattering_table
     )
 
     selection_mask = atom_array.occupancy > 0

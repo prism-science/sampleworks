@@ -155,7 +155,7 @@ def _process_single_row(
     strip_waters: bool = False,
     strip_ligands: bool = False,
     save_structure: bool = True,
-    gemmi_tables: bool = False,
+    scattering_table: str = "wk1995",
 ) -> None:
     """Process a single structure row.
 
@@ -187,8 +187,8 @@ def _process_single_row(
         TODO: be more thorough with this? We could make this a transform
     save_structure
         If True, save the processed structure to a CIF file in the input directory. Default is True.
-    gemmi_tables
-        If True, use gemmi's IT92 X-ray scattering factors instead of the built-in table.
+    scattering_table
+        X-ray scattering table, ``"wk1995"`` (default) or ``"it1992"``.
     """
     structure_path = base_dir / row.filename
     atom_array = load_structure_for_synthetic_reward(
@@ -209,7 +209,7 @@ def _process_single_row(
             resolution=resolution,
             em_mode=em_mode,
             device=device,
-            gemmi_tables=gemmi_tables,
+            scattering_table=scattering_table,
         )
     except Exception as e:
         logger.error(
@@ -262,7 +262,7 @@ def process_batch(
     strip_waters: bool = False,
     strip_ligands: bool = False,
     save_structure: bool = False,
-    gemmi_tables: bool = False,
+    scattering_table: str = "wk1995",
 ) -> None:
     """Process multiple structures from a CSV file in batch mode.
 
@@ -290,8 +290,8 @@ def process_batch(
         If True, remove ligand molecules (non-water heteroatoms) before computing density.
     save_structure
         If True, save the processed structure to a CIF file in the input directory.
-    gemmi_tables
-        If True, use gemmi's IT92 X-ray scattering factors instead of the built-in table.
+    scattering_table
+        X-ray scattering table, ``"wk1995"`` (default) or ``"it1992"``.
     """
     from joblib import delayed, Parallel
 
@@ -308,7 +308,7 @@ def process_batch(
             resolution=resolution,
             em_mode=em_mode,
             device=device,
-            gemmi_tables=gemmi_tables,
+            scattering_table=scattering_table,
             strip_hydrogens=strip_hydrogens,
             strip_waters=strip_waters,
             strip_ligands=strip_ligands,
@@ -367,9 +367,10 @@ def parse_args() -> argparse.Namespace:
         "--em-mode", action="store_true", help="Use electron scattering factors (EM mode)"
     )
     density_group.add_argument(
-        "--gemmi-tables",
-        action="store_true",
-        help="Use gemmi's IT92 X-ray scattering factors instead of the built-in table",
+        "--scattering-table",
+        choices=["wk1995", "it1992"],
+        default="wk1995",
+        help="X-ray scattering table, as in Phenix",
     )
     density_group.add_argument(
         "--remove-hydrogens",
@@ -411,8 +412,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if args.em_mode and args.gemmi_tables:
-        logger.error("--gemmi-tables is not supported with --em-mode (only IT92 for X-ray)")
+    if args.em_mode and args.scattering_table == "it1992":
+        logger.error(
+            "--scattering-table it1992 is not supported with --em-mode (only IT92 for X-ray)"
+        )
         sys.exit(1)
     device = try_gpu()
 
@@ -425,7 +428,7 @@ def main() -> None:
             occupancy_mode=args.occupancy_mode,
             em_mode=args.em_mode,
             device=device,
-            gemmi_tables=args.gemmi_tables,
+            scattering_table=args.scattering_table,
             n_jobs=args.n_jobs,
             strip_hydrogens=args.remove_hydrogens,
             strip_waters=args.remove_waters,
@@ -449,7 +452,7 @@ def main() -> None:
             resolution=args.resolution,
             em_mode=args.em_mode,
             device=device,
-            gemmi_tables=args.gemmi_tables,
+            scattering_table=args.scattering_table,
             strip_hydrogens=args.remove_hydrogens,
             strip_waters=args.remove_waters,
             strip_ligands=args.remove_ligands,

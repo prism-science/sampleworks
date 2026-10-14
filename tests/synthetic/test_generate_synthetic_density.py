@@ -33,7 +33,7 @@ def test_batch_row_rejects_unsupported_extension() -> None:
         BatchRow(filename="input.txt")
 
 
-def test_em_mode_with_gemmi_tables_exits_nonzero(monkeypatch, tmp_path) -> None:
+def test_em_mode_with_it1992_exits_nonzero(monkeypatch, tmp_path) -> None:
     """The pair is rejected before any row runs, not swallowed per row with exit 0."""
     monkeypatch.setattr(
         "sys.argv",
@@ -42,7 +42,8 @@ def test_em_mode_with_gemmi_tables_exits_nonzero(monkeypatch, tmp_path) -> None:
             "--structure",
             str(tmp_path / "x.cif"),
             "--em-mode",
-            "--gemmi-tables",
+            "--scattering-table",
+            "it1992",
         ],
     )
     with pytest.raises(SystemExit) as excinfo:

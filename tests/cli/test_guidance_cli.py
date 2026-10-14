@@ -626,7 +626,7 @@ class TestRewardSelection:
             "resolution": 1.8,
             "loss_order": 2,
             "em": False,
-            "gemmi_tables": False,
+            "scattering_table": "wk1995",
         }
 
     def test_density_options_still_reach_the_flat_config_fields(self):

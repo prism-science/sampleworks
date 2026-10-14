@@ -86,7 +86,7 @@ def build_density_transformer(
     xmap: XMap,
     em_mode: bool,
     device: torch.device,
-    gemmi_tables: bool = False,
+    scattering_table: str = "wk1995",
 ) -> tuple[DifferentiableTransformer, XMap_torch]:
     """Build a reusable DifferentiableTransformer bound to a grid.
 
@@ -104,8 +104,8 @@ def build_density_transformer(
         If True, use electron scattering factors. If False, use X-ray factors.
     device : torch.device
         PyTorch device for computation.
-    gemmi_tables : bool
-        If True, use gemmi's IT92 X-ray scattering factors instead of the built-in table.
+    scattering_table : str
+        X-ray scattering table, ``"wk1995"`` (default) or ``"it1992"``.
 
     Returns
     -------
@@ -113,7 +113,7 @@ def build_density_transformer(
         The transformer and the XMap_torch it was built against.
     """
     scattering_params = setup_scattering_params(
-        em_mode=em_mode, device=device, gemmi_tables=gemmi_tables
+        em_mode=em_mode, device=device, scattering_table=scattering_table
     )
 
     xmap_torch = XMap_torch(xmap, device=device)
@@ -171,7 +171,7 @@ def compute_density_from_atomarray(
     resolution: float | None = None,
     em_mode: bool = False,
     device: torch.device | None = None,
-    gemmi_tables: bool = False,
+    scattering_table: str = "wk1995",
 ) -> tuple[torch.Tensor, XMap_torch]:
     """Compute synthetic electron density from atomic coordinates.
 
@@ -200,8 +200,8 @@ def compute_density_from_atomarray(
         If True, use electron scattering factors. If False, use X-ray factors.
     device : torch.device | None
         PyTorch device for computation. If None, will try to use GPU.
-    gemmi_tables : bool
-        If True, use gemmi's IT92 X-ray scattering factors instead of the built-in table.
+    scattering_table : str
+        X-ray scattering table, ``"wk1995"`` (default) or ``"it1992"``.
 
     Returns
     -------
@@ -228,7 +228,7 @@ def compute_density_from_atomarray(
         xmap = create_synthetic_grid(atom_array, resolution, padding=5.0)  # ty: ignore[invalid-argument-type] (resolution will not be None here)
 
     transformer, xmap_torch = build_density_transformer(
-        xmap, em_mode=em_mode, device=device, gemmi_tables=gemmi_tables
+        xmap, em_mode=em_mode, device=device, scattering_table=scattering_table
     )
     density = run_density_transformer(transformer, atom_array)
     return density, xmap_torch

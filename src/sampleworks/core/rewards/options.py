@@ -74,7 +74,9 @@ class RealSpaceDensityOptions:
     resolution: float | None = opt(None, help="Map resolution in Angstroms")
     loss_order: int = opt(2, help="L1 or L2 loss", choices=(1, 2))
     em: bool = opt(False, help="Use electron (cryo-EM) scattering factors")
-    gemmi_tables: bool = opt(False, help="Use gemmi's IT92 scattering factors (X-ray only)")
+    scattering_table: str = opt(
+        "wk1995", help="X-ray scattering table, as in Phenix", choices=("wk1995", "it1992")
+    )
 
 
 @dataclass(frozen=True)
