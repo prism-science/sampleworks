@@ -50,12 +50,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean
 
 # Pinned, because everything else about this build is: the base image is a
-# digest, the checkpoints are a digest, and CI's setup-pixi is v0.73.0. An
+# digest, the checkpoints are a digest, and CI's setup-pixi is v0.82.0. An
 # unpinned `curl | bash` made the build tool the one component that could change
 # under us between two builds of the same commit, which is a bad property to
 # have while chasing a build that installs nothing (see the guard below). Keep
 # in step with `pixi-version` in .github/workflows/ci.yml.
-ARG PIXI_VERSION=v0.73.0
+ARG PIXI_VERSION=v0.82.0
 RUN curl -fsSL https://pixi.sh/install.sh | PIXI_VERSION="${PIXI_VERSION}" bash
 
 WORKDIR /app

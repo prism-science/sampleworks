@@ -54,7 +54,7 @@ jobs:
       - name: Install pixi
         uses: prefix-dev/setup-pixi@v0.8.8
         with:
-          pixi-version: v0.73.0
+          pixi-version: v0.82.0
           environments: boltz-dev
 
       - name: Ruff lint
@@ -82,7 +82,7 @@ jobs:
       - name: Install pixi
         uses: prefix-dev/setup-pixi@v0.8.8
         with:
-          pixi-version: v0.73.0
+          pixi-version: v0.82.0
           environments: ${{ matrix.environment }}
 
       - name: Run ty
@@ -107,7 +107,7 @@ jobs:
       - name: Install pixi
         uses: prefix-dev/setup-pixi@v0.8.8
         with:
-          pixi-version: v0.73.0
+          pixi-version: v0.82.0
           environments: ${{ matrix.environment }}
 
       - name: Run CPU tests
