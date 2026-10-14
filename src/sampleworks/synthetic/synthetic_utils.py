@@ -1,6 +1,5 @@
 """Shared utilities for synthetic structure-factor and density generation."""
 
-import math
 import traceback
 from collections import Counter
 from collections.abc import Hashable, Iterator, Mapping, Sequence
@@ -153,7 +152,7 @@ def validate_occupancy_values(occupancy_values: list[float]) -> None:
     for i, v in enumerate(occupancy_values):
         if not 0.0 <= v <= 1.0:
             raise ValueError(f"Occupancy value {v} at index {i} is out of range [0.0, 1.0]")
-    if occupancy_values and not math.isclose(sum(occupancy_values), 1.0):
+    if occupancy_values and not np.isclose(sum(occupancy_values), 1.0):
         raise ValueError(f"Occupancy values must sum to 1.0, got {sum(occupancy_values)}")
 
 
@@ -248,8 +247,8 @@ def load_structure_for_synthetic_reward(
 
     Handles loading, optional atom selection, stripping of unwanted atom classes,
     occupancy assignment, and removal of zero-occupancy atoms. Returns None on load
-    or selection errors (logged); raises ValueError on invalid occupancy_mode or
-    occupancy assignment errors (logged before raising).
+    or selection errors (logged); raises ValueError on an invalid b_factor, an invalid
+    occupancy_mode, or occupancy assignment errors (the latter two logged before raising).
 
     Parameters
     ----------
@@ -273,13 +272,17 @@ def load_structure_for_synthetic_reward(
         Optional isotropic B-factor assigned to every retained atom. If None,
         preserve the values from the input structure.
     model
-        0-based index of the model to load from a multi-model file.
+        0-based index of the one model to load from a multi-model file. Callers that
+        need every model (e.g. ``generate_synthetic_sf_ensemble``) call this once per
+        model.
 
     Returns
     -------
     AtomArray | None
         Prepared structure, or None if loading or selection failed
     """
+    if b_factor is not None and (not np.isfinite(b_factor) or b_factor < 0.0):
+        raise ValueError(f"B-factor must be finite and non-negative, got {b_factor}")
     if not structure_path.exists():
         logger.error(f"Structure not found: {structure_path}")
         return None
@@ -334,11 +337,8 @@ def load_structure_for_synthetic_reward(
     if zero_occupancy.any():
         logger.info(f"Removed {zero_occupancy.sum()} zero-occupancy atoms")
         atom_array = atom_array[~zero_occupancy]
-        assert isinstance(atom_array, AtomArray)
 
     if b_factor is not None:
-        if not math.isfinite(b_factor) or b_factor < 0.0:
-            raise ValueError(f"B-factor must be finite and non-negative, got {b_factor}")
         atom_array.b_factor = np.full(len(atom_array), b_factor, dtype=np.float32)
         logger.info(f"Assigned B-factor {b_factor:g} to {len(atom_array)} atoms")
 

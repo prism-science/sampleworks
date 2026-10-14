@@ -1,23 +1,23 @@
 """Generate synthetic structure factors from a multi-model ensemble, one model at a time.
 
-``generate_synthetic_sf.py`` computes one structure's structure factors in a single pass,
-which means one ``[N_atom, N_HKL]`` scattering table and a handful of intermediates of the
-same shape. The atoms are mostly blank-altloc atoms plus a few atoms in altlocs. In
-the latest synthetic data generation pipeline that uses PDBFixer, each altloc ends up as a
-separate conformer, and the conformers are collected as models of one multi-model file.
-Even though they can be trivially merged back as one structure where all atoms have
-altlocs, such a structure easily leads to OOM.
+The PDBFixer-based synthetic data pipeline writes each altloc conformer as a separate model
+of one multi-model file, every model a complete copy of the protein. The other script
+`generate_synthetic_sf.py`` computes a structure's structure factor in a single pass from a
+single-model structure with altlocs. The total number of atoms in that case is N_blank_altloc
++ N_conformer * N_non_blank_altloc. In contrast, the multi-model file consists of N_conformer
+*(N_blank_altloc + N_non_blank_altloc) atoms. This can easily exhaust memory usage as SFC
+holds an ``[N_atom, N_HKL]`` tensor of per-atom plus several intermediates of that shape.
 
-This script computes Fprotein from one model at a time to reduce memory usage, and then
-sums Fprotein weighted by each model's population. Every model must have the same atoms in
-the same order.
+This script instead computes Fprotein from one model at a time and sums the results
+weighted by each model's population, so only one model's ``[N_atom, N_HKL]`` tensors are
+alive at once. Every model must have the same atoms in the same order.
 
 Bulk solvent is optional (``--bulk-solvent``), with the same modes as the structure-factor
-reward. Both masks are built from Fprotein rather than from atoms, so neither needs a merged
-structure: ``combined`` masks the population-weighted Fprotein sum (one mask from the
-ensemble density), and ``per_conformer`` masks each model's Fprotein separately and takes
-the population-weighted mean of those masks' structure factors. Either mode adds an Ftotal
-set (default, unrefined SFcalculator scales) beside Fprotein in the MTZ.
+reward. The bulk solvent masks here are built from Fprotein rather than directly from atoms:
+``combined`` builds one bulk solvent mask from the population-weighted Fprotein sum, and
+``per_conformer`` builds one bulk solvent mask per model and takes the population-weighted
+mean of the bulk solvent structure factors. Either mode writes Ftotal/SIGFtotal/PHIFtotal
+columns (at default unrefined SFcalculator scales) beside the Fprotein columns in the MTZ.
 
 The command-line interface mirrors ``generate_synthetic_sf.py``, including CSV batch mode,
 with ``--occupancy-values`` (or the ``occupancy_values`` CSV column) giving one population
@@ -127,17 +127,18 @@ def compute_ensemble_structure_factors(
 
     Notes
     -----
-    Only one model's scattering table is alive at a time; each is released before the
-    next is built. Each model's Fprotein is computed at occupancy 1.0 and weighted by
-    its population afterwards.
+    Only one model's ``[N_atom, N_HKL]`` per-atom structure-factor tensors are alive at a
+    time; each model's SFcalculator is released before the next is built. Each model's
+    Fprotein is computed at occupancy 1.0 and weighted by its population afterwards.
 
     The solvent fraction is estimated from model 1's atom positions, as the
     structure-factor reward estimates it from the guidance reference, which is model 1
     of a multi-model input. ``per_conformer`` goes through
     ``SFcalculator.calc_fsolvent_batch``, the path the structure-factor reward uses, so
-    it inherits that path's batch behavior:
-    the density is normalized over the whole partition of (at most 10) models and the
-    solvent cutoff comes from the partition's first model. Unlike the reward, which
+    it inherits that path's batch behavior: models are processed in chunks of
+    ``calc_fsolvent_batch``'s default ``PARTITION=10`` (also the reward's default
+    ``batch_partition``), the density is normalized over each whole chunk, and the
+    solvent cutoff comes from the chunk's first model. Unlike the reward, which
     weights every conformer's mask by ``1/batch_size``, the masks here are weighted by
     population; the two agree for uniform populations.
     """
