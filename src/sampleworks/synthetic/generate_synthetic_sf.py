@@ -35,41 +35,6 @@ from sampleworks.synthetic.synthetic_utils import (
 from sampleworks.utils.torch_utils import try_gpu
 
 
-def build_sfcalculator(
-    gemmi_structure: gemmi.Structure,
-    resolution: float,
-    scattering_factor_mode: str,
-    device: torch.device,
-) -> SFcalculator:
-    """Build a non-anomalous SFcalculator with no experimental data attached.
-
-    Parameters
-    ----------
-    gemmi_structure
-        Structure carrying the unit cell and space group.
-    resolution
-        High-resolution (dmin) limit in Angstroms.
-    scattering_factor_mode
-        SFcalculator mode: "xray" or "cryoem".
-    device
-        PyTorch device for SFcalculator.
-
-    Returns
-    -------
-    SFcalculator
-        Calculator ready for ``calc_fprotein``.
-    """
-    return SFcalculator(
-        pdbmodel=PDBParser(gemmi_structure),
-        mtzdata=None,
-        dmin=resolution,
-        mode=scattering_factor_mode,
-        anomalous=False,
-        set_experiment=False,
-        device=device,
-    )
-
-
 def write_sf_input_structure(
     gemmi_structure: gemmi.Structure, structure_path: Path, output_dir: Path
 ) -> Path:
@@ -424,7 +389,15 @@ def _process_single_row(
 
     # Compute structure factors
     try:
-        sfc = build_sfcalculator(gemmi_structure, resolution, scattering_factor_mode, device)
+        sfc = SFcalculator(
+            pdbmodel=PDBParser(gemmi_structure),
+            mtzdata=None,
+            dmin=resolution,
+            mode=scattering_factor_mode,
+            anomalous=False,
+            set_experiment=False,
+            device=device,
+        )
         logger.debug(
             f"SFC info for {row.filename}: cell: {sfc.unit_cell}, "
             f"space group: {sfc.space_group.hm}, "

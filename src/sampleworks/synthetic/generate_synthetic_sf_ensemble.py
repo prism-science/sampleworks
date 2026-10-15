@@ -39,10 +39,10 @@ import numpy as np
 import torch
 from loguru import logger
 from SFC_Torch import SFcalculator
+from SFC_Torch.io import PDBParser
 
 from sampleworks.synthetic.generate_synthetic_sf import (
     BatchRowForMTZ,
-    build_sfcalculator,
     load_batch_csv,
     process_amplitudes_to_dataset,
     write_sf_input_structure,
@@ -176,8 +176,14 @@ def compute_ensemble_structure_factors(
                 saved_structure.add_model(conformer[0])
         logger.info(f"Model {model + 1}: {len(atom_array)} atoms at population {occupancy:g}")
         gemmi_structure = atomarray_to_gemmi(atom_array, cell, space_group)
-        sfcalculator = build_sfcalculator(
-            gemmi_structure, resolution, scattering_factor_mode, device
+        sfcalculator = SFcalculator(
+            pdbmodel=PDBParser(gemmi_structure),
+            mtzdata=None,
+            dmin=resolution,
+            mode=scattering_factor_mode,
+            anomalous=False,
+            set_experiment=False,
+            device=device,
         )
         if reference_hkl is None:
             reference_hkl = sfcalculator.Hasu_array
