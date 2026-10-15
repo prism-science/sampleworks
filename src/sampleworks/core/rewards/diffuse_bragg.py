@@ -789,4 +789,10 @@ def build_diffuse_bragg_reward(
         resolution=options.resolution,
         normalize=options.normalize,
         fit_scale=options.fit_scale,
+        bulk_solvent=options.bulk_solvent,
+        solvent_cutoff=options.solvent_cutoff,
+        solvent_taper_width=options.solvent_taper_width,
+        exclude_free_reflections=options.exclude_free_reflections,
+        free_flag_column=options.free_flag_column,
+        test_set_value=options.test_set_value,
     )
