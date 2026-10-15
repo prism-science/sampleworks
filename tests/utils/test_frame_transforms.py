@@ -2,6 +2,7 @@
 
 import einx
 import jax
+import numpy as np
 import pytest
 import torch
 from sampleworks.utils.frame_transforms import (
@@ -10,14 +11,7 @@ from sampleworks.utils.frame_transforms import (
     create_random_transform,
     weighted_rigid_align_differentiable,
 )
-
-
-try:
-    from boltz.model.loss.diffusion import (
-        weighted_rigid_align as boltz_weighted_rigid_align,
-    )
-except ImportError:
-    pytest.skip("boltz not available", allow_module_level=True)
+from scipy.spatial.transform import Rotation
 
 
 @pytest.mark.parametrize("shape", [(5, 5, 5, 10, 3), (5, 6, 10, 3), (5, 10, 3)])
@@ -308,217 +302,231 @@ class TestFrameTransforms:
         assert isinstance(transform_jax["translation"], jax.numpy.ndarray)
 
 
+def _rigidly_moved_cloud(
+    shape: tuple[int, int, int], seed: int = 0
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build a random 3D point cloud and a copy moved by a known proper rigid motion.
+
+    Parameters
+    ----------
+    shape : tuple[int, int, int]
+        ``(batch, n, 3)`` shape of the cloud.
+    seed : int, optional
+        Seed for the random generator, by default 0.
+
+    Returns
+    -------
+    cloud : np.ndarray
+        float32, shape (batch, n, 3). Full-rank random coordinates.
+    moved : np.ndarray
+        float32, shape (batch, n, 3). ``moved[b] = cloud[b] @ rotation[b].T + translation[b]``.
+    rotation : np.ndarray
+        float32, shape (batch, 3, 3). Proper rotations (det = +1).
+    translation : np.ndarray
+        float32, shape (batch, 3).
+    """
+    rng = np.random.default_rng(seed)
+    batch_size = shape[0]
+    cloud = rng.normal(scale=5.0, size=shape)
+    rotation = Rotation.random(batch_size, random_state=rng).as_matrix()
+    translation = rng.normal(scale=10.0, size=(batch_size, 3))
+    moved = np.einsum("bij,bnj->bni", rotation, cloud) + translation[:, None, :]
+    return (
+        cloud.astype(np.float32),
+        moved.astype(np.float32),
+        rotation.astype(np.float32),
+        translation.astype(np.float32),
+    )
+
+
+def _principal_axis_cloud(shape: tuple[int, int, int], seed: int = 0) -> np.ndarray:
+    """Build centered point clouds whose principal axes are x > y > z.
+
+    Each cloud's second-moment matrix is diagonal with strictly decreasing entries, so
+    the proper rotation that best superimposes it onto its mirror image through the
+    xy-plane is the identity (Kabsch flips the smallest singular direction).
+
+    Parameters
+    ----------
+    shape : tuple[int, int, int]
+        ``(batch, n, 3)`` shape of the cloud.
+    seed : int, optional
+        Seed for the random generator, by default 0.
+
+    Returns
+    -------
+    np.ndarray
+        float32, shape (batch, n, 3). Centered coordinates in each cloud's principal frame.
+    """
+    rng = np.random.default_rng(seed)
+    clouds = rng.normal(size=shape) * np.array([6.0, 3.0, 1.0])
+    clouds -= clouds.mean(axis=1, keepdims=True)
+    for cloud in clouds:
+        _, eigenvectors = np.linalg.eigh(cloud.T @ cloud)  # ascending eigenvalues
+        cloud[:] = cloud @ eigenvectors[:, ::-1]
+    return clouds.astype(np.float32)
+
+
 @pytest.mark.parametrize("shape", [(1, 10, 3), (2, 50, 3), (15, 100, 3)])
 class TestWeightedRigidAlign:
-    """Test weighted rigid alignment function."""
+    """Test weighted rigid alignment against known rigid motions."""
 
-    def test_align_rotated_line_torch(self, shape: tuple[int, ...]):
-        """Test that a rotated line can be aligned back to the original."""
-        batch_size = shape[0]
-        num_points = shape[1]
+    def test_recovers_known_rigid_motion_torch(self, shape: tuple[int, int, int]):
+        """A cloud moved by a known rotation and translation is aligned back exactly."""
+        cloud, moved, _, _ = _rigidly_moved_cloud(shape)
+        ones = torch.ones(shape[:2])
 
-        # Create a line of points along x-axis
-        t = torch.linspace(0, 1, num_points, dtype=torch.float32)
-        original_line = torch.stack([t, torch.zeros_like(t), torch.zeros_like(t)], dim=-1)
-        # Add batch dimension
-        original_line = original_line.unsqueeze(0).expand(batch_size, -1, -1)
-
-        # Create a randomly rotated and translated version
-        transform = create_random_transform(original_line, center_before_rotation=False)
-        rotated_line = apply_forward_transform(original_line, transform)
-
-        # All points have equal weight
-        weights = torch.ones(batch_size, num_points, dtype=torch.float32)
-        mask = torch.ones(batch_size, num_points, dtype=torch.float32)
-
-        # Align rotated_line back to original_line
-        aligned_line = weighted_rigid_align_differentiable(
-            rotated_line,
-            original_line,
-            weights=weights,
-            mask=mask,
-            allow_gradients=True,
+        aligned = weighted_rigid_align_differentiable(
+            torch.from_numpy(moved), torch.from_numpy(cloud), weights=ones, mask=ones
         )
 
-        # The aligned line should match the original
-        torch.testing.assert_close(aligned_line, original_line, rtol=5e-2, atol=1e-3)
+        torch.testing.assert_close(aligned, torch.from_numpy(cloud), atol=1e-4, rtol=1e-4)
 
-    def test_align_rotated_line_jax(self, shape: tuple[int, ...]):
-        """Test that a rotated line can be aligned back to the original."""
-        batch_size = shape[0]
-        num_points = shape[1]
+    def test_recovers_known_rigid_motion_jax(self, shape: tuple[int, int, int]):
+        """A cloud moved by a known rotation and translation is aligned back exactly."""
+        cloud, moved, _, _ = _rigidly_moved_cloud(shape)
+        ones = jax.numpy.ones(shape[:2])
 
-        # Create a line of points along x-axis
-        t = jax.numpy.linspace(0, 1, num_points, dtype=jax.numpy.float32)
-        original_line = jax.numpy.stack(
-            [t, jax.numpy.zeros_like(t), jax.numpy.zeros_like(t)], axis=-1
-        )
-        # Add batch dimension
-        original_line = jax.numpy.expand_dims(original_line, 0)
-        original_line = jax.numpy.broadcast_to(original_line, (batch_size, num_points, 3))
-
-        # Create a randomly rotated and translated version
-        transform = create_random_transform(original_line, center_before_rotation=False, key=1)
-        rotated_line = apply_forward_transform(original_line, transform)
-
-        # All points have equal weight
-        weights = jax.numpy.ones((batch_size, num_points), dtype=jax.numpy.float32)
-        mask = jax.numpy.ones((batch_size, num_points), dtype=jax.numpy.float32)
-
-        # Align rotated_line back to original_line
-        aligned_line = weighted_rigid_align_differentiable(
-            rotated_line,
-            original_line,
-            weights=weights,
-            mask=mask,
-            allow_gradients=True,
+        aligned = weighted_rigid_align_differentiable(
+            jax.numpy.asarray(moved), jax.numpy.asarray(cloud), weights=ones, mask=ones
         )
 
-        # The aligned line should match the original
-        assert jax.numpy.allclose(aligned_line, original_line, rtol=5e-2, atol=1e-3)
+        np.testing.assert_allclose(np.asarray(aligned), cloud, atol=1e-4, rtol=1e-4)
 
-    def test_alignment_with_transforms_torch(self, shape: tuple[int, ...]):
-        """Test that return_transforms=True returns the alignment transform."""
-        batch_size = shape[0]
-        num_points = shape[1]
+    def test_returned_transform_is_inverse_of_known_motion_torch(self, shape: tuple[int, int, int]):
+        """The returned transform is exactly x -> R.T @ (x - t) and reproduces the output."""
+        cloud, moved, rotation, translation = _rigidly_moved_cloud(shape)
+        ones = torch.ones(shape[:2])
+        moved_torch = torch.from_numpy(moved)
 
-        # Create a line of points
-        t = torch.linspace(0, 1, num_points, dtype=torch.float32)
-        original_line = torch.stack([t, torch.zeros_like(t), torch.zeros_like(t)], dim=-1)
-        original_line = original_line.unsqueeze(0).expand(batch_size, -1, -1)
+        aligned, transform = weighted_rigid_align_differentiable(
+            moved_torch, torch.from_numpy(cloud), weights=ones, mask=ones, return_transforms=True
+        )
 
-        # Rotate and translate
-        transform = create_random_transform(original_line, center_before_rotation=False)
-        rotated_line = apply_forward_transform(original_line, transform)
+        inverse_rotation = rotation.transpose(0, 2, 1)
+        inverse_translation = -np.einsum("bij,bj->bi", inverse_rotation, translation)
+        torch.testing.assert_close(
+            transform["rotation"], torch.from_numpy(inverse_rotation), atol=1e-5, rtol=0
+        )
+        torch.testing.assert_close(
+            transform["translation"], torch.from_numpy(inverse_translation), atol=1e-4, rtol=1e-4
+        )
+        torch.testing.assert_close(
+            apply_forward_transform(moved_torch, transform), aligned, atol=1e-4, rtol=1e-4
+        )
 
-        weights = torch.ones(batch_size, num_points, dtype=torch.float32)
-        mask = torch.ones(batch_size, num_points, dtype=torch.float32)
+    def test_returned_transform_is_inverse_of_known_motion_jax(self, shape: tuple[int, int, int]):
+        """The returned transform is exactly x -> R.T @ (x - t) and reproduces the output."""
+        cloud, moved, rotation, translation = _rigidly_moved_cloud(shape)
+        ones = jax.numpy.ones(shape[:2])
+        moved_jax = jax.numpy.asarray(moved)
 
-        # Get alignment with transforms
-        aligned_line, align_transforms = weighted_rigid_align_differentiable(
-            rotated_line,
-            original_line,
-            weights=weights,
-            mask=mask,
+        aligned, transform = weighted_rigid_align_differentiable(
+            moved_jax, jax.numpy.asarray(cloud), weights=ones, mask=ones, return_transforms=True
+        )
+
+        inverse_rotation = rotation.transpose(0, 2, 1)
+        inverse_translation = -np.einsum("bij,bj->bi", inverse_rotation, translation)
+        np.testing.assert_allclose(
+            np.asarray(transform["rotation"]), inverse_rotation, atol=1e-5, rtol=0
+        )
+        np.testing.assert_allclose(
+            np.asarray(transform["translation"]), inverse_translation, atol=1e-4, rtol=1e-4
+        )
+        np.testing.assert_allclose(
+            np.asarray(apply_forward_transform(moved_jax, transform)),
+            np.asarray(aligned),
+            atol=1e-4,
+            rtol=1e-4,
+        )
+
+    def test_mirror_image_is_matched_by_a_proper_rotation_torch(self, shape: tuple[int, int, int]):
+        """Aligning onto a mirror image never reflects: the best proper rotation is used."""
+        cloud = _principal_axis_cloud(shape)
+        mirrored = cloud * np.array([1.0, 1.0, -1.0], dtype=np.float32)
+        ones = torch.ones(shape[:2])
+
+        aligned, transform = weighted_rigid_align_differentiable(
+            torch.from_numpy(cloud),
+            torch.from_numpy(mirrored),
+            weights=ones,
+            mask=ones,
             return_transforms=True,
-            allow_gradients=True,
         )
 
-        # Verify aligned line matches original
-        torch.testing.assert_close(aligned_line, original_line, rtol=5e-2, atol=1e-3)
+        torch.testing.assert_close(torch.linalg.det(transform["rotation"]), torch.ones(shape[0]))
+        torch.testing.assert_close(aligned, torch.from_numpy(cloud), atol=1e-4, rtol=1e-4)
 
-        # Verify transform is returned and has correct keys
-        assert "rotation" in align_transforms
-        assert "translation" in align_transforms
-        assert align_transforms["rotation"].shape == (batch_size, 3, 3)
-        assert align_transforms["translation"].shape == (batch_size, 3)
+    def test_mirror_image_is_matched_by_a_proper_rotation_jax(self, shape: tuple[int, int, int]):
+        """Aligning onto a mirror image never reflects: the best proper rotation is used."""
+        cloud = _principal_axis_cloud(shape)
+        mirrored = cloud * np.array([1.0, 1.0, -1.0], dtype=np.float32)
+        ones = jax.numpy.ones(shape[:2])
 
-    def test_alignment_with_transforms_jax(self, shape: tuple[int, ...]):
-        """Test that return_transforms=True returns the alignment transform."""
-        batch_size = shape[0]
-        num_points = shape[1]
-
-        # Create a line of points
-        t = jax.numpy.linspace(0, 1, num_points, dtype=jax.numpy.float32)
-        original_line = jax.numpy.stack(
-            [t, jax.numpy.zeros_like(t), jax.numpy.zeros_like(t)], axis=-1
+        aligned, transform = weighted_rigid_align_differentiable(
+            jax.numpy.asarray(cloud),
+            jax.numpy.asarray(mirrored),
+            weights=ones,
+            mask=ones,
+            return_transforms=True,
         )
-        original_line = jax.numpy.expand_dims(original_line, 0)
-        original_line = jax.numpy.broadcast_to(original_line, (batch_size, num_points, 3))
 
-        # Rotate and translate
-        transform = create_random_transform(original_line, center_before_rotation=False, key=1)
-        rotated_line = apply_forward_transform(original_line, transform)
+        np.testing.assert_allclose(
+            np.linalg.det(np.asarray(transform["rotation"])), np.ones(shape[0]), atol=1e-5
+        )
+        np.testing.assert_allclose(np.asarray(aligned), cloud, atol=1e-4, rtol=1e-4)
 
-        weights = jax.numpy.ones((batch_size, num_points), dtype=jax.numpy.float32)
-        mask = jax.numpy.ones((batch_size, num_points), dtype=jax.numpy.float32)
+    @pytest.mark.parametrize("excluded_by", ["mask", "weights"])
+    def test_excluded_atoms_do_not_affect_alignment_torch(
+        self, shape: tuple[int, int, int], excluded_by: str
+    ):
+        """Reference atoms with zero mask or weight are ignored, however far off they are."""
+        cloud, moved, _, _ = _rigidly_moved_cloud(shape)
+        excluded = np.arange(shape[1]) >= shape[1] - shape[1] // 3
+        corrupted_reference = cloud.copy()
+        corrupted_reference[:, excluded] += 50.0
+        included = torch.from_numpy(~excluded).float().expand(shape[0], -1)
+        ones = torch.ones(shape[:2])
+        weights, mask = (ones, included) if excluded_by == "mask" else (included, ones)
 
-        # Get alignment with transforms
-        aligned_line, align_transforms = weighted_rigid_align_differentiable(
-            rotated_line,
-            original_line,
+        aligned = weighted_rigid_align_differentiable(
+            torch.from_numpy(moved),
+            torch.from_numpy(corrupted_reference),
             weights=weights,
             mask=mask,
-            return_transforms=True,
-            allow_gradients=True,
         )
 
-        # Verify aligned line matches original
-        assert jax.numpy.allclose(aligned_line, original_line, rtol=5e-2, atol=1e-3)
+        # Every atom, excluded ones included, lands on its true (uncorrupted) position.
+        torch.testing.assert_close(aligned, torch.from_numpy(cloud), atol=1e-4, rtol=1e-4)
 
-        # Verify transform is returned and has correct keys
-        assert "rotation" in align_transforms
-        assert "translation" in align_transforms
-        assert align_transforms["rotation"].shape == (batch_size, 3, 3)
-        assert align_transforms["translation"].shape == (batch_size, 3)
+    @pytest.mark.parametrize("excluded_by", ["mask", "weights"])
+    def test_excluded_atoms_do_not_affect_alignment_jax(
+        self, shape: tuple[int, int, int], excluded_by: str
+    ):
+        """Reference atoms with zero mask or weight are ignored, however far off they are."""
+        cloud, moved, _, _ = _rigidly_moved_cloud(shape)
+        excluded = np.arange(shape[1]) >= shape[1] - shape[1] // 3
+        corrupted_reference = cloud.copy()
+        corrupted_reference[:, excluded] += 50.0
+        included = jax.numpy.broadcast_to(
+            jax.numpy.asarray(~excluded, dtype=jax.numpy.float32), shape[:2]
+        )
+        ones = jax.numpy.ones(shape[:2])
+        weights, mask = (ones, included) if excluded_by == "mask" else (included, ones)
 
-    def test_alignment_transform_is_inverse_torch(self, shape: tuple[int, ...]):
-        """Test that alignment transform is the inverse of the applied transform."""
-        batch_size = shape[0]
-        num_points = shape[1]
-
-        # Create a line of points
-        t = torch.linspace(0, 1, num_points, dtype=torch.float32)
-        original_line = torch.stack([t, torch.zeros_like(t), torch.zeros_like(t)], dim=-1)
-        original_line = original_line.unsqueeze(0).expand(batch_size, -1, -1)
-
-        # Apply a known transform
-        transform = create_random_transform(original_line, center_before_rotation=False)
-        rotated_line = apply_forward_transform(original_line, transform)
-
-        weights = torch.ones(batch_size, num_points, dtype=torch.float32)
-        mask = torch.ones(batch_size, num_points, dtype=torch.float32)
-
-        # Get alignment transform
-        _, align_transforms = weighted_rigid_align_differentiable(
-            rotated_line,
-            original_line,
+        aligned = weighted_rigid_align_differentiable(
+            jax.numpy.asarray(moved),
+            jax.numpy.asarray(corrupted_reference),
             weights=weights,
             mask=mask,
-            return_transforms=True,
-            allow_gradients=True,
         )
 
-        # Apply alignment transform to rotated_line should give original_line
-        recovered_line = apply_forward_transform(rotated_line, align_transforms)
-        torch.testing.assert_close(recovered_line, original_line, rtol=5e-2, atol=1e-3)
-
-    def test_alignment_transform_is_inverse_jax(self, shape: tuple[int, ...]):
-        """Test that alignment transform is the inverse of the applied transform."""
-        batch_size = shape[0]
-        num_points = shape[1]
-
-        # Create a line of points
-        t = jax.numpy.linspace(0, 1, num_points, dtype=jax.numpy.float32)
-        original_line = jax.numpy.stack(
-            [t, jax.numpy.zeros_like(t), jax.numpy.zeros_like(t)], axis=-1
-        )
-        original_line = jax.numpy.expand_dims(original_line, 0)
-        original_line = jax.numpy.broadcast_to(original_line, (batch_size, num_points, 3))
-
-        # Apply a known transform
-        transform = create_random_transform(original_line, center_before_rotation=False, key=1)
-        rotated_line = apply_forward_transform(original_line, transform)
-
-        weights = jax.numpy.ones((batch_size, num_points), dtype=jax.numpy.float32)
-        mask = jax.numpy.ones((batch_size, num_points), dtype=jax.numpy.float32)
-
-        # Get alignment transform
-        _, align_transforms = weighted_rigid_align_differentiable(
-            rotated_line,
-            original_line,
-            weights=weights,
-            mask=mask,
-            return_transforms=True,
-            allow_gradients=True,
-        )
-
-        # Apply alignment transform to rotated_line should give original_line
-        recovered_line = apply_forward_transform(rotated_line, align_transforms)
-        assert jax.numpy.allclose(recovered_line, original_line, rtol=2e-1, atol=1e-2)
+        # Every atom, excluded ones included, lands on its true (uncorrupted) position.
+        np.testing.assert_allclose(np.asarray(aligned), cloud, atol=1e-4, rtol=1e-4)
 
     def test_consistency_with_boltz(self, shape: tuple[int, ...]):
         """Test that PyTorch, JAX, and Boltz implementations are consistent."""
+        boltz_diffusion = pytest.importorskip("boltz.model.loss.diffusion")
         batch_size = shape[0]
         num_points = shape[1]
 
@@ -530,7 +538,7 @@ class TestWeightedRigidAlign:
         mask_torch = torch.ones(batch_size, num_points, dtype=torch.float32)
 
         # Run Boltz implementation (original)
-        aligned_boltz = boltz_weighted_rigid_align(
+        aligned_boltz = boltz_diffusion.weighted_rigid_align(
             true_coords_torch, pred_coords_torch, weights_torch, mask_torch
         )
 
@@ -563,8 +571,6 @@ class TestWeightedRigidAlign:
         )
 
         # Convert JAX array to numpy then to torch for comparison
-        import numpy as np
-
         aligned_jax_np = np.asarray(aligned_jax)
         torch.testing.assert_close(
             torch.from_numpy(aligned_jax_np).clone(),
