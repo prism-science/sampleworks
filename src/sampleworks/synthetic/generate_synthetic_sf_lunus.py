@@ -57,10 +57,7 @@ from sampleworks.utils.atom_array_utils import (
 from sampleworks.utils.torch_utils import try_gpu
 
 
-# Taper width of an explicitly given solvent cutoff, e/A^3. By default the cutoff
-# is calibrated instead: lunus takes an absolute density cutoff, and the value
-# that matches gemmi's geometric mask moves by more than an order of magnitude
-# with B and with packing, so a constant is not transferable between systems.
+# Taper width for an explicitly given solvent cutoff, e/A^3.
 DEFAULT_SOLVENT_TAPER_WIDTH = 0.10
 
 
