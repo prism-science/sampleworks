@@ -65,7 +65,10 @@ from lunus.sf import (
     build_grid_ops,
     grid_shape_for_resolution,
     orth_matrix,
+    SolventModel,
+    splat_density,
     structure_factors_batch,
+    symmetrize_sum,
 )
 
 from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.unitcell import (
@@ -507,3 +510,125 @@ def structure_factors(
         use_checkpoint=use_checkpoint,
         solvent=solvent,
     )
+
+
+def geometric_solvent_fraction(
+    atom_array: AtomArray,
+    coords: np.ndarray,
+    unit_cell: gemmi.UnitCell,
+    space_group: str | gemmi.SpaceGroup,
+    grid_shape: tuple[int, int, int],
+    radii_set: str = "Refmac",
+) -> float:
+    """Fraction of the cell that gemmi's geometric solvent mask calls solvent.
+
+    The calibration target for :func:`calibrate_solvent`: the conventional
+    (van der Waals radius plus probe, then shrink) mask on the same atoms and
+    grid, so the threshold mask is tuned to call the same volume solvent.
+
+    Parameters
+    ----------
+    atom_array
+        Topology; only ``element`` is read.
+    coords
+        ``(n_atoms, 3)`` Cartesian coordinates in Å for one configuration.
+    unit_cell, space_group
+        Crystal metadata.
+    grid_shape
+        ``(Nu, Nv, Nw)`` grid the mask is evaluated on, normally the setup's.
+    radii_set
+        A ``gemmi.AtomicRadiiSet`` name.
+
+    Returns
+    -------
+    float
+        Solvent fraction in ``[0, 1]``.
+    """
+    residue = gemmi.Residue()
+    residue.name = "UNK"
+    for element, xyz in zip(atom_array.element, np.asarray(coords, dtype=np.float64), strict=True):
+        atom = gemmi.Atom()
+        atom.element = gemmi.Element(normalize_element(element))
+        atom.pos = gemmi.Position(*xyz)
+        residue.add_atom(atom)
+    chain = gemmi.Chain("A")
+    chain.add_residue(residue)
+    model = gemmi.Model("1")
+    model.add_chain(chain)
+
+    grid = gemmi.FloatGrid()
+    grid.set_size(*grid_shape)
+    grid.set_unit_cell(unit_cell)
+    grid.spacegroup = gemmi.SpaceGroup(space_group) if isinstance(space_group, str) else space_group
+    gemmi.SolventMasker(getattr(gemmi.AtomicRadiiSet, radii_set)).put_mask_on_float_grid(
+        grid, model
+    )
+    return float(np.asarray(grid, dtype=np.float64).mean())
+
+
+def calibrate_solvent(
+    setup: LunusSetup,
+    coords: Float[torch.Tensor, "n_atoms 3"],
+    occupancies: Float[torch.Tensor, " n_atoms"],
+    target_fraction: float,
+    *,
+    taper_width_frac: float = 0.5,
+) -> SolventModel:
+    """A ``SolventModel`` whose cutoff calls ``target_fraction`` of the cell solvent.
+
+    Evaluates one configuration's density on the setup's grid, symmetry-expands it,
+    and runs
+    ``SolventModel.calibrate`` on that density, with the setup's blur so the
+    mask is calibrated on the density it will actually see. lunus's own fitting
+    tool does the same; its design note measures the matched cutoff moving 21x
+    between B = 20 and B = 60 on one structure, which is why it is not a constant.
+
+    Parameters
+    ----------
+    setup
+        Built by :func:`build_setup`.
+    coords
+        ``(n_atoms, 3)`` Cartesian coordinates in Å of a representative
+        configuration.
+    occupancies
+        ``(n_atoms,)`` occupancies for that configuration.
+    target_fraction
+        Solvent fraction to match, from :func:`geometric_solvent_fraction`.
+    taper_width_frac
+        Taper width as a fraction of the cutoff, lunus's convention.
+
+    Returns
+    -------
+    SolventModel
+        With ``cutoff`` and ``taper_width`` set; other parameters at lunus defaults.
+    """
+    frac = coords.to(setup.frac_matrix) @ setup.frac_matrix.T
+    with torch.no_grad():
+        density = splat_density(
+            frac,
+            setup.element_idx,
+            occupancies.to(frac),
+            setup.atom_A,
+            setup.atom_lam,
+            setup.elem_offsets,
+            setup.atom_radius_ang,
+            setup.grid_shape,
+            setup.orth_matrix,
+            setup.taper_width,
+        )
+        if setup.grid_ops:
+            density = symmetrize_sum(density, setup.grid_ops)
+        # Placeholders; calibrate() sets both.
+        solvent = SolventModel(cutoff=1.0, taper_width=0.5)
+        solvent.calibrate(
+            density,
+            setup.orth_matrix,
+            target_fraction,
+            taper_width_frac=taper_width_frac,
+            pipeline_blur=setup.blur,
+        )
+    logger.info(
+        f"Solvent cutoff calibrated to {solvent.cutoff:.4g} e/A^3 (taper "
+        f"{solvent.taper_width:.4g}) for a solvent fraction of {target_fraction:.3f}"
+    )
+    return solvent

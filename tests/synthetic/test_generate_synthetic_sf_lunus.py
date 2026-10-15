@@ -25,6 +25,7 @@ from sampleworks.utils.atom_array_utils import keep_amino_acids, keep_polymer
 pytest.importorskip("lunus.sf", reason="lunus[sf] not installed")
 
 # Below the guard: the generator imports lunus.sf at module scope.
+from sampleworks.core.forward_models.xray import lunus_sf
 from sampleworks.synthetic.generate_synthetic_sf_lunus import (
     compute_ensemble_amplitudes,
     dataset_from_bragg_amplitudes,
@@ -422,3 +423,80 @@ class TestMTZWriters:
         assert amplitudes.index.names == ["H", "K", "L"]
         assert [str(dtype) for dtype in amplitudes.dtypes] == ["SFAmplitude", "Stddev", "Phase"]
         assert [str(dtype) for dtype in intensities.dtypes] == ["Intensity"]
+
+
+class TestSolvent:
+    """The bulk-solvent mask, calibrated against gemmi's geometric mask by default."""
+
+    def test_calibrated_cutoff_reproduces_the_geometric_fraction(
+        self, polymer_6b8x, crystal_6b8x, cpu_device
+    ):
+        from lunus.sf import mask_occupancy, splat_density, symmetrize_sum
+
+        atom_array = polymer_6b8x
+        cell, spacegroup = crystal_6b8x
+        setup = lunus_sf.build_setup(atom_array, cell, spacegroup.hm, 2.2, device=cpu_device)
+        target = lunus_sf.geometric_solvent_fraction(
+            atom_array, atom_array.coord, cell, spacegroup, setup.grid_shape
+        )
+        coords = torch.as_tensor(atom_array.coord, dtype=torch.float32)
+        occupancies = torch.as_tensor(np.asarray(atom_array.occupancy, dtype=np.float32))
+
+        solvent = lunus_sf.calibrate_solvent(setup, coords, occupancies, target)
+
+        density = symmetrize_sum(
+            splat_density(
+                coords @ setup.frac_matrix.T,
+                setup.element_idx,
+                occupancies,
+                setup.atom_A,
+                setup.atom_lam,
+                setup.elem_offsets,
+                setup.atom_radius_ang,
+                setup.grid_shape,
+                setup.orth_matrix,
+                setup.taper_width,
+            ),
+            setup.grid_ops,
+        )
+        occupancy = float(
+            mask_occupancy(solvent.build_mask(density, setup.orth_matrix, pipeline_blur=setup.blur))
+        )
+        # Measured on 6B8X: target 0.625, reproduced to 3 decimals.
+        assert 0.3 < target < 0.9
+        assert occupancy == pytest.approx(target, abs=0.01)
+        assert solvent.taper_width == pytest.approx(0.5 * solvent.cutoff)
+
+    def test_generator_calibrates_by_default_and_changes_the_amplitudes(
+        self, polymer_6b8x, crystal_6b8x, cpu_device, caplog
+    ):
+        atom_array = polymer_6b8x
+        cell, spacegroup = crystal_6b8x
+        coords = atom_array.coord[None]
+
+        _, without, _ = _amplitudes(
+            atom_array, coords, cell, spacegroup, cpu_device, resolution=CROSS_ENGINE_RESOLUTION
+        )
+        _, calibrated, _ = _amplitudes(
+            atom_array,
+            coords,
+            cell,
+            spacegroup,
+            cpu_device,
+            resolution=CROSS_ENGINE_RESOLUTION,
+            bulk_solvent=True,
+        )
+        _, explicit, _ = _amplitudes(
+            atom_array,
+            coords,
+            cell,
+            spacegroup,
+            cpu_device,
+            resolution=CROSS_ENGINE_RESOLUTION,
+            bulk_solvent=True,
+            solvent_cutoff=0.20,
+        )
+
+        assert "Solvent cutoff calibrated" in caplog.text
+        assert not np.allclose(np.abs(calibrated), np.abs(without))
+        assert not np.allclose(np.abs(calibrated), np.abs(explicit))

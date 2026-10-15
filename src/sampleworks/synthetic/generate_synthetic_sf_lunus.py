@@ -37,7 +37,7 @@ from atomworks.io.transforms.atom_array import remove_waters
 from atomworks.io.utils.io_utils import load_any
 from biotite.structure import AtomArray, AtomArrayStack
 from loguru import logger
-from lunus.sf import mean_and_diffuse
+from lunus.sf import mean_and_diffuse, SolventModel
 
 from sampleworks.core.forward_models.xray import lunus_sf
 from sampleworks.synthetic.synthetic_utils import (
@@ -57,10 +57,10 @@ from sampleworks.utils.atom_array_utils import (
 from sampleworks.utils.torch_utils import try_gpu
 
 
-# Bulk-solvent mask parameters, e/A^3. lunus takes an absolute density cutoff,
-# not a quantile; lunus.sf.calibrate_cutoff derives one for a target solvent
-# fraction.
-DEFAULT_SOLVENT_CUTOFF = 0.20
+# Taper width of an explicitly given solvent cutoff, e/A^3. By default the cutoff
+# is calibrated instead: lunus takes an absolute density cutoff, and the value
+# that matches gemmi's geometric mask moves by more than an order of magnitude
+# with B and with packing, so a constant is not transferable between systems.
 DEFAULT_SOLVENT_TAPER_WIDTH = 0.10
 
 
@@ -273,6 +273,7 @@ def compute_ensemble_amplitudes(
     resolution: float,
     device: torch.device,
     *,
+    bulk_solvent: bool = False,
     solvent_cutoff: float | None = None,
     solvent_taper_width: float = DEFAULT_SOLVENT_TAPER_WIDTH,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -291,11 +292,15 @@ def compute_ensemble_amplitudes(
         High-resolution limit in Å.
     device
         Torch device.
+    bulk_solvent
+        If True, add a per-configuration bulk-solvent contribution.
     solvent_cutoff
-        Density below which a voxel is solvent, e/Å³. ``None`` disables bulk
-        solvent entirely (no solvent code runs).
+        Density below which a voxel is solvent, e/Å³. ``None`` calibrates the
+        cutoff so the mask calls the same fraction of the cell solvent as gemmi's
+        geometric mask on the first configuration.
     solvent_taper_width
-        Width of the mask's smooth transition, e/Å³.
+        Width of the mask's smooth transition, e/Å³, for an explicit cutoff; a
+        calibrated cutoff sets its own taper.
 
     Returns
     -------
@@ -314,12 +319,13 @@ def compute_ensemble_amplitudes(
     occupancies = torch.as_tensor(np.asarray(atom_array.occupancy, dtype=np.float32), device=device)
 
     solvent = None
-    if solvent_cutoff is not None:
-        # Inline: lunus.sf loads submodules on first access (PEP 562), so this
-        # loads solvent_torch only when a cutoff is requested.
-        from lunus.sf import SolventModel
-
+    if bulk_solvent and solvent_cutoff is not None:
         solvent = SolventModel(cutoff=solvent_cutoff, taper_width=solvent_taper_width)
+    elif bulk_solvent:
+        target = lunus_sf.geometric_solvent_fraction(
+            atom_array, coords[0], unit_cell, space_group, setup.grid_shape
+        )
+        solvent = lunus_sf.calibrate_solvent(setup, coords_t[0], occupancies, target)
 
     with torch.no_grad():  # generation only; nothing here needs gradients
         f_configs = lunus_sf.structure_factors(setup, coords_t, occupancies, hkl, solvent=solvent)
@@ -520,6 +526,7 @@ def _process_single_row(
     strip_hydrogens: bool = False,
     strip_waters: bool = False,
     strip_ligands: bool = False,
+    bulk_solvent: bool = False,
     solvent_cutoff: float | None = None,
     solvent_taper_width: float = DEFAULT_SOLVENT_TAPER_WIDTH,
     write_diffuse: bool = False,
@@ -587,6 +594,7 @@ def _process_single_row(
             space_group,
             resolution,
             device,
+            bulk_solvent=bulk_solvent,
             solvent_cutoff=solvent_cutoff,
             solvent_taper_width=solvent_taper_width,
         )
@@ -623,7 +631,7 @@ def _process_single_row(
             record["failure_stage"] = "write_diffuse"
             record["error"] = f"{type(e).__name__}: {e}"
 
-    label = "total" if solvent_cutoff is not None else "protein"
+    label = "total" if bulk_solvent else "protein"
     output_path = output_dir / (row.mtzfile or f"{structure_path.stem}_{resolution:.2f}A.mtz")
     try:
         save_mtz(
@@ -666,6 +674,7 @@ def process_batch(
     strip_hydrogens: bool = False,
     strip_waters: bool = False,
     strip_ligands: bool = False,
+    bulk_solvent: bool = False,
     solvent_cutoff: float | None = None,
     solvent_taper_width: float = DEFAULT_SOLVENT_TAPER_WIDTH,
     write_diffuse: bool = False,
@@ -699,11 +708,13 @@ def process_batch(
         avoid multiple CUDA contexts.
     strip_hydrogens, strip_waters, strip_ligands
         Filters applied after any per-row selection.
+    bulk_solvent
+        Add a per-configuration bulk-solvent contribution and write the total set.
     solvent_cutoff
-        Density below which a voxel is solvent, e/Å³. ``None`` disables bulk
-        solvent entirely.
+        Density below which a voxel is solvent, e/Å³; ``None`` calibrates it to
+        gemmi's geometric mask.
     solvent_taper_width
-        Width of the solvent mask's smooth transition, e/Å³.
+        Width of the solvent mask's smooth transition, e/Å³, for an explicit cutoff.
     write_diffuse
         Also write the diffuse intensities, which needs multi-model input.
     altlocs_as_models
@@ -733,6 +744,7 @@ def process_batch(
             strip_hydrogens=strip_hydrogens,
             strip_waters=strip_waters,
             strip_ligands=strip_ligands,
+            bulk_solvent=bulk_solvent,
             solvent_cutoff=solvent_cutoff,
             solvent_taper_width=solvent_taper_width,
             write_diffuse=write_diffuse,
@@ -797,14 +809,15 @@ def parse_args() -> argparse.Namespace:
     solvent_group.add_argument(
         "--solvent-cutoff",
         type=float,
-        default=DEFAULT_SOLVENT_CUTOFF,
-        help="Density below which a voxel is solvent, e/A^3 (see lunus calibrate_cutoff)",
+        default=None,
+        help="Density below which a voxel is solvent, e/A^3 (default: calibrated so the "
+        "mask matches the solvent fraction of gemmi's geometric mask)",
     )
     solvent_group.add_argument(
         "--solvent-taper-width",
         type=float,
         default=DEFAULT_SOLVENT_TAPER_WIDTH,
-        help="Width of the mask's smooth transition, e/A^3",
+        help="Width of the mask's smooth transition, e/A^3, for an explicit --solvent-cutoff",
     )
 
     diffuse_group = parser.add_argument_group("Diffuse Options")
@@ -855,7 +868,6 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     device = try_gpu()
-    solvent_cutoff = args.solvent_cutoff if args.simulate_solvent else None
 
     if args.batch_csv:
         process_batch(
@@ -871,7 +883,8 @@ def main() -> None:
             strip_hydrogens=args.remove_hydrogens,
             strip_waters=args.remove_waters,
             strip_ligands=args.remove_ligands,
-            solvent_cutoff=solvent_cutoff,
+            bulk_solvent=args.simulate_solvent,
+            solvent_cutoff=args.solvent_cutoff,
             solvent_taper_width=args.solvent_taper_width,
             write_diffuse=args.write_diffuse,
             altlocs_as_models=args.altlocs_as_models,
@@ -900,7 +913,8 @@ def main() -> None:
             strip_hydrogens=args.remove_hydrogens,
             strip_waters=args.remove_waters,
             strip_ligands=args.remove_ligands,
-            solvent_cutoff=solvent_cutoff,
+            bulk_solvent=args.simulate_solvent,
+            solvent_cutoff=args.solvent_cutoff,
             solvent_taper_width=args.solvent_taper_width,
             write_diffuse=args.write_diffuse,
             altlocs_as_models=args.altlocs_as_models,
