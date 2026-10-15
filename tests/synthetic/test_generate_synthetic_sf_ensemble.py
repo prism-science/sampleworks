@@ -19,11 +19,14 @@ from sampleworks.synthetic.generate_synthetic_sf_ensemble import (
 from sampleworks.utils.atom_array_utils import load_structure_with_altlocs
 
 
-# Toy two-conformer ensemble: one glycine on a monoclinic cell, the second conformer
-# shifted 0.2 A along x.
+# Toy two-conformer ensemble: one glycine on a monoclinic cell whose N/H/CA are shared and
+# whose C/O differ in conformation, with the second conformer's shifted 0.2 A along x.
 CELL = (31.0, 32.0, 33.0, 90.0, 91.0, 90.0)
+SPACEGROUP = "P 1 21 1"
 OFFSETS = [0.0, 0.2]
 OCCUPANCIES = [0.4, 0.6]
+ALTLOC_IDS = ["A", "B"]
+BLANK_ALTLOC_ID = " "
 SHARED_SETTINGS: dict[str, Any] = {
     "resolution": 4.0,
     "scattering_factor_mode": "xray",
@@ -35,67 +38,79 @@ SHARED_SETTINGS: dict[str, Any] = {
 }
 
 
-def _write_structure(path: Path, models: list[list[tuple[float, float, str]]]) -> None:
-    """Write a one-residue crystallographic structure with one removable hydrogen.
+def _toy_single_model(
+    offsets: list[float], occupancies: list[float], altlocs: list[str]
+) -> gemmi.Model:
+    """Build one model holding a toy residue (a glycine), optionally with altloc conformers.
+
+    The shared atoms (N, the removable H, CA) are written once, blank altloc and full
+    occupancy. Each conformer adds its own copy of the conformer atoms (C, O) under its
+    altloc ID, so several conformers give one residue with altlocs (e.g. A at 0.4 and B at
+    0.6), while one conformer with a blank altloc gives a plain residue.
+
+    Parameters
+    ----------
+    offsets
+        x-axis shift of each conformer's C and O.
+    occupancies
+        Occupancy of each conformer.
+    altlocs
+        Altloc ID of each conformer, e.g. ``["A", "B"]``, or ``[" "]`` for a plain residue.
+
+    Returns
+    -------
+    gemmi.Model
+        One unnamed model with chain A holding the residue.
+    """
+    residue = gemmi.Residue()
+    residue.name = "GLY"
+    residue.seqid = gemmi.SeqId(1, " ")
+    residue.het_flag = "A"
+
+    def add_atom(name: str, element: str, x: float, occupancy: float, altloc: str) -> None:
+        atom = gemmi.Atom()
+        atom.name = name
+        atom.element = gemmi.Element(element)
+        atom.pos = gemmi.Position(x, 2.0, 3.0)
+        atom.b_iso = 15.0
+        atom.occ = occupancy
+        atom.altloc = altloc
+        residue.add_atom(atom)
+
+    for name, element, x in (("N", "N", 1.0), ("H", "H", 1.5), ("CA", "C", 2.0)):
+        add_atom(name, element, x, 1.0, BLANK_ALTLOC_ID)
+    for x_offset, occupancy, altloc in zip(offsets, occupancies, altlocs, strict=True):
+        for name, element, x in (("C", "C", 3.0), ("O", "O", 4.0)):
+            add_atom(name, element, x + x_offset, occupancy, altloc)
+
+    chain = gemmi.Chain("A")
+    chain.add_residue(residue)
+    model = gemmi.Model("")
+    model.add_chain(chain)
+    return model
+
+
+def _write_models(path: Path, models: list[gemmi.Model]) -> None:
+    """Number the models 1..N and write them as one crystallographic PDB file.
 
     Parameters
     ----------
     path
         Output PDB path.
     models
-        One entry per model, each a list of ``(x_offset, occupancy, altloc)`` conformers
-        that add a full copy of the residue's atoms shifted by ``x_offset`` along x. A
-        blank altloc writes a plain single-conformer model.
+        Models to write, in order.
 
     Notes
     -----
-    This function writes a PDB file at ``path``.
+    This function writes a PDB file at ``path`` and renames each model in ``models``.
     """
     structure = gemmi.Structure()
-    for model_index, conformers in enumerate(models, start=1):
-        residue = gemmi.Residue()
-        residue.name = "GLY"
-        residue.seqid = gemmi.SeqId(1, " ")
-        residue.het_flag = "A"
-        for x_offset, occupancy, altloc in conformers:
-            for atom_name, element, x_coordinate in (
-                ("N", "N", 1.0),
-                ("H", "H", 1.5),
-                ("CA", "C", 2.0),
-                ("C", "C", 3.0),
-                ("O", "O", 4.0),
-            ):
-                atom = gemmi.Atom()
-                atom.name = atom_name
-                atom.element = gemmi.Element(element)
-                atom.pos = gemmi.Position(x_coordinate + x_offset, 2.0, 3.0)
-                atom.b_iso = 15.0
-                atom.occ = occupancy
-                atom.altloc = altloc
-                residue.add_atom(atom)
-        chain = gemmi.Chain("A")
-        chain.add_residue(residue)
-        model = gemmi.Model(str(model_index))
-        model.add_chain(chain)
+    for model_index, model in enumerate(models, start=1):
+        model.name = str(model_index)
         structure.add_model(model)
     structure.cell = gemmi.UnitCell(*CELL)
-    structure.spacegroup_hm = "P 1 21 1"
+    structure.spacegroup_hm = SPACEGROUP
     structure.write_pdb(str(path))
-
-
-def _write_ensemble(path: Path) -> None:
-    """Write the toy ensemble as a multi-model file, one conformer per model.
-
-    Parameters
-    ----------
-    path
-        Output PDB path.
-
-    Notes
-    -----
-    This function writes a PDB file at ``path``.
-    """
-    _write_structure(path, [[(offset, 1.0, " ")] for offset in OFFSETS])
 
 
 def test_summed_models_match_merged_altloc_structure(tmp_path: Path) -> None:
@@ -109,11 +124,17 @@ def test_summed_models_match_merged_altloc_structure(tmp_path: Path) -> None:
     tmp_path
         Temporary directory for structures and generated outputs.
     """
-    _write_structure(tmp_path / "merged.pdb", [list(zip(OFFSETS, OCCUPANCIES, "AB", strict=True))])
-    _write_ensemble(tmp_path / "ensemble.pdb")
+    # Same populations two ways: on the altloc atoms here, per model via occupancy_values below.
+    _write_models(
+        tmp_path / "multi_altlocs.pdb", [_toy_single_model(OFFSETS, OCCUPANCIES, ALTLOC_IDS)]
+    )
+    _write_models(
+        tmp_path / "multi_model.pdb",
+        [_toy_single_model([offset], [1.0], [BLANK_ALTLOC_ID]) for offset in OFFSETS],
+    )
 
     process_single_structure(
-        row=BatchRowForMTZ(filename="merged.pdb", mtzfile="merged.mtz"),
+        row=BatchRowForMTZ(filename="multi_altlocs.pdb", mtzfile="multi_altlocs.mtz"),
         base_dir=tmp_path,
         output_dir=tmp_path,
         occupancy_mode="default",
@@ -121,26 +142,28 @@ def test_summed_models_match_merged_altloc_structure(tmp_path: Path) -> None:
     )
     process_single_ensemble(
         row=BatchRowForMTZ(
-            filename="ensemble.pdb", occupancy_values=OCCUPANCIES, mtzfile="ensemble.mtz"
+            filename="multi_model.pdb", occupancy_values=OCCUPANCIES, mtzfile="multi_model.mtz"
         ),
         base_dir=tmp_path,
         output_dir=tmp_path,
         **SHARED_SETTINGS,
     )
 
-    merged = rs.read_mtz(str(tmp_path / "merged.mtz")).sort_index()
-    ensemble = rs.read_mtz(str(tmp_path / "ensemble.mtz")).sort_index()
-    assert list(ensemble.columns) == list(merged.columns)
-    assert ensemble.index.equals(merged.index)
-    assert ensemble.cell.parameters == merged.cell.parameters
-    assert ensemble.spacegroup.hm == merged.spacegroup.hm
+    multi_altlocs = rs.read_mtz(str(tmp_path / "multi_altlocs.mtz")).sort_index()
+    multi_model = rs.read_mtz(str(tmp_path / "multi_model.mtz")).sort_index()
+    assert list(multi_model.columns) == list(multi_altlocs.columns)
+    assert multi_model.index.equals(multi_altlocs.index)
+    assert multi_model.cell.parameters == multi_altlocs.cell.parameters
+    assert multi_model.spacegroup.hm == multi_altlocs.spacegroup.hm
     # R-free flags depend only on the reflection list and seed, so they must match exactly.
-    flag_columns = merged.columns.difference(["Fprotein", "SIGFprotein", "PHIFprotein"])
-    assert ensemble[flag_columns].equals(merged[flag_columns])
+    flag_columns = multi_altlocs.columns.difference(["Fprotein", "SIGFprotein", "PHIFprotein"])
+    assert multi_model[flag_columns].equals(multi_altlocs[flag_columns])
     # Compare complex values so phases of near-zero amplitudes cannot fail on wrap-around.
-    merged_f = merged.to_structurefactor("Fprotein", "PHIFprotein").to_numpy()
-    ensemble_f = ensemble.to_structurefactor("Fprotein", "PHIFprotein").to_numpy()
-    np.testing.assert_allclose(ensemble_f, merged_f, atol=1e-4 * np.abs(merged_f).max())
+    multi_altlocs_f = multi_altlocs.to_structurefactor("Fprotein", "PHIFprotein").to_numpy()
+    multi_model_f = multi_model.to_structurefactor("Fprotein", "PHIFprotein").to_numpy()
+    np.testing.assert_allclose(
+        multi_model_f, multi_altlocs_f, atol=1e-4 * np.abs(multi_altlocs_f).max()
+    )
 
 
 @pytest.mark.parametrize("bulk_solvent", ["combined", "per_conformer"])
@@ -159,8 +182,11 @@ def test_identical_models_match_single_structure_with_solvent(
     bulk_solvent
         Bulk-solvent mode under test.
     """
-    _write_structure(tmp_path / "single.pdb", [[(0.0, 1.0, " ")]])
-    _write_structure(tmp_path / "ensemble.pdb", [[(0.0, 1.0, " ")]] * 2)
+    _write_models(tmp_path / "single.pdb", [_toy_single_model([0.0], [1.0], [BLANK_ALTLOC_ID])])
+    _write_models(
+        tmp_path / "multi_model.pdb",
+        [_toy_single_model([offset], [1.0], [BLANK_ALTLOC_ID]) for offset in [0.0, 0.0]],
+    )
 
     process_single_structure(
         row=BatchRowForMTZ(filename="single.pdb", mtzfile="single.mtz"),
@@ -172,7 +198,7 @@ def test_identical_models_match_single_structure_with_solvent(
     )
     process_single_ensemble(
         row=BatchRowForMTZ(
-            filename="ensemble.pdb", occupancy_values=OCCUPANCIES, mtzfile="ensemble.mtz"
+            filename="multi_model.pdb", occupancy_values=OCCUPANCIES, mtzfile="multi_model.mtz"
         ),
         base_dir=tmp_path,
         output_dir=tmp_path,
@@ -181,14 +207,14 @@ def test_identical_models_match_single_structure_with_solvent(
     )
 
     single = rs.read_mtz(str(tmp_path / "single.mtz")).sort_index()
-    ensemble = rs.read_mtz(str(tmp_path / "ensemble.mtz")).sort_index()
-    assert list(ensemble.columns) == list(single.columns)
-    assert ensemble.index.equals(single.index)
+    multi_model = rs.read_mtz(str(tmp_path / "multi_model.mtz")).sort_index()
+    assert list(multi_model.columns) == list(single.columns)
+    assert multi_model.index.equals(single.index)
     for label in ("protein", "total"):
         # Compare complex values so phases of near-zero amplitudes cannot fail on wrap-around.
         single_f = single.to_structurefactor(f"F{label}", f"PHIF{label}").to_numpy()
-        ensemble_f = ensemble.to_structurefactor(f"F{label}", f"PHIF{label}").to_numpy()
-        np.testing.assert_allclose(ensemble_f, single_f, atol=1e-4 * np.abs(single_f).max())
+        multi_model_f = multi_model.to_structurefactor(f"F{label}", f"PHIF{label}").to_numpy()
+        np.testing.assert_allclose(multi_model_f, single_f, atol=1e-4 * np.abs(single_f).max())
 
 
 def test_solvent_modes_leave_fprotein_unchanged(tmp_path: Path) -> None:
@@ -199,13 +225,16 @@ def test_solvent_modes_leave_fprotein_unchanged(tmp_path: Path) -> None:
     tmp_path
         Temporary directory for the ensemble and generated outputs.
     """
-    _write_ensemble(tmp_path / "ensemble.pdb")
+    _write_models(
+        tmp_path / "multi_model.pdb",
+        [_toy_single_model([offset], [1.0], [BLANK_ALTLOC_ID]) for offset in OFFSETS],
+    )
 
     datasets = {}
     for bulk_solvent in ("off", "combined", "per_conformer"):
         process_single_ensemble(
             row=BatchRowForMTZ(
-                filename="ensemble.pdb",
+                filename="multi_model.pdb",
                 occupancy_values=OCCUPANCIES,
                 mtzfile=f"{bulk_solvent}.mtz",
             ),
@@ -235,16 +264,21 @@ def test_batch_csv_matches_single_ensemble_mode(tmp_path: Path) -> None:
     tmp_path
         Temporary directory for the ensemble, the CSV, and generated outputs.
     """
-    _write_ensemble(tmp_path / "ensemble.pdb")
+    _write_models(
+        tmp_path / "multi_model.pdb",
+        [_toy_single_model([offset], [1.0], [BLANK_ALTLOC_ID]) for offset in OFFSETS],
+    )
     csv_path = tmp_path / "ensembles.csv"
-    csv_path.write_text("filename,occupancy_values,mtzfile\nensemble.pdb,0.4:0.6,ab.mtz\n")
+    csv_path.write_text("filename,occupancy_values,mtzfile\nmulti_model.pdb,0.4:0.6,ab.mtz\n")
     batch_dir = tmp_path / "batch"
 
     process_batch(
         csv_path=csv_path, base_dir=tmp_path, output_dir=batch_dir, n_jobs=1, **SHARED_SETTINGS
     )
     process_single_ensemble(
-        row=BatchRowForMTZ(filename="ensemble.pdb", occupancy_values=OCCUPANCIES, mtzfile="ab.mtz"),
+        row=BatchRowForMTZ(
+            filename="multi_model.pdb", occupancy_values=OCCUPANCIES, mtzfile="ab.mtz"
+        ),
         base_dir=tmp_path,
         output_dir=tmp_path,
         **SHARED_SETTINGS,
@@ -261,11 +295,14 @@ def test_occupancy_count_mismatch_writes_no_mtz(tmp_path: Path) -> None:
     tmp_path
         Temporary directory for the ensemble and generated outputs.
     """
-    _write_ensemble(tmp_path / "ensemble.pdb")
+    _write_models(
+        tmp_path / "multi_model.pdb",
+        [_toy_single_model([offset], [1.0], [BLANK_ALTLOC_ID]) for offset in OFFSETS],
+    )
 
     process_single_ensemble(
         row=BatchRowForMTZ(
-            filename="ensemble.pdb", occupancy_values=[0.2, 0.3, 0.5], mtzfile="x.mtz"
+            filename="multi_model.pdb", occupancy_values=[0.2, 0.3, 0.5], mtzfile="x.mtz"
         ),
         base_dir=tmp_path,
         output_dir=tmp_path,
@@ -283,11 +320,14 @@ def test_saved_structure_keeps_one_model_per_conformer(tmp_path: Path) -> None:
     tmp_path
         Temporary directory for the ensemble and generated outputs.
     """
-    _write_ensemble(tmp_path / "ensemble.pdb")
+    _write_models(
+        tmp_path / "multi_model.pdb",
+        [_toy_single_model([offset], [1.0], [BLANK_ALTLOC_ID]) for offset in OFFSETS],
+    )
 
     process_single_ensemble(
         row=BatchRowForMTZ(
-            filename="ensemble.pdb", occupancy_values=OCCUPANCIES, mtzfile="out/ensemble.mtz"
+            filename="multi_model.pdb", occupancy_values=OCCUPANCIES, mtzfile="out/multi_model.mtz"
         ),
         base_dir=tmp_path,
         output_dir=tmp_path,
@@ -295,11 +335,12 @@ def test_saved_structure_keeps_one_model_per_conformer(tmp_path: Path) -> None:
         **SHARED_SETTINGS,
     )
 
-    saved_path = tmp_path / "out" / "ensemble_sf_input.cif"
+    saved_path = tmp_path / "out" / "multi_model_sf_input.cif"
     assert len(gemmi.read_structure(str(saved_path))) == len(OFFSETS)
     for model, offset in enumerate(OFFSETS):
         saved = load_structure_with_altlocs(saved_path, model=model)
         assert list(saved.atom_name) == ["N", "CA", "C", "O"]  # hydrogen stripped
-        np.testing.assert_allclose(saved.coord[:, 0], np.array([1.0, 2.0, 3.0, 4.0]) + offset)
+        # Only the conformer atoms C and O are shifted; N and CA are shared.
+        np.testing.assert_allclose(saved.coord[:, 0], [1.0, 2.0, 3.0 + offset, 4.0 + offset])
         np.testing.assert_array_equal(saved.occupancy, 1.0)
         np.testing.assert_array_equal(saved.b_factor, 20.0)
