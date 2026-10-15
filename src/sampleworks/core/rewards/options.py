@@ -149,8 +149,14 @@ class DiffuseBraggOptions:
         "each configuration's own density)",
         choices=("off", "per_conformer"),
     )
-    solvent_cutoff: float = opt(0.20, help="Density below which a voxel is solvent, e/A^3")
-    solvent_taper_width: float = opt(0.10, help="Width of the solvent mask's transition, e/A^3")
+    solvent_cutoff: float | None = opt(
+        None,
+        help="Density below which a voxel is solvent, e/A^3 (default: calibrated to the "
+        "solvent fraction of gemmi's geometric mask)",
+    )
+    solvent_taper_width: float = opt(
+        0.10, help="Width of the solvent mask's transition, e/A^3, for an explicit cutoff"
+    )
     exclude_free_reflections: bool = opt(
         False, help="Drop the R-free test set from the Bragg target"
     )
