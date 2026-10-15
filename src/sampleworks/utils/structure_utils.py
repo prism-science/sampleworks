@@ -18,7 +18,7 @@ from sampleworks.core.rewards.protocol import RewardInputs
 from sampleworks.eval.eval_dataclasses import ProteinConfig
 from sampleworks.models.protocol import GenerativeModelInput
 from sampleworks.utils import atom_array_utils
-from sampleworks.utils.atom_array_utils import BLANK_ALTLOC_IDS, apply_selection
+from sampleworks.utils.atom_array_utils import apply_selection, BLANK_ALTLOC_IDS
 from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.framework_utils import match_batch
 
