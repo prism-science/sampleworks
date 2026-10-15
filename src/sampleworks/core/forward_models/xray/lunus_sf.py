@@ -39,7 +39,8 @@ by ``exp(+blur / (4 d^2))`` after the FFT, which leaves ``F(hkl)`` unchanged in
 exact arithmetic and changes only the sampling. lunus measures R = 0.186 against
 direct summation at B_iso = 2 with no blur and 0.0004 with blur = 20 (7FPV,
 0.633 Å grid, d_min 2.0 Å). The correction amplifies sampling error, more at
-high resolution, so :func:`recommended_blur` sizes it to the grid spacing.
+high resolution, so lunus's ``recommended_blur`` sizes it to the grid's largest
+voxel edge and no further.
 
 The taper smooths the cutoff. Both engines truncate each atom's density below a
 threshold (lunus's kernel default, 1e-5 e/Å³, is also gemmi's). lunus converts
@@ -70,6 +71,7 @@ from lunus.sf import (
     structure_factors_batch,
     symmetrize_sum,
 )
+from lunus.sf.cell_utils import recommended_blur
 
 from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.unitcell import (
     UnitCell,
@@ -85,43 +87,6 @@ if TYPE_CHECKING:
 # gemmi's default sampling rate for density grids; lunus's grid_shape_for_resolution
 # takes the same convention (spacing = d_min / (2 * rate)).
 DEFAULT_GRID_RATE = 1.5
-
-# Effective B at which an atom's Gaussian has width sigma = one grid spacing:
-# sigma^2 = B / (8 pi^2). Checked on 6B8X at d_min 2.2 A against a rate 4.5,
-# no-blur grid: the default rate 1.5 gives R 0.1007 with no blur and 0.00004 with
-# the recommended 40.5. gemmi's Refmac-compatible rule gives effective B 25.8-46.2
-# on 6B8X and 1VME at 1.8-2.2 A.
-B_TARGET_COEFFICIENT = 8.0 * np.pi**2
-
-
-def recommended_blur(
-    b_factors: np.ndarray, resolution: float, rate: float = DEFAULT_GRID_RATE
-) -> float:
-    """Smallest blur that samples the sharpest atom adequately on the grid.
-
-    Raises the minimum B to :data:`B_TARGET_COEFFICIENT` times the squared grid
-    spacing. The sharpest atom sets the requirement; the blur is kept minimal
-    because it is divided back out with ``exp(+blur / (4 d^2))``, which amplifies
-    sampling error.
-
-    Parameters
-    ----------
-    b_factors
-        Per-atom B-factors, Å².
-    resolution
-        High-resolution limit (d_min) in Å.
-    rate
-        Grid oversampling rate; spacing is ``d_min / (2 * rate)``.
-
-    Returns
-    -------
-    float
-        Blur to add, Å². Zero when the sharpest atom is already smooth enough.
-    """
-    spacing = resolution / (2.0 * rate)
-    b_target = B_TARGET_COEFFICIENT * spacing**2
-    b_min = float(np.min(np.asarray(b_factors, dtype=np.float64)))
-    return max(0.0, b_target - b_min)
 
 
 def space_group_operations(
@@ -306,8 +271,9 @@ def build_setup(
         Grid oversampling rate; spacing is ``d_min / (2 * rate)``.
     blur
         Extra isotropic B for grid sampling, divided back out in the FFT.
-        ``None`` takes :func:`recommended_blur`. ``0.0`` disables it, which is
-        only safe when no atom is sharp relative to the grid spacing.
+        ``None`` takes lunus's ``recommended_blur`` for the sharpest atom on this
+        grid. ``0.0`` disables it, which is only safe when no atom is sharp
+        relative to the grid spacing.
     device, dtype
         Torch placement for the kernel tensors.
 
@@ -379,7 +345,7 @@ def build_setup(
     grid_ops = build_grid_ops(rotations, translations, grid_shape)
 
     if blur is None:
-        blur = recommended_blur(b_factors, resolution, rate)
+        blur = recommended_blur(float(np.min(b_factors)), grid_shape, orth_np, d_min=resolution)
         if blur > 0.0:
             logger.info(
                 f"Blur {blur:.1f} A^2 added for grid sampling: the sharpest atom is at "

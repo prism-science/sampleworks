@@ -17,10 +17,9 @@ from biotite.structure import AtomArray
 pytest.importorskip("lunus.sf", reason="lunus[sf] not installed")
 
 # Below the guard: lunus_sf imports lunus.sf at module scope.
+from lunus.sf.cell_utils import recommended_blur
 from sampleworks.core.forward_models.xray.lunus_sf import (
-    B_TARGET_COEFFICIENT,
     build_setup,
-    recommended_blur,
     space_group_operations,
     structure_factors,
 )
@@ -116,37 +115,26 @@ def test_cell_volume_matches_gemmi_at_either_dtype(atom_array, dtype):
 
 
 class TestRecommendedBlur:
-    """The blur that samples the grid density adequately; see B_TARGET_COEFFICIENT
-    for the measurements behind the target."""
-
-    def test_raises_the_sharpest_atom_to_the_sampling_target(self):
-        """The minimum effective B reaches the target set by the grid spacing."""
-        b_factors = np.array([2.0, 30.0, 90.0])
-        blur = recommended_blur(b_factors, resolution=2.2, rate=1.5)
-
-        spacing = 2.2 / (2 * 1.5)
-        assert b_factors.min() + blur == pytest.approx(B_TARGET_COEFFICIENT * spacing**2)
-
-    def test_is_zero_when_every_atom_is_already_smooth(self):
-        """No blur when every atom is already above the target."""
-        assert recommended_blur(np.array([60.0, 90.0]), resolution=2.2) == 0.0
-
-    def test_grows_with_resolution(self):
-        """Coarser d_min means coarser grid spacing and more blur."""
-        b_factors = np.array([10.0, 20.0])
-        assert recommended_blur(b_factors, 3.0) > recommended_blur(b_factors, 1.8)
+    """build_setup applies lunus's recommended_blur, sized to the grid it built."""
 
     def test_build_setup_applies_it_by_default(self, atom_array):
-        """``blur=None`` takes the recommended blur; ``0.0`` disables it."""
+        """``blur=None`` takes lunus's recommendation for the sharpest atom; ``0.0`` disables it."""
         sharp = atom_array.copy()
         sharp.b_factor = np.full(sharp.array_length(), 2.0)
 
         auto = setup_for(sharp, CELLS["monoclinic"])
         explicit_off = setup_for(sharp, CELLS["monoclinic"], blur=0.0)
 
-        assert auto.blur == pytest.approx(recommended_blur(sharp.b_factor, 2.0))
+        expected = recommended_blur(2.0, auto.grid_shape, auto.orth_matrix.numpy(), d_min=2.0)
+        assert auto.blur == pytest.approx(expected)
         assert auto.blur > 0.0
         assert explicit_off.blur == 0.0
+
+    def test_is_zero_when_every_atom_is_already_smooth(self, atom_array):
+        smooth = atom_array.copy()
+        smooth.b_factor = np.full(smooth.array_length(), 90.0)
+
+        assert setup_for(smooth, CELLS["monoclinic"]).blur == 0.0
 
 
 class TestSymmetryOperations:
