@@ -388,6 +388,25 @@ class TestBulkSolvent:
         with pytest.raises(ValueError, match="bulk_solvent must be one of"):
             build_reward(targets, 0.5, bulk_solvent="combined")
 
+    def test_default_cutoff_is_calibrated_in_prepare(self, ensemble, targets, caplog):
+        atom_array, _ = ensemble
+        reward = build_reward(targets, 1.0, bulk_solvent="per_conformer")
+        assert reward._solvent is None  # nothing to calibrate against until prepare()
+
+        prepare(reward, atom_array)
+
+        assert reward._solvent is not None and reward._solvent.cutoff > 0
+        assert reward._solvent.taper_width == pytest.approx(0.5 * reward._solvent.cutoff)
+        assert "Solvent cutoff calibrated" in caplog.text
+
+    def test_explicit_cutoff_is_used_as_given(self, ensemble, targets):
+        atom_array, _ = ensemble
+        reward = prepare(
+            build_reward(targets, 1.0, bulk_solvent="per_conformer", solvent_cutoff=0.2), atom_array
+        )
+
+        assert reward._solvent.cutoff == 0.2
+
     def test_per_conformer_solvent_changes_the_bragg_term(self, ensemble, targets):
         """A solvent contribution changes |Ftotal| relative to |Fprotein|; the model
         runs under gradient and leaves the loss finite."""

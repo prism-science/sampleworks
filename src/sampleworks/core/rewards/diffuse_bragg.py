@@ -43,8 +43,8 @@ from sampleworks.synthetic.synthetic_utils import resolve_mtz_column
 # Bulk-solvent treatment, named as in StructureFactorRewardFunction. lunus builds
 # its mask per configuration, so there is no "combined" mode here.
 _BULK_SOLVENT_MODES = ("off", "per_conformer")
-# Same defaults as generate_synthetic_sf_lunus, e/A^3.
-DEFAULT_SOLVENT_CUTOFF = 0.20
+# Taper width for an explicit solvent cutoff, e/A^3, as in generate_synthetic_sf_lunus.
+# The cutoff itself is calibrated by default; see prepare().
 DEFAULT_SOLVENT_TAPER_WIDTH = 0.10
 # Retained-reflection thresholds, as in structure_factor.py: the fraction catches an
 # R-free convention mismatch, the count a reflection set too small to guide.
@@ -99,8 +99,12 @@ class DiffuseBraggRewardFunction:
         lunus has no single-mask ``"combined"`` mode.
     solvent_cutoff, solvent_taper_width
         Density below which a voxel is solvent, and the width of the mask's smooth
-        transition, both in e/Å³; the defaults are those of
-        ``generate_synthetic_sf_lunus``.
+        transition, both in e/Å³. ``None`` (default) calibrates the cutoff in
+        :meth:`prepare` so the mask calls the same fraction of the cell solvent as
+        gemmi's geometric mask on the reference configuration, with the taper set
+        to half the cutoff, lunus's convention; the matched cutoff is not a constant
+        across systems or B-factor conventions. An explicit cutoff uses
+        ``solvent_taper_width``.
     exclude_free_reflections
         If True, drop the R-free test set from the Bragg target before the
         reflection list is formed, so both terms score the working set only.
@@ -134,7 +138,7 @@ class DiffuseBraggRewardFunction:
         normalize: bool = True,
         fit_scale: bool = True,
         bulk_solvent: str = "off",
-        solvent_cutoff: float = DEFAULT_SOLVENT_CUTOFF,
+        solvent_cutoff: float | None = None,
         solvent_taper_width: float = DEFAULT_SOLVENT_TAPER_WIDTH,
         exclude_free_reflections: bool = False,
         free_flag_column: str | None = None,
@@ -154,8 +158,10 @@ class DiffuseBraggRewardFunction:
                 f"bulk_solvent must be one of {_BULK_SOLVENT_MODES}, got {bulk_solvent!r}."
             )
         self.bulk_solvent = bulk_solvent
+        # A given cutoff is used as is; None is calibrated in prepare(), which has
+        # the grid and the reference configuration the calibration needs.
         self._solvent = None
-        if bulk_solvent == "per_conformer":
+        if bulk_solvent == "per_conformer" and solvent_cutoff is not None:
             # Inline: lunus.sf loads submodules on first access (PEP 562), so this
             # loads solvent_torch only when a mask is requested.
             from lunus.sf import SolventModel
@@ -371,6 +377,18 @@ class DiffuseBraggRewardFunction:
             device=device,
         )
         self._hkl_t = torch.as_tensor(self._hkl, dtype=torch.long, device=device)
+
+        if self.bulk_solvent == "per_conformer" and self._solvent is None:
+            reference = reward_inputs.to_atom_array()
+            target = lunus_sf.geometric_solvent_fraction(
+                reference, reference.coord, self.unit_cell, self.space_group, self.setup.grid_shape
+            )
+            self._solvent = lunus_sf.calibrate_solvent(
+                self.setup,
+                torch.as_tensor(reference.coord, dtype=torch.float32, device=device),
+                torch.ones(reference.array_length(), device=device),
+                target,
+            )
 
         if self._scores_bragg:
             self._bragg_t = torch.as_tensor(self._bragg_obs, dtype=torch.float32, device=device)
