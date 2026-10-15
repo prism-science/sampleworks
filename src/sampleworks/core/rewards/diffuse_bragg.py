@@ -40,6 +40,18 @@ from sampleworks.core.rewards.protocol import RewardInputs
 from sampleworks.synthetic.synthetic_utils import resolve_mtz_column
 
 
+# Bulk-solvent treatment, named as in StructureFactorRewardFunction. lunus builds
+# its mask per configuration, so there is no "combined" mode here.
+_BULK_SOLVENT_MODES = ("off", "per_conformer")
+# Same defaults as generate_synthetic_sf_lunus, e/A^3.
+DEFAULT_SOLVENT_CUTOFF = 0.20
+DEFAULT_SOLVENT_TAPER_WIDTH = 0.10
+# Retained-reflection thresholds, as in structure_factor.py: the fraction catches an
+# R-free convention mismatch, the count a reflection set too small to guide.
+_MIN_RETAINED_REFLECTION_FRACTION = 0.75
+_MIN_RETAINED_REFLECTIONS = 5_000
+
+
 class DiffuseBraggRewardFunction:
     """Score an ensemble against Bragg amplitudes and anisotropic diffuse data.
 
@@ -80,6 +92,22 @@ class DiffuseBraggRewardFunction:
         The model and target need not share an overall scale, and detaching
         means the fit acts as a normalizer rather than as a parameter the
         gradient can exploit by shrinking the structure.
+    bulk_solvent
+        ``"off"`` (default) scores ``|Fprotein|``; ``"per_conformer"`` adds a
+        bulk-solvent contribution from a mask built on each configuration's own
+        density, giving ``|Ftotal|``. Named as in ``StructureFactorRewardFunction``;
+        lunus has no single-mask ``"combined"`` mode.
+    solvent_cutoff, solvent_taper_width
+        Density below which a voxel is solvent, and the width of the mask's smooth
+        transition, both in e/Å³; the defaults are those of
+        ``generate_synthetic_sf_lunus``.
+    exclude_free_reflections
+        If True, drop the R-free test set from the Bragg target before the
+        reflection list is formed, so both terms score the working set only.
+    free_flag_column, test_set_value
+        The Bragg MTZ's flag column (``None`` takes its sole integer column) and the
+        flag value marking the test set. The default 1 is the Phenix convention the
+        synthetic generators write; CCP4-convention files use 0.
     isotropic_background
         Factory for the anisotropic transform, called as
         ``factory(d_star, shell_thickness, device=..., dtype=...)``. Defaults to
@@ -105,12 +133,34 @@ class DiffuseBraggRewardFunction:
         resolution: float | None = None,
         normalize: bool = True,
         fit_scale: bool = True,
+        bulk_solvent: str = "off",
+        solvent_cutoff: float = DEFAULT_SOLVENT_CUTOFF,
+        solvent_taper_width: float = DEFAULT_SOLVENT_TAPER_WIDTH,
+        exclude_free_reflections: bool = False,
+        free_flag_column: str | None = None,
+        test_set_value: int = 1,
         isotropic_background: Callable | None = None,
     ) -> None:
         self.bragg_weight = bragg_weight
         self.resolution = resolution
         self.normalize = normalize
         self.fit_scale = fit_scale
+        self.exclude_free_reflections = exclude_free_reflections
+        self.free_flag_column = free_flag_column
+        self.test_set_value = test_set_value
+
+        if bulk_solvent not in _BULK_SOLVENT_MODES:
+            raise ValueError(
+                f"bulk_solvent must be one of {_BULK_SOLVENT_MODES}, got {bulk_solvent!r}."
+            )
+        self.bulk_solvent = bulk_solvent
+        self._solvent = None
+        if bulk_solvent == "per_conformer":
+            # Inline: lunus.sf loads submodules on first access (PEP 562), so this
+            # loads solvent_torch only when a mask is requested.
+            from lunus.sf import SolventModel
+
+            self._solvent = SolventModel(cutoff=solvent_cutoff, taper_width=solvent_taper_width)
         self.current_time: float | None = None
 
         if isotropic_background is None:
@@ -179,6 +229,9 @@ class DiffuseBraggRewardFunction:
             ds = rs.read_mtz(str(bragg_path))
             column = resolve_mtz_column(ds, rs.StructureFactorAmplitudeDtype(), column=bragg_column)
             bragg_hkl, bragg_values = self._finite_column(ds, column)
+            if self.exclude_free_reflections:
+                keep = self._working_set_mask(ds, column)
+                bragg_hkl, bragg_values = bragg_hkl[keep], bragg_values[keep]
             cell, spacegroup = ds.cell, ds.spacegroup
 
         if self._scores_diffuse:
@@ -243,6 +296,37 @@ class DiffuseBraggRewardFunction:
         )
         finite = np.isfinite(values)
         return hkl[finite].astype(np.int64), values[finite]
+
+    def _working_set_mask(self, dataset: rs.DataSet, column: str) -> np.ndarray:
+        """Mask over the finite rows of ``column`` that are not in the R-free test set.
+
+        Mirrors ``StructureFactorRewardFunction._build_reflection_mask``: raise if
+        nothing remains, warn if the retained fraction or count is suspiciously low,
+        since a low fraction usually means ``test_set_value`` has the wrong convention.
+        """
+        flag_column = resolve_mtz_column(dataset, rs.MTZIntDtype(), column=self.free_flag_column)
+        finite = np.isfinite(dataset[column].to_numpy(dtype=np.float64))
+        free = dataset[flag_column].to_numpy()[finite] == self.test_set_value
+        keep = ~free
+
+        n_total, n_used = keep.size, int(keep.sum())
+        composition = (
+            f"{n_total} Bragg reflections, {int(free.sum())} flagged free in "
+            f"{flag_column!r} (test_set_value={self.test_set_value})"
+        )
+        convention_hint = (
+            "Reflections with flag == test_set_value are the test set; pass test_set_value=0 "
+            "for a CCP4-convention MTZ."
+        )
+        if n_used == 0:
+            raise ValueError(f"No reflections remain: {composition}. {convention_hint}")
+        if n_used < _MIN_RETAINED_REFLECTIONS:
+            logger.warning(f"Only {n_used} reflections remain: {composition}.")
+        if n_used < _MIN_RETAINED_REFLECTION_FRACTION * n_total:
+            logger.warning(
+                f"Only {n_used}/{n_total} reflections remain: {composition}. {convention_hint}"
+            )
+        return keep
 
     def prepare(self, reward_inputs: RewardInputs, *, device: torch.device | str = "cpu") -> None:
         """Build the scattering setup and the anisotropic transform on ``device``.
@@ -395,7 +479,9 @@ class DiffuseBraggRewardFunction:
         # there is no reason to pay for a forward pass first.
         weight = self._weight()
 
-        f_configs = lunus_sf.structure_factors(self.setup, coordinates, occupancies, self._hkl_t)
+        f_configs = lunus_sf.structure_factors(
+            self.setup, coordinates, occupancies, self._hkl_t, solvent=self._solvent
+        )
         mean_f, diffuse = mean_and_diffuse(f_configs)
 
         total = torch.zeros((), dtype=torch.float32, device=coordinates.device)

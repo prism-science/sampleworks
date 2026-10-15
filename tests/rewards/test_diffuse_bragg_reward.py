@@ -331,3 +331,74 @@ class TestProtocolConformance:
 
         with pytest.raises(ValueError, match="atom_array"):
             reward.prepare(inputs)
+
+
+@pytest.fixture(scope="module")
+def flagged_bragg(targets, tmp_path_factory):
+    """The Bragg target with a Phenix-convention R-free column (1 = test), 10% flagged."""
+    import reciprocalspaceship as rs
+
+    bragg_path, _, _, _ = targets
+    ds = rs.utils.add_rfree(rs.read_mtz(str(bragg_path)), fraction=0.1, seed=0)
+    path = tmp_path_factory.mktemp("flagged") / "bragg_flagged.mtz"
+    ds.write_mtz(str(path))
+    n_free = int((ds["R-free-flags"] == 1).sum())
+    return path, len(ds), n_free
+
+
+class TestFreeReflections:
+    """exclude_free_reflections drops the test set from the Bragg target."""
+
+    def test_test_set_is_dropped_from_the_reflection_list(self, flagged_bragg):
+        from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
+
+        path, n_total, n_free = flagged_bragg
+        with_all = DiffuseBraggRewardFunction(bragg_target=path, bragg_weight=1.0)
+        working = DiffuseBraggRewardFunction(
+            bragg_target=path, bragg_weight=1.0, exclude_free_reflections=True
+        )
+
+        assert len(with_all._hkl) == n_total
+        assert len(working._hkl) == n_total - n_free
+
+    def test_wrong_convention_warns(self, flagged_bragg, caplog):
+        """test_set_value=0 on a Phenix-convention file keeps only the 10% test set."""
+        from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
+
+        path, n_total, n_free = flagged_bragg
+        reward = DiffuseBraggRewardFunction(
+            bragg_target=path, bragg_weight=1.0, exclude_free_reflections=True, test_set_value=0
+        )
+
+        assert len(reward._hkl) == n_free
+        assert "CCP4-convention" in caplog.text
+
+    def test_missing_flag_column_is_a_clear_error(self, targets):
+        from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
+
+        bragg_path, _, _, _ = targets  # written with test_fraction=0.0, so no flag column
+        with pytest.raises(ValueError, match="No MTZInt column"):
+            DiffuseBraggRewardFunction(
+                bragg_target=bragg_path, bragg_weight=1.0, exclude_free_reflections=True
+            )
+
+
+class TestBulkSolvent:
+    def test_unknown_mode_is_rejected(self, targets):
+        with pytest.raises(ValueError, match="bulk_solvent must be one of"):
+            build_reward(targets, 0.5, bulk_solvent="combined")
+
+    def test_per_conformer_solvent_changes_the_bragg_term(self, ensemble, targets):
+        """A solvent contribution changes |Ftotal| relative to |Fprotein|; the model
+        runs under gradient and leaves the loss finite."""
+        atom_array, coords = ensemble
+        without = prepare(build_reward(targets, 1.0), atom_array)
+        with_solvent = prepare(build_reward(targets, 1.0, bulk_solvent="per_conformer"), atom_array)
+
+        loss_off, _ = score(without, atom_array, coords)
+        loss_on, x = score(with_solvent, atom_array, coords, requires_grad=True)
+        loss_on.backward()
+
+        assert torch.isfinite(loss_on)
+        assert not torch.isclose(loss_on, loss_off)
+        assert x.grad is not None and torch.isfinite(x.grad).all()
