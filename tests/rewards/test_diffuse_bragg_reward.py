@@ -57,11 +57,17 @@ def ensemble(resources_dir: Path):
     if not source.exists():
         pytest.skip(f"Source structure not found at {source}")
 
-    atom_array, coords = load_configurations(
-        source, BatchRowForMTZ(filename=SOURCE_CIF), "default", altlocs_as_models=True
+    # Waters are stripped as guidance strips them; the model topology a reward is
+    # prepared with carries none.
+    configurations = load_configurations(
+        source,
+        BatchRowForMTZ(filename=SOURCE_CIF),
+        "default",
+        altlocs_as_models=True,
+        strip_waters=True,
     )
-    assert coords.shape[0] >= 2, "1VME should expand to at least two conformations"
-    return atom_array, coords
+    assert configurations.stack_depth() >= 2, "1VME should expand to at least two conformations"
+    return configurations[0], np.asarray(configurations.coord, dtype=np.float64)
 
 
 @pytest.fixture(scope="module")
@@ -84,8 +90,12 @@ def targets(ensemble, resources_dir: Path, tmp_path_factory):
     meta = gemmi.read_structure(str(resources_dir / "1vme" / SOURCE_CIF))
     cell, spacegroup = meta.cell, gemmi.SpaceGroup(meta.spacegroup_hm)
 
+    from biotite.structure import stack
+
+    configurations = stack([atom_array] * coords.shape[0])
+    configurations.coord = coords.astype(np.float32)
     hkl, mean_f, diffuse = compute_ensemble_amplitudes(
-        atom_array, coords, cell, spacegroup, RESOLUTION, torch.device("cpu")
+        configurations, cell, spacegroup, RESOLUTION, torch.device("cpu")
     )
 
     out = tmp_path_factory.mktemp("diffuse_bragg_targets")
