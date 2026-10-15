@@ -192,8 +192,10 @@ def generate(args: argparse.Namespace) -> None:
     meta = gemmi.read_structure(str(args.structure))
     cell, spacegroup = meta.cell, gemmi.SpaceGroup(meta.spacegroup_hm)
 
+    truth_stack = stack([atom_array.copy() for _ in range(truth.shape[0])])
+    truth_stack.coord = truth.astype(np.float32)
     hkl, mean_f, diffuse = compute_ensemble_amplitudes(
-        atom_array, truth, cell, spacegroup, args.resolution, device
+        truth_stack, cell, spacegroup, args.resolution, device
     )
     if diffuse.max() <= 0:
         raise RuntimeError(
@@ -214,8 +216,6 @@ def generate(args: argparse.Namespace) -> None:
         "diffuse intensities",
     )
 
-    truth_stack = stack([atom_array.copy() for _ in range(truth.shape[0])])
-    truth_stack.coord = truth.astype(np.float32)
     truth_path = args.output_dir / "truth_ensemble.cif"
     save_structure_to_cif(truth_stack, truth_path)
 
