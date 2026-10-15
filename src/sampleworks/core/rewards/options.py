@@ -143,6 +143,23 @@ class DiffuseBraggOptions:
     )
     normalize: bool = opt(True, help="Normalize each term by its target's squared norm")
     fit_scale: bool = opt(True, help="Fit and detach an overall scale before the residual")
+    bulk_solvent: str = opt(
+        "off",
+        help="Bulk-solvent treatment: off (score |Fprotein|) or per_conformer (a mask from "
+        "each configuration's own density)",
+        choices=("off", "per_conformer"),
+    )
+    solvent_cutoff: float = opt(0.20, help="Density below which a voxel is solvent, e/A^3")
+    solvent_taper_width: float = opt(0.10, help="Width of the solvent mask's transition, e/A^3")
+    exclude_free_reflections: bool = opt(
+        False, help="Drop the R-free test set from the Bragg target"
+    )
+    free_flag_column: str | None = opt(
+        None, help="R-free flag column in the Bragg MTZ (default: its sole integer column)"
+    )
+    test_set_value: int = opt(
+        1, help="Flag value marking the test set: 1 (Phenix, default) or 0 (CCP4)"
+    )
 
 
 def option_type(options_cls: type, name: str) -> Any:

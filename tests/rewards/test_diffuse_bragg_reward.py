@@ -544,6 +544,13 @@ class TestBuilder:
         assert isinstance(reward, DiffuseBraggRewardFunction)
         assert reward.bragg_weight == 0.3
 
+    def test_solvent_and_free_flag_options_reach_the_reward(self, targets):
+        reward = self.build(targets, bulk_solvent="per_conformer", solvent_cutoff=0.3)
+
+        assert reward.bulk_solvent == "per_conformer"
+        assert reward._solvent.cutoff == 0.3
+        assert reward.exclude_free_reflections is False
+
     def test_is_registered(self):
         from sampleworks.core.rewards.registry import get_reward_spec
 
