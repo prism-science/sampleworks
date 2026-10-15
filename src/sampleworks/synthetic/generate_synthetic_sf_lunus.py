@@ -197,7 +197,7 @@ def load_configurations(
         # the stack below. Selection and stripping are applied first, since
         # map_altlocs_to_stack's own selection argument keeps unselected atoms that
         # carry no altloc.
-        # TODO: one configuration per letter couples every altloc A in the structure.
+        # TODO(#475): one configuration per letter couples every altloc A in the structure.
         # Altlocs in consecutive residues usually belong together, but those separated
         # by non-altloc regions need not; equal occupancies are often a sign that
         # two regions' altlocs are coupled. A future option could take a number of
