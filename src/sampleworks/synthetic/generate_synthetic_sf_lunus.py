@@ -151,8 +151,7 @@ def load_configurations(
     ------
     ValueError
         If a multi-model file is combined with an occupancy option or
-        ``--altlocs-as-models``, if selection and stripping leave no atoms, or if
-        ``--altlocs-as-models`` finds fewer than two alternate conformations.
+        ``--altlocs-as-models``, or if selection and stripping leave no atoms.
     """
     loaded = load_any(structure_path, altloc="all", extra_fields=["occupancy", "b_factor"])
 
@@ -210,12 +209,6 @@ def load_configurations(
         configurations, annotations = map_altlocs_to_stack(
             loaded, selection=None, return_full_array=True
         )
-        if configurations.stack_depth() < 2:
-            raise ValueError(
-                f"{structure_path.name} has fewer than two alternate conformations, so "
-                "--altlocs-as-models yields nothing to take a variance over."
-            )
-
         b_factors = np.asarray(annotations["b_factor"], dtype=np.float64)
         occupancies = np.asarray(annotations["occupancy"], dtype=np.float64)
         altloc_ids = np.asarray(annotations["altloc_id"])
@@ -541,8 +534,7 @@ def _process_single_row(
     dict
         ``filename`` and ``status`` ("success" or "failed"), ``output_path`` and
         ``diffuse_output_path`` for the files written, and ``failure_stage`` and
-        ``error`` when the row failed. A failed diffuse write still leaves the
-        amplitudes, so a failed row can carry an ``output_path``.
+        ``error`` when the row failed.
     """
     record: dict[str, Any] = {"filename": row.filename, "status": "failed"}
     structure_path = base_dir / row.filename
@@ -605,9 +597,9 @@ def _process_single_row(
                 f"({type(e).__name__}): {e}\n"
                 f"{''.join(traceback.format_tb(e.__traceback__))}"
             )
-            # The amplitudes are still written; the record ends up failed with an output_path.
             record["failure_stage"] = "write_diffuse"
             record["error"] = f"{type(e).__name__}: {e}"
+            return record
 
     label = "total" if bulk_solvent else "protein"
     output_path = output_dir / (row.mtzfile or f"{structure_path.stem}_{resolution:.2f}A.mtz")
@@ -635,9 +627,7 @@ def _process_single_row(
         record["error"] = f"{type(e).__name__}: {e}"
         return record
 
-    # A failed diffuse write records a stage without stopping the row.
-    if "failure_stage" not in record:
-        record["status"] = "success"
+    record["status"] = "success"
     return record
 
 
