@@ -47,13 +47,13 @@ from sampleworks.synthetic.synthetic_utils import (
     resolve_parallel_jobs,
 )
 from sampleworks.utils.atom_array_utils import (
+    apply_selection,
     BLANK_ALTLOC_IDS,
     keep_amino_acids,
     keep_polymer,
     map_altlocs_to_stack,
     remove_hydrogens,
 )
-from sampleworks.utils.structure_utils import filter_to_selection
 from sampleworks.utils.torch_utils import try_gpu
 
 
@@ -179,8 +179,7 @@ def load_configurations(
             )
 
         # Per-atom annotations are shared across models, so one mask filters every model.
-        if row.selection:
-            loaded = filter_to_selection(loaded, row.selection)
+        loaded = apply_selection(loaded, row.selection)
         loaded = remove_hydrogens(loaded) if strip_hydrogens else loaded
         loaded = remove_waters(loaded) if strip_waters else loaded
         loaded = keep_polymer(keep_amino_acids(loaded)) if strip_ligands else loaded
@@ -205,8 +204,7 @@ def load_configurations(
         # two regions' altlocs are coupled. A future option could take a number of
         # configurations and draw A or B independently for each uncoupled region,
         # with probability given by occupancy.
-        if row.selection:
-            loaded = filter_to_selection(loaded, row.selection)
+        loaded = apply_selection(loaded, row.selection)
         stack, annotations = map_altlocs_to_stack(loaded, selection=None, return_full_array=True)
         if stack.stack_depth() < 2:
             raise ValueError(
