@@ -11,11 +11,15 @@ import warnings
 from importlib.resources import files
 from pathlib import Path
 
+from biotite.structure import AtomArray, AtomArrayStack
+
+import numpy as np
 import pandas as pd
 from loguru import logger
 from sampleworks.eval.constants import OCCUPANCY_LEVELS
 from sampleworks.eval.eval_dataclasses import ProteinConfig, Trial, TrialList
 from sampleworks.eval.occupancy_utils import extract_protein_and_occupancy
+from sampleworks.utils.atom_array_utils import BLANK_ALTLOC_IDS, map_altlocs_to_stack
 from sampleworks.utils.guidance_constants import StructurePredictor
 
 
