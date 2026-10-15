@@ -74,6 +74,7 @@ from lunus.sf import (
 from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.unitcell import (
     UnitCell,
 )
+from sampleworks.synthetic.synthetic_utils import atomarray_to_gemmi
 from sampleworks.utils.elements import normalize_element
 
 
@@ -529,7 +530,8 @@ def geometric_solvent_fraction(
     Parameters
     ----------
     atom_array
-        Topology; only ``element`` is read.
+        Topology, converted with ``atomarray_to_gemmi`` as the structure-factor
+        reward does; its own coordinates are replaced by ``coords``.
     coords
         ``(n_atoms, 3)`` Cartesian coordinates in Å for one configuration.
     unit_cell, space_group
@@ -544,17 +546,10 @@ def geometric_solvent_fraction(
     float
         Solvent fraction in ``[0, 1]``.
     """
-    residue = gemmi.Residue()
-    residue.name = "UNK"
-    for element, xyz in zip(atom_array.element, np.asarray(coords, dtype=np.float64), strict=True):
-        atom = gemmi.Atom()
-        atom.element = gemmi.Element(normalize_element(element))
-        atom.pos = gemmi.Position(*xyz)
-        residue.add_atom(atom)
-    chain = gemmi.Chain("A")
-    chain.add_residue(residue)
-    model = gemmi.Model("1")
-    model.add_chain(chain)
+    with_coords = atom_array.copy()
+    with_coords.coord = np.asarray(coords, dtype=np.float32)
+    hm = space_group if isinstance(space_group, str) else space_group.hm
+    model = atomarray_to_gemmi(with_coords, unit_cell, hm)[0]
 
     grid = gemmi.FloatGrid()
     grid.set_size(*grid_shape)
@@ -576,12 +571,10 @@ def calibrate_solvent(
 ) -> SolventModel:
     """A ``SolventModel`` whose cutoff calls ``target_fraction`` of the cell solvent.
 
-    Evaluates one configuration's density on the setup's grid, symmetry-expands it,
-    and runs
-    ``SolventModel.calibrate`` on that density, with the setup's blur so the
-    mask is calibrated on the density it will actually see. lunus's own fitting
-    tool does the same; its design note measures the matched cutoff moving 21x
-    between B = 20 and B = 60 on one structure, which is why it is not a constant.
+    Evaluates the configuration's density on the setup's grid, symmetry-expands
+    it, and runs ``SolventModel.calibrate`` with the setup's blur, so the cutoff
+    is set on the density the mask will see. The matched cutoff depends on the
+    system, its B-factors and the grid, so it is calibrated rather than fixed.
 
     Parameters
     ----------

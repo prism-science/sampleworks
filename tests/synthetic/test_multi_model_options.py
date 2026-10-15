@@ -22,21 +22,25 @@ from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ
 
 
 @pytest.fixture(scope="module")
-def multi_model_cif(resources_dir: Path, tmp_path_factory) -> Path:
-    """A two-model CIF written from 1VME's altloc conformations; the repo ships none."""
+def source_1vme(resources_dir: Path) -> Path:
     source = resources_dir / "1vme" / "1vme_final.cif"
     if not source.exists():
         pytest.skip(f"Source structure not found at {source}")
+    return source
 
-    atom_array, coords = load_configurations(
-        source, BatchRowForMTZ(filename=source.name), "default", altlocs_as_models=True
+
+@pytest.fixture(scope="module")
+def multi_model_cif(source_1vme: Path, tmp_path_factory) -> Path:
+    """A two-model CIF written from 1VME's altloc conformations; the repo ships none."""
+    expanded = load_configurations(
+        source_1vme, BatchRowForMTZ(filename=source_1vme.name), "default", altlocs_as_models=True
     )
-    assert coords.shape[0] >= 2, "1VME should expand to at least two conformations"
+    assert expanded.stack_depth() >= 2, "1VME should expand to at least two conformations"
 
-    stack = AtomArrayStack(coords.shape[0], coords.shape[1])
+    stack = AtomArrayStack(expanded.stack_depth(), expanded.array_length())
     for field in ("chain_id", "res_id", "res_name", "atom_name", "element", "hetero"):
-        stack.set_annotation(field, getattr(atom_array, field))
-    stack.coord = coords.astype(np.float32)
+        stack.set_annotation(field, expanded.get_annotation(field))
+    stack.coord = expanded.coord.astype(np.float32)
 
     path = tmp_path_factory.mktemp("multi_model") / "ensemble.cif"
     cif = CIFFile()
@@ -45,79 +49,80 @@ def multi_model_cif(resources_dir: Path, tmp_path_factory) -> Path:
     return path
 
 
+@pytest.fixture(params=["multi_model", "altlocs_as_models"])
+def ensemble_input(request, multi_model_cif: Path, source_1vme: Path):
+    """The two ways an ensemble reaches load_configurations: a multi-model file, or a
+    single-model file expanded by altloc. Returns ``(path, extra kwargs)``."""
+    if request.param == "multi_model":
+        return multi_model_cif, {}
+    return source_1vme, {"altlocs_as_models": True}
+
+
 def _load(path: Path, **kwargs):
     return load_configurations(
         path, BatchRowForMTZ(filename=path.name, **kwargs.pop("row", {})), "default", **kwargs
     )
 
 
-def test_altloc_expansion_accepts_a_pymol_style_selection(resources_dir: Path):
-    """--altlocs-as-models takes the same pymol-like selection syntax as the other paths."""
-    source = resources_dir / "1vme" / "1vme_final.cif"
-    if not source.exists():
-        pytest.skip(f"Source structure not found at {source}")
-
-    atom_array, coords = _load(source, row={"selection": "chain A"}, altlocs_as_models=True)
-
-    assert coords.shape[0] >= 2
-    assert coords.shape[1] == atom_array.array_length()
-    assert set(np.unique(atom_array.chain_id)) == {"A"}
+def test_every_configuration_survives_the_load(ensemble_input):
+    path, kwargs = ensemble_input
+    assert _load(path, **kwargs).stack_depth() >= 2
 
 
-def test_multi_model_input_loads_every_model(multi_model_cif: Path):
-    _, coords = _load(multi_model_cif)
+def test_selection_applies_to_every_configuration(ensemble_input):
+    """Selection drops atoms from every model and keeps every model, on both paths."""
+    path, kwargs = ensemble_input
+    full = _load(path, **kwargs)
+    selected = _load(path, row={"selection": "chain A"}, **kwargs)
 
-    assert coords.shape[0] >= 2, "all models must survive the load"
-
-
-def test_selection_applies_to_multi_model_input(multi_model_cif: Path):
-    """Selection drops atoms from every model and keeps every model."""
-    _, full = _load(multi_model_cif)
-    atom_array, selected = _load(multi_model_cif, row={"selection": "chain A"})
-
-    assert selected.shape[0] == full.shape[0], "selection must not drop models"
-    assert selected.shape[1] < full.shape[1], "selection must drop atoms"
-    assert set(np.asarray(atom_array.chain_id)) == {"A"}
+    assert selected.stack_depth() == full.stack_depth(), "selection must not drop models"
+    assert selected.array_length() < full.array_length(), "selection must drop atoms"
+    assert set(np.asarray(selected.chain_id)) == {"A"}
 
 
-def test_stripping_hydrogens_applies_to_multi_model_input(multi_model_cif: Path):
-    atom_array, coords = _load(multi_model_cif, strip_hydrogens=True)
+def test_stripping_hydrogens_applies_to_every_configuration(ensemble_input):
+    path, kwargs = ensemble_input
+    stripped = _load(path, strip_hydrogens=True, **kwargs)
 
-    assert "H" not in set(np.asarray(atom_array.element))
-    assert coords.shape[0] >= 2
-
-
-def test_stripping_waters_applies_to_multi_model_input(multi_model_cif: Path):
-    _, full = _load(multi_model_cif)
-    atom_array, coords = _load(multi_model_cif, strip_waters=True)
-
-    assert "HOH" not in set(np.asarray(atom_array.res_name))
-    assert coords.shape[0] == full.shape[0]
+    assert "H" not in set(np.asarray(stripped.element))
+    assert stripped.stack_depth() >= 2
 
 
-def test_topology_and_coordinates_stay_in_register_after_filtering(multi_model_cif: Path):
-    """The returned topology must describe the returned coordinates, per model."""
-    atom_array, coords = _load(multi_model_cif, row={"selection": "chain A"})
+def test_stripping_waters_applies_to_every_configuration(ensemble_input):
+    path, kwargs = ensemble_input
+    full = _load(path, **kwargs)
+    stripped = _load(path, strip_waters=True, **kwargs)
 
-    assert len(atom_array) == coords.shape[1]
+    assert "HOH" not in set(np.asarray(stripped.res_name))
+    assert stripped.stack_depth() == full.stack_depth()
 
 
-def test_occupancy_mode_is_still_refused_for_multi_model_input(multi_model_cif: Path):
+def test_topology_and_coordinates_stay_in_register_after_filtering(ensemble_input):
+    """The shared annotations describe every model's coordinates."""
+    path, kwargs = ensemble_input
+    selected = _load(path, row={"selection": "chain A"}, **kwargs)
+
+    assert selected.coord.shape == (selected.stack_depth(), selected.array_length(), 3)
+    assert len(selected.element) == selected.array_length()
+
+
+def test_occupancy_options_are_refused_for_multi_model_input(multi_model_cif: Path):
     """A stack has one shared occupancy annotation, so per-model occupancies are refused."""
     with pytest.raises(ValueError, match="occupancy-mode"):
         load_configurations(
-            multi_model_cif,
-            BatchRowForMTZ(filename=multi_model_cif.name),
-            "custom",
+            multi_model_cif, BatchRowForMTZ(filename=multi_model_cif.name), "custom"
         )
+    with pytest.raises(ValueError, match="occupancy-values"):
+        _load(multi_model_cif, row={"occupancy_values": [0.5, 0.5]})
 
 
-def test_altlocs_as_models_is_still_refused_for_multi_model_input(multi_model_cif: Path):
+def test_altlocs_as_models_is_refused_for_multi_model_input(multi_model_cif: Path):
     """The models are already the ensemble."""
     with pytest.raises(ValueError, match="altlocs-as-models"):
         _load(multi_model_cif, altlocs_as_models=True)
 
 
-def test_a_selection_matching_nothing_fails_loudly(multi_model_cif: Path):
+def test_a_selection_matching_nothing_fails_loudly(ensemble_input):
+    path, kwargs = ensemble_input
     with pytest.raises(ValueError):
-        _load(multi_model_cif, row={"selection": "chain ZZ"})
+        _load(path, row={"selection": "chain ZZ"}, **kwargs)

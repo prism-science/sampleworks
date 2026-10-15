@@ -14,10 +14,10 @@ multi-conformer structure into that ensemble. And lunus evaluates density on a
 unit-cell grid and FFTs it rather than summing over atoms in reciprocal space;
 see ``core/forward_models/xray/lunus_sf.py`` for the grid, blur and taper.
 
-Each row runs in three stages: :func:`load_configurations` gives a topology plus
-a stack of configuration coordinates, :func:`compute_ensemble_amplitudes` runs
+Each row runs in three stages: :func:`load_configurations` gives the
+configurations as an ``AtomArrayStack``, :func:`compute_ensemble_amplitudes` runs
 the forward pass and returns arrays, and :func:`dataset_from_bragg_amplitudes` /
-:func:`dataset_from_diffuse_intensities` build the datasets :func:`save_mtz`
+:func:`dataset_from_diffuse_intensities` build the MTZ objects :func:`save_mtz`
 writes. :func:`_process_single_row` wraps each stage in its own ``try`` so
 ``batch_report.json`` records which stage a row failed in.
 """
@@ -27,15 +27,14 @@ import json
 import sys
 import traceback
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import gemmi
 import numpy as np
-import reciprocalspaceship as rs
 import torch
 from atomworks.io.transforms.atom_array import remove_waters
 from atomworks.io.utils.io_utils import load_any
-from biotite.structure import AtomArray, AtomArrayStack
+from biotite.structure import AtomArrayStack, stack
 from loguru import logger
 from lunus.sf import mean_and_diffuse, SolventModel
 
@@ -57,7 +56,8 @@ from sampleworks.utils.atom_array_utils import (
 from sampleworks.utils.torch_utils import try_gpu
 
 
-# Taper width for an explicitly given solvent cutoff, e/A^3.
+# Width in density, e/A^3, of the solvent mask's transition for an explicit cutoff:
+# the mask falls from 1 to 0 as the density rises over this interval below the cutoff.
 DEFAULT_SOLVENT_TAPER_WIDTH = 0.10
 
 
@@ -111,13 +111,14 @@ def load_configurations(
     strip_waters: bool = False,
     strip_ligands: bool = False,
     altlocs_as_models: bool = False,
-) -> tuple[AtomArray, np.ndarray]:
-    """Load a structure as a topology plus a stack of configuration coordinates.
+) -> AtomArrayStack:
+    """Load a structure as a stack of configurations.
 
     Single-model files go through :func:`load_structure_for_synthetic_reward`, so
     selection, stripping and the occupancy modes behave as in the SFcalculator
-    script. Multi-model files are loaded as a stack; selection and stripping
-    apply to every model, and occupancies are taken as deposited.
+    script, and come back as a one-model stack. Multi-model files are loaded as a
+    stack; selection and stripping apply to every model, and occupancies are taken
+    as deposited.
 
     With ``altlocs_as_models``, a single-model structure with alternate
     conformations is expanded into one configuration per altloc letter, the
@@ -135,22 +136,21 @@ def load_configurations(
     occupancy_mode
         ``'default'``, ``'uniform'`` or ``'custom'``; single-model input only.
     strip_hydrogens, strip_waters, strip_ligands
-        Filters; single-model input only.
+        Filters, applied on every path.
     altlocs_as_models
         Expand alternate conformations into configurations.
 
     Returns
     -------
-    atom_array : AtomArray
-        Topology — elements, B-factors, occupancies. Its own coordinates are
-        those of the first configuration.
-    coords : numpy.ndarray
-        ``(n_configs, n_atoms, 3)`` Cartesian coordinates in Å.
+    AtomArrayStack
+        One model per configuration. Elements, B-factors and occupancies are
+        per-atom annotations shared by every model; ``stack.coord`` is
+        ``(n_configs, n_atoms, 3)`` in Å.
 
     Raises
     ------
     ValueError
-        If a multi-model file is combined with a non-default occupancy mode or
+        If a multi-model file is combined with an occupancy option or
         ``--altlocs-as-models``, if selection and stripping leave no atoms, or if
         ``--altlocs-as-models`` finds fewer than two alternate conformations.
     """
@@ -163,6 +163,7 @@ def load_configurations(
                 # A stack has one shared occupancy annotation, so per-model
                 # occupancies have nowhere to go.
                 ("--occupancy-mode", occupancy_mode != "default"),
+                ("--occupancy-values", bool(row.occupancy_values)),
                 # The models are already the ensemble.
                 ("--altlocs-as-models", altlocs_as_models),
             )
@@ -187,14 +188,15 @@ def load_configurations(
             f"Loaded {loaded.stack_depth()} models, {loaded.array_length()} atoms "
             f"from {structure_path.name}"
         )
-        return loaded[0], np.asarray(loaded.coord, dtype=np.float64)
+        return cast(AtomArrayStack, loaded)
 
     if altlocs_as_models:
         # map_altlocs_to_stack repeats the shared atoms in every model and varies the
         # alternate conformations. It removes occupancy, b_factor and altloc_id from
         # the stack and returns them as (n_altloc, n_atoms) arrays; they go back onto
-        # the topology below. Selection is applied first, since map_altlocs_to_stack's
-        # own selection argument keeps unselected atoms that carry no altloc.
+        # the stack below. Selection and stripping are applied first, since
+        # map_altlocs_to_stack's own selection argument keeps unselected atoms that
+        # carry no altloc.
         # TODO: one configuration per letter couples every altloc A in the structure.
         # Altlocs in consecutive residues usually belong together, but those separated
         # by non-altloc regions need not; equal occupancies are often a sign that
@@ -202,8 +204,13 @@ def load_configurations(
         # configurations and draw A or B independently for each uncoupled region,
         # with probability given by occupancy.
         loaded = apply_selection(loaded, row.selection)
-        stack, annotations = map_altlocs_to_stack(loaded, selection=None, return_full_array=True)
-        if stack.stack_depth() < 2:
+        loaded = remove_hydrogens(loaded) if strip_hydrogens else loaded
+        loaded = remove_waters(loaded) if strip_waters else loaded
+        loaded = keep_polymer(keep_amino_acids(loaded)) if strip_ligands else loaded
+        configurations, annotations = map_altlocs_to_stack(
+            loaded, selection=None, return_full_array=True
+        )
+        if configurations.stack_depth() < 2:
             raise ValueError(
                 f"{structure_path.name} has fewer than two alternate conformations, so "
                 "--altlocs-as-models yields nothing to take a variance over."
@@ -214,8 +221,7 @@ def load_configurations(
         altloc_ids = np.asarray(annotations["altloc_id"])
 
         # B-factors averaged across conformers; identical for the shared atoms.
-        topology = stack[0]
-        topology.set_annotation("b_factor", b_factors.mean(axis=0).astype(np.float32))
+        configurations.set_annotation("b_factor", b_factors.mean(axis=0).astype(np.float32))
 
         # An atom is an alternate if any configuration gives it a non-blank altloc.
         is_alternate = (~np.isin(altloc_ids, list(BLANK_ALTLOC_IDS))).any(axis=0)
@@ -225,28 +231,22 @@ def load_configurations(
         # partially occupied atoms keep their deposited value.
         per_atom_occupancy = occupancies[0].copy()
         per_atom_occupancy[is_alternate] = 1.0
-        topology.set_annotation("occupancy", per_atom_occupancy.astype(np.float32))
+        configurations.set_annotation("occupancy", per_atom_occupancy.astype(np.float32))
 
         # Deposited populations, averaged over the alternate atoms. mean_and_diffuse
-        # weights configurations equally, so unequal populations are not reproduced.
+        # weights configurations equally regardless.
         populations = occupancies[:, is_alternate].mean(axis=1) if is_alternate.any() else None
-        message = (
-            f"Expanded {structure_path.name} into {stack.stack_depth()} configurations "
+        logger.info(
+            f"Expanded {structure_path.name} into {configurations.stack_depth()} configurations "
             f"from altlocs, {int(is_alternate.sum())} alternate atoms of {len(is_alternate)}"
+            + (
+                f"; deposited populations {np.round(populations, 3).tolist()}, "
+                "configurations weighted equally"
+                if populations is not None
+                else ""
+            )
         )
-        if populations is None:
-            logger.info(message)
-        else:
-            message += f"; deposited populations {np.round(populations, 3).tolist()}"
-            if float(populations.max() - populations.min()) > 0.05:
-                logger.warning(
-                    message + "; these are unequal, but the configurations are weighted "
-                    "equally, so the diffuse term will not reflect the deposited populations."
-                )
-            else:
-                logger.info(message)
-
-        return topology, np.asarray(stack.coord, dtype=np.float64)
+        return configurations
 
     atom_array = load_structure_for_synthetic_reward(
         structure_path,
@@ -259,12 +259,11 @@ def load_configurations(
     )
     if atom_array is None:
         raise ValueError(f"Failed to load {structure_path}")
-    return atom_array, np.asarray(atom_array.coord, dtype=np.float64)[None, ...]
+    return stack([atom_array])
 
 
 def compute_ensemble_amplitudes(
-    atom_array: AtomArray,
-    coords: np.ndarray,
+    configurations: AtomArrayStack,
     unit_cell: gemmi.UnitCell,
     space_group: gemmi.SpaceGroup,
     resolution: float,
@@ -278,10 +277,9 @@ def compute_ensemble_amplitudes(
 
     Parameters
     ----------
-    atom_array
-        Topology: elements, B-factors and occupancies.
-    coords
-        ``(n_configs, n_atoms, 3)`` Cartesian coordinates in Å.
+    configurations
+        One model per configuration, as :func:`load_configurations` returns:
+        elements, B-factors and occupancies shared by every model.
     unit_cell, space_group
         Crystal metadata. The atoms are treated as an asymmetric unit and
         symmetry-expanded onto the cell grid before the FFT.
@@ -308,11 +306,12 @@ def compute_ensemble_amplitudes(
     diffuse : numpy.ndarray
         ``(n_refl,)`` real ``<|F|²> − |<F>|²``. Zero for a single configuration.
     """
+    atom_array = configurations[0]
     setup = lunus_sf.build_setup(atom_array, unit_cell, space_group, resolution, device=device)
 
     hkl_np = generate_asu_hkl(unit_cell, space_group, resolution)
     hkl = torch.as_tensor(hkl_np, dtype=torch.long, device=device)
-    coords_t = torch.as_tensor(coords, dtype=torch.float32, device=device)
+    coords_t = torch.as_tensor(configurations.coord, dtype=torch.float32, device=device)
     occupancies = torch.as_tensor(np.asarray(atom_array.occupancy, dtype=np.float32), device=device)
 
     solvent = None
@@ -320,7 +319,7 @@ def compute_ensemble_amplitudes(
         solvent = SolventModel(cutoff=solvent_cutoff, taper_width=solvent_taper_width)
     elif bulk_solvent:
         target = lunus_sf.geometric_solvent_fraction(
-            atom_array, coords[0], unit_cell, space_group, setup.grid_shape
+            atom_array, atom_array.coord, unit_cell, space_group, setup.grid_shape
         )
         solvent = lunus_sf.calibrate_solvent(setup, coords_t[0], occupancies, target)
 
@@ -360,6 +359,28 @@ def compute_ensemble_amplitudes(
     return hkl_np, mean_f.cpu().numpy(), diffuse.cpu().numpy()
 
 
+def _new_mtz(unit_cell: gemmi.UnitCell, space_group: gemmi.SpaceGroup) -> gemmi.Mtz:
+    """An empty MTZ with H, K, L columns, the cell and the space group set."""
+    mtz = gemmi.Mtz(with_base=True)
+    mtz.spacegroup = space_group
+    mtz.set_cell_for_all(unit_cell)
+    mtz.add_dataset("sampleworks")
+    return mtz
+
+
+def _set_columns(
+    mtz: gemmi.Mtz, hkl: np.ndarray, columns: dict[str, tuple[str, np.ndarray]]
+) -> None:
+    """Add ``label -> (MTZ type, values)`` columns and fill the data table."""
+    for label, (mtz_type, _) in columns.items():
+        mtz.add_column(label, mtz_type)
+    data = np.column_stack(
+        [hkl.astype(np.float32)] + [v.astype(np.float32) for _, v in columns.values()]
+    )
+    mtz.set_data(data)
+    mtz.update_reso()
+
+
 def dataset_from_diffuse_intensities(
     hkl: np.ndarray,
     intensities: np.ndarray,
@@ -367,8 +388,8 @@ def dataset_from_diffuse_intensities(
     space_group: gemmi.SpaceGroup,
     *,
     label: str = "ID",
-) -> rs.DataSet:
-    """Build an MTZ-ready dataset of diffuse intensities.
+) -> gemmi.Mtz:
+    """Build an in-memory MTZ of diffuse intensities.
 
     The second central moment of the ensemble, ``<|F|²> − |<F>|²``, which cannot
     be derived from the amplitudes :func:`dataset_from_bragg_amplitudes` writes.
@@ -389,25 +410,12 @@ def dataset_from_diffuse_intensities(
 
     Returns
     -------
-    reciprocalspaceship.DataSet
-        Indexed by H, K, L with one intensity column.
+    gemmi.Mtz
+        H, K, L plus one intensity column.
     """
-    dataset = rs.DataSet(
-        {
-            "H": hkl[:, 0].astype(np.int32),
-            "K": hkl[:, 1].astype(np.int32),
-            "L": hkl[:, 2].astype(np.int32),
-            label: intensities.astype(np.float32),
-        },
-        cell=unit_cell,
-        spacegroup=space_group,
-    )
-    dataset = dataset.set_index(["H", "K", "L"]).infer_mtz_dtypes()
-    # infer_mtz_dtypes types a column by its name and gives intensity type only to
-    # names starting with "I", so the type is set explicitly for any label.
-    dataset[label] = dataset[label].astype(rs.IntensityDtype())
-
-    return dataset
+    mtz = _new_mtz(unit_cell, space_group)
+    _set_columns(mtz, hkl, {label: ("J", intensities)})
+    return mtz
 
 
 def dataset_from_bragg_amplitudes(
@@ -421,8 +429,8 @@ def dataset_from_bragg_amplitudes(
     test_fraction: float = 0.05,
     seed: int | None = None,
     ccp4_convention: bool = False,
-) -> rs.DataSet:
-    """Build an MTZ-ready dataset from Miller indices and complex amplitudes.
+) -> gemmi.Mtz:
+    """Build an in-memory MTZ from Miller indices and complex amplitudes.
 
     The first moment of the ensemble, ``<F>``, written as ``|<F>|`` plus its phase,
     in the column layout of ``generate_synthetic_sf.process_amplitudes_to_dataset``.
@@ -444,55 +452,45 @@ def dataset_from_bragg_amplitudes(
     seed
         Seed for reproducible R-free assignment.
     ccp4_convention
-        R-free convention; False (default) is Phenix (1 = test).
+        R-free convention: False (default) is Phenix (1 = test, 0 = work), True
+        is CCP4 (0 = test, 1 = work).
 
     Returns
     -------
-    reciprocalspaceship.DataSet
-        Indexed by H, K, L, carrying the amplitude, sigma, phase and optional
-        R-free columns.
+    gemmi.Mtz
+        H, K, L plus the amplitude, sigma, phase and optional ``R-free-flags`` columns.
     """
-    f_col, sig_col, phi_col = f"F{label}", f"SIGF{label}", f"PHIF{label}"
     amplitude = np.abs(structure_factors)
-
-    dataset = rs.DataSet(
-        {
-            "H": hkl[:, 0].astype(np.int32),
-            "K": hkl[:, 1].astype(np.int32),
-            "L": hkl[:, 2].astype(np.int32),
-            f_col: amplitude.astype(np.float32),
-            sig_col: (amplitude * sigma_f_scale).astype(np.float32),
-            phi_col: np.rad2deg(np.angle(structure_factors)).astype(np.float32),
-        },
-        cell=unit_cell,
-        spacegroup=space_group,
-    )
-
-    # Every column, Miller indices included, needs an MTZ dtype before write_mtz().
-    dataset = dataset.set_index(["H", "K", "L"]).infer_mtz_dtypes()
-
+    columns = {
+        f"F{label}": ("F", amplitude),
+        f"SIGF{label}": ("Q", amplitude * sigma_f_scale),
+        f"PHIF{label}": ("P", np.rad2deg(np.angle(structure_factors))),
+    }
     if test_fraction > 0:
-        dataset = rs.utils.add_rfree(
-            dataset, ccp4_convention=ccp4_convention, fraction=test_fraction, seed=seed
-        )
+        n_test = int(round(test_fraction * len(hkl)))
+        test = np.zeros(len(hkl), dtype=bool)
+        test[np.random.default_rng(seed).choice(len(hkl), n_test, replace=False)] = True
+        columns["R-free-flags"] = ("I", np.where(test == (not ccp4_convention), 1.0, 0.0))
 
-    return dataset
+    mtz = _new_mtz(unit_cell, space_group)
+    _set_columns(mtz, hkl, columns)
+    return mtz
 
 
-def save_mtz(dataset: rs.DataSet, output_path: Path, description: str) -> None:
-    """Write a dataset to disk as an MTZ.
+def save_mtz(mtz: gemmi.Mtz, output_path: Path, description: str) -> None:
+    """Write an MTZ to disk.
 
     Parameters
     ----------
-    dataset
-        Dataset to write, already carrying MTZ dtypes.
+    mtz
+        MTZ to write.
     output_path
         Destination; parent directories are created.
     description
         What is being written, for the log line (e.g. ``"diffuse intensities"``).
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    dataset.write_mtz(str(output_path))
+    mtz.write_to_file(str(output_path))
     logger.info(f"Saved {description} to {output_path}")
 
 
@@ -532,8 +530,7 @@ def _process_single_row(
     """Compute and write synthetic amplitudes for one structure.
 
     With ``write_diffuse``, a second MTZ of diffuse intensities is written
-    alongside the amplitudes, from the same forward pass. It requires a
-    multi-model input, since the diffuse term of a single configuration is zero.
+    alongside the amplitudes, from the same forward pass.
 
     Errors are logged and swallowed so a batch continues past a bad row, as in the
     SFcalculator script. The returned record is what :func:`process_batch`
@@ -550,7 +547,7 @@ def _process_single_row(
     record: dict[str, Any] = {"filename": row.filename, "status": "failed"}
     structure_path = base_dir / row.filename
     try:
-        atom_array, coords = load_configurations(
+        configurations = load_configurations(
             structure_path,
             row,
             occupancy_mode,
@@ -565,28 +562,13 @@ def _process_single_row(
             f"Failed to load {row.filename} ({type(e).__name__}): {e}\n"
             f"{''.join(traceback.format_tb(e.__traceback__))}"
         )
-        return record | {"failure_stage": "load", "error": f"{type(e).__name__}: {e}"}
-
-    if write_diffuse and coords.shape[0] < 2:
-        # The diffuse term of one configuration is identically zero; refuse before
-        # the structure-factor call.
-        logger.error(
-            f"{row.filename}: --write-diffuse needs a multi-model structure; "
-            f"got {coords.shape[0]} configuration, whose diffuse term is zero "
-            "by construction. Supply an ensemble. Row skipped."
-        )
-        return record | {
-            "failure_stage": "validate",
-            "error": (
-                f"--write-diffuse needs a multi-model structure; got "
-                f"{coords.shape[0]} configuration"
-            ),
-        }
+        record["failure_stage"] = "load"
+        record["error"] = f"{type(e).__name__}: {e}"
+        return record
 
     try:
         hkl, mean_f, diffuse = compute_ensemble_amplitudes(
-            atom_array,
-            coords,
+            configurations,
             unit_cell,
             space_group,
             resolution,
@@ -600,14 +582,13 @@ def _process_single_row(
             f"Failed to compute structure factors for {row.filename} "
             f"({type(e).__name__}): {e}\n{''.join(traceback.format_tb(e.__traceback__))}"
         )
-        return record | {
-            "failure_stage": "structure_factors",
-            "error": f"{type(e).__name__}: {e}",
-        }
+        record["failure_stage"] = "structure_factors"
+        record["error"] = f"{type(e).__name__}: {e}"
+        return record
 
     if write_diffuse:
         logger.info(
-            f"{row.filename}: {coords.shape[0]} configurations, "
+            f"{row.filename}: {configurations.stack_depth()} configurations, "
             f"mean diffuse intensity {float(diffuse.mean()):.4g}"
         )
         diffuse_path = output_dir / (f"{structure_path.stem}_{resolution:.2f}A_diffuse.mtz")
@@ -650,7 +631,9 @@ def _process_single_row(
             f"Failed to write MTZ for {row.filename} to {output_path} "
             f"({type(e).__name__}): {e}\n{''.join(traceback.format_tb(e.__traceback__))}"
         )
-        return record | {"failure_stage": "write", "error": f"{type(e).__name__}: {e}"}
+        record["failure_stage"] = "write"
+        record["error"] = f"{type(e).__name__}: {e}"
+        return record
 
     # A failed diffuse write records a stage without stopping the row.
     if "failure_stage" not in record:
@@ -713,7 +696,7 @@ def process_batch(
     solvent_taper_width
         Width of the solvent mask's smooth transition, e/Å³, for an explicit cutoff.
     write_diffuse
-        Also write the diffuse intensities, which needs multi-model input.
+        Also write the diffuse intensities.
     altlocs_as_models
         Expand alternate conformations into configurations.
 
@@ -826,8 +809,7 @@ def parse_args() -> argparse.Namespace:
             "collapsing them into one occupancy-weighted structure. A deposited "
             "multi-conformer model is already an ensemble; this is what makes the "
             "diffuse term nonzero for a single-model file. Configurations are "
-            "weighted equally, so unequal altloc occupancies are not reproduced "
-            "(a warning says so)."
+            "weighted equally, so unequal altloc occupancies are not reproduced."
         ),
     )
     diffuse_group.add_argument(
@@ -835,8 +817,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Also write <|F|^2> - |<F>|^2 as an MTZ with an ID intensity column, "
-            "matching what lunus xtraj writes. Requires a multi-model structure: "
-            "the diffuse term of a single configuration is zero by construction."
+            "matching what lunus xtraj writes. Zero for a single configuration."
         ),
     )
 
@@ -898,7 +879,7 @@ def main() -> None:
             }
         )
         # --output names the file when given; otherwise --output-dir applies here too.
-        _process_single_row(
+        record = _process_single_row(
             row=row,
             base_dir=args.structure.parent,
             output_dir=args.output.parent if args.output else args.output_dir,
@@ -916,6 +897,8 @@ def main() -> None:
             write_diffuse=args.write_diffuse,
             altlocs_as_models=args.altlocs_as_models,
         )
+        if record["status"] != "success":
+            sys.exit(1)
     else:
         logger.error("Please specify --structure or --batch-csv")
         sys.exit(1)

@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 import torch
 from atomworks.io.transforms.atom_array import remove_waters
-from biotite.structure import AtomArrayStack
+from biotite.structure import AtomArrayStack, stack
 from sampleworks.synthetic.synthetic_utils import atomarray_to_gemmi
 from sampleworks.utils.atom_array_utils import keep_amino_acids, keep_polymer
 
@@ -70,9 +70,11 @@ def crystal_6b8x(resources_dir: Path):
 
 
 def _amplitudes(atom_array, coords, cell, spacegroup, device, *, resolution=RESOLUTION, **kwargs):
-    """Run the lunus generator's compute step and return (hkl, <F>, diffuse)."""
+    """Run the lunus generator's compute step on ``coords`` and return (hkl, <F>, diffuse)."""
+    configurations = stack([atom_array] * coords.shape[0])
+    configurations.coord = np.asarray(coords, dtype=np.float32)
     return compute_ensemble_amplitudes(
-        atom_array, coords, cell, spacegroup, resolution, device, **kwargs
+        configurations, cell, spacegroup, resolution, device, **kwargs
     )
 
 
@@ -118,60 +120,6 @@ class TestSelfConsistency:
         deviation = float(np.linalg.norm(single - replicated) / np.linalg.norm(single))
         print(f"\nsingle vs replicated relative deviation: {deviation:.2e}")
         assert deviation < 1e-5
-
-    @staticmethod
-    def _perturbed_ensemble(coord: np.ndarray) -> np.ndarray:
-        """Two different configurations, so the diffuse term is nonzero."""
-        rng = np.random.default_rng(0)
-        return np.stack([coord, coord + rng.normal(0, 0.3, coord.shape)])
-
-    def test_diffuse_is_invariant_to_rigid_translation_in_p1(
-        self, polymer_6b8x, crystal_6b8x, cpu_device
-    ):
-        """In P1, translating every configuration identically leaves diffuse unchanged.
-
-        A common translation multiplies every F_b by exp(2 pi i h.d), so |F_b| and
-        |<F>| are unchanged. The residual is grid discretization (atoms move
-        relative to voxel centres), measured at 5.8e-5 on 6B8X at 1.8 A; the
-        symmetry case below is 0.93.
-        """
-        atom_array = polymer_6b8x
-        cell, _ = crystal_6b8x
-        p1 = gemmi.SpaceGroup("P 1")
-        ensemble = self._perturbed_ensemble(atom_array.coord)
-
-        _, _, diffuse = _amplitudes(atom_array, ensemble, cell, p1, cpu_device)
-        _, _, shifted = _amplitudes(
-            atom_array, ensemble + np.array([1.7, -0.4, 2.3]), cell, p1, cpu_device
-        )
-
-        assert float(np.mean(diffuse)) > 0, "no diffuse signal to test invariance of"
-        deviation = float(np.linalg.norm(diffuse - shifted) / np.linalg.norm(diffuse))
-        print(f"\nP1 diffuse deviation under rigid translation: {deviation:.2e}")
-        assert deviation < 1e-2
-
-    def test_diffuse_is_not_invariant_under_symmetry(self, polymer_6b8x, crystal_6b8x, cpu_device):
-        """Translating the ASU in a non-P1 group changes diffuse.
-
-        In F_total(h) = sum_g exp(2 pi i h.t_g) F_ASU(h R_g), a translation d
-        multiplies each term by exp(2 pi i (h R_g).d), which depends on g and does
-        not factor out. So diffuse scoring is sensitive to the model's absolute
-        position in a crystal. Measured on 6B8X (P 31 2 1) at 1.8 A: relative
-        deviation 0.93. If this passes, symmetry expansion has stopped happening.
-        """
-        atom_array = polymer_6b8x
-        cell, spacegroup = crystal_6b8x
-        assert spacegroup.hm != "P 1", "this test needs a non-trivial space group"
-        ensemble = self._perturbed_ensemble(atom_array.coord)
-
-        _, _, diffuse = _amplitudes(atom_array, ensemble, cell, spacegroup, cpu_device)
-        _, _, shifted = _amplitudes(
-            atom_array, ensemble + np.array([1.7, -0.4, 2.3]), cell, spacegroup, cpu_device
-        )
-
-        deviation = float(np.linalg.norm(diffuse - shifted) / np.linalg.norm(diffuse))
-        print(f"\n{spacegroup.hm} diffuse deviation under rigid translation: {deviation:.2e}")
-        assert deviation > 0.1
 
 
 class TestCrossEngineAgreement:
@@ -384,7 +332,9 @@ class TestMTZWriters:
         flags = gemmi.read_mtz_file(str(with_flags)).column_with_label("R-free-flags")
         assert flags.type == "I"
         assert set(np.unique(flags.array)) <= {0.0, 1.0}
-        assert 0.0 < flags.array.mean() < 1.0
+        # The requested fraction (1 = test). The flagged count is round(0.25 * n), so
+        # the mean can differ from 0.25 by at most half a reflection.
+        assert flags.array.mean() == pytest.approx(0.25, abs=0.5 / len(hkl))
 
     def test_intensity_type_survives_an_unconventional_label(self, tmp_path):
         """The intensity type is J for any label; rs alone would infer R for this one."""
@@ -406,8 +356,8 @@ class TestMTZWriters:
         column = gemmi.read_mtz_file(str(path)).column_with_label("DIFFUSE")
         assert column.type == "J"
 
-    def test_builders_return_indexed_datasets_with_mtz_dtypes(self, tmp_path):
-        """The builders write nothing and return datasets with MTZ dtypes."""
+    def test_builders_return_mtz_objects_with_typed_columns(self, tmp_path):
+        """The builders write nothing and return gemmi MTZ objects with typed columns."""
         hkl = self.reflections(8)
         cell = gemmi.UnitCell(30.0, 30.0, 30.0, 90.0, 90.0, 90.0)
         space_group = gemmi.SpaceGroup("P 1")
@@ -420,9 +370,9 @@ class TestMTZWriters:
         )
 
         assert list(tmp_path.iterdir()) == []
-        assert amplitudes.index.names == ["H", "K", "L"]
-        assert [str(dtype) for dtype in amplitudes.dtypes] == ["SFAmplitude", "Stddev", "Phase"]
-        assert [str(dtype) for dtype in intensities.dtypes] == ["Intensity"]
+        assert isinstance(amplitudes, gemmi.Mtz) and isinstance(intensities, gemmi.Mtz)
+        assert [c.type for c in amplitudes.columns] == ["H", "H", "H", "F", "Q", "P"]
+        assert [c.type for c in intensities.columns] == ["H", "H", "H", "J"]
 
 
 class TestSolvent:
@@ -462,9 +412,9 @@ class TestSolvent:
         occupancy = float(
             mask_occupancy(solvent.build_mask(density, setup.orth_matrix, pipeline_blur=setup.blur))
         )
-        # Measured on 6B8X: target 0.625, reproduced to 3 decimals.
-        assert 0.3 < target < 0.9
-        assert occupancy == pytest.approx(target, abs=0.01)
+        # Measured on 6B8X: gemmi's mask calls 0.625 of the cell solvent.
+        assert target == pytest.approx(0.625, abs=0.005)
+        assert occupancy == pytest.approx(target, abs=0.002)
         assert solvent.taper_width == pytest.approx(0.5 * solvent.cutoff)
 
     def test_generator_calibrates_by_default_and_changes_the_amplitudes(

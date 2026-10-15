@@ -116,11 +116,10 @@ def test_the_written_report_matches_the_returned_one(batch):
     assert json.loads((output_dir / "batch_report.json").read_text()) == returned
 
 
-def test_single_configuration_diffuse_rows_are_reported_as_validation_failures(batch):
-    """--write-diffuse on a single-model structure is refused before any compute and reported."""
+def test_single_configuration_rows_still_write_a_diffuse_file(batch):
+    """--write-diffuse on a single-model structure writes a (zero) diffuse MTZ."""
     report = _run(batch, write_diffuse=True)
 
     good = next(r for r in report["runs"] if r["filename"] == "good.cif")
-    assert good["status"] == "failed"
-    assert good["failure_stage"] == "validate"
-    assert "output_path" not in good, "nothing should be written for a refused row"
+    assert good["status"] == "success"
+    assert Path(good["diffuse_output_path"]).exists()
