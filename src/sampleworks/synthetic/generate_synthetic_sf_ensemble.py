@@ -122,8 +122,8 @@ def compute_ensemble_structure_factors(
     Raises
     ------
     ValueError
-        If a model cannot be loaded, the models do not land on the same reflection list,
-        or ``bulk_solvent`` is not a known mode.
+        If ``occupancies`` is empty, a model cannot be loaded, the models do not land on
+        the same reflection list, or ``bulk_solvent`` is not a known mode.
 
     Notes
     -----
@@ -144,8 +144,9 @@ def compute_ensemble_structure_factors(
     """
     if bulk_solvent not in BULK_SOLVENT_MODES:
         raise ValueError(f"bulk_solvent must be one of {BULK_SOLVENT_MODES}, got {bulk_solvent!r}")
+    if not occupancies:
+        raise ValueError(f"Need at least one occupancy (one per model) for {structure_path}")
     model_fproteins = []  # one [n_hkl] complex Fprotein_asu per model, at occupancy 1.0
-    sfcalculator = None
     reference_hkl = None  # [n_hkl, 3] ASU Miller indices every model must land on
     saved_structure = None
     reference_solventpct = None  # solvent fraction of model 1, estimated from its atoms
@@ -167,15 +168,14 @@ def compute_ensemble_structure_factors(
             raise ValueError(f"Failed to load model {model + 1} of {structure_path}")
         # Each model stands alone at full occupancy; its population lives in ``occupancies``.
         atom_array.occupancy[:] = 1.0
-        if save_structure_dir is not None:
-            conformer = atomarray_to_gemmi(atom_array, cell, space_group)
-            if saved_structure is None:
-                saved_structure = conformer
-            else:
-                conformer[0].name = str(model + 1)
-                saved_structure.add_model(conformer[0])
-        logger.info(f"Model {model + 1}: {len(atom_array)} atoms at population {occupancy:g}")
         gemmi_structure = atomarray_to_gemmi(atom_array, cell, space_group)
+        if save_structure_dir is not None:
+            if saved_structure is None:
+                saved_structure = gemmi_structure.clone()
+            else:
+                saved_structure.add_model(gemmi_structure[0])  # copies the model
+                saved_structure[len(saved_structure) - 1].name = str(model + 1)
+        logger.info(f"Model {model + 1}: {len(atom_array)} atoms at population {occupancy:g}")
         sfcalculator = SFcalculator(
             pdbmodel=PDBParser(gemmi_structure),
             mtzdata=None,
@@ -200,8 +200,6 @@ def compute_ensemble_structure_factors(
 
     if save_structure_dir is not None and saved_structure is not None:
         write_sf_input_structure(saved_structure, structure_path, save_structure_dir)
-    # The loop always runs: _process_single_row requires one occupancy per model.
-    assert sfcalculator is not None
     populations = torch.tensor(occupancies, device=sfcalculator.device)[:, None]  # [n_models, 1]
     fprotein_batch = torch.stack(model_fproteins)  # [n_models, n_hkl] complex
     sfcalculator.Fprotein_asu = (populations * fprotein_batch).sum(dim=0)
