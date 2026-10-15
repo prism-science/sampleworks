@@ -755,6 +755,8 @@ class TestLossConfigFile:
         "--structure",
         "test.cif",
     ]
+    # Complete on its own, so a rejection can only come from the check under test.
+    VALID_DENSITY = "real_space_density:\n  loss_options: {density: test.ccp4, resolution: 1.8}\n"
 
     def write_config(self, tmp_path, text: str) -> str:
         config_file = tmp_path / "losses.yaml"
@@ -802,33 +804,51 @@ class TestLossConfigFile:
         assert config.resolved_loss_config().resolved_weights() == (0.4, 0.6)
         assert config.density == "test.ccp4"  # the density term still mirrors out
 
-    def test_a_config_file_and_a_loss_type_together_are_rejected(self, tmp_path):
-        argv = self.BASE + [
-            "--loss-config",
-            self.write_config(tmp_path, "real_space_density: {}\n"),
-            "--loss-type",
-            "real_space_density",
-        ]
+    @pytest.mark.parametrize(
+        "loss_type_args",
+        [["--loss-type", "real_space_density"], ["--loss-type=real_space_density"]],
+    )
+    def test_a_config_file_and_a_loss_type_together_are_rejected(
+        self, tmp_path, capsys, loss_type_args
+    ):
+        argv = (
+            self.BASE
+            + ["--loss-config", self.write_config(tmp_path, self.VALID_DENSITY)]
+            + loss_type_args
+        )
 
-        with pytest.raises(SystemExit):
+        with pytest.raises(SystemExit) as excinfo:
             GuidanceConfig.from_cli(argv)
 
-    def test_per_loss_flags_are_not_accepted_alongside_a_config_file(self, tmp_path):
+        assert excinfo.value.code == 2
+        assert "--loss-type and --loss-config are alternatives" in capsys.readouterr().err
+
+    def test_per_loss_flags_are_not_accepted_alongside_a_config_file(self, tmp_path, capsys):
         argv = self.BASE + [
             "--loss-config",
-            self.write_config(tmp_path, "real_space_density: {}\n"),
+            self.write_config(tmp_path, self.VALID_DENSITY),
             "--loss-order",
             "1",
         ]
 
-        with pytest.raises(SystemExit):
+        with pytest.raises(SystemExit) as excinfo:
             GuidanceConfig.from_cli(argv)
 
-    def test_a_broken_config_file_is_a_usage_error(self, tmp_path):
+        assert excinfo.value.code == 2
+        assert "unrecognized arguments: --loss-order 1" in capsys.readouterr().err
+
+    def test_a_broken_config_file_is_a_usage_error(self, tmp_path, capsys):
         argv = self.BASE + [
             "--loss-config",
-            self.write_config(tmp_path, "real_space_density:\n  loss_options: {looss: 1}\n"),
+            self.write_config(
+                tmp_path,
+                "real_space_density:\n"
+                "  loss_options: {density: test.ccp4, resolution: 1.8, looss: 1}\n",
+            ),
         ]
 
-        with pytest.raises(SystemExit):
+        with pytest.raises(SystemExit) as excinfo:
             GuidanceConfig.from_cli(argv)
+
+        assert excinfo.value.code == 2
+        assert "Unknown option(s) ['looss']" in capsys.readouterr().err
