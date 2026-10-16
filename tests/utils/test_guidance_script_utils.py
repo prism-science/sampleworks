@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import sampleworks.utils.guidance_script_utils as guidance_script_utils
 import torch
+from atomworks.io.transforms.atom_array import ensure_atom_array_stack
 from atomworks.io.utils.io_utils import load_any
 from biotite.structure import AtomArrayStack
 from biotite.structure.io.pdbx.cif import CIFFile
@@ -71,11 +72,18 @@ def test_save_everything_uses_model_atom_array_for_mismatch(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ):
-    """Mismatch output saves while a failed reference load emits a warning."""
+    """Save refined output on the model template when atom counts differ between model and input
+    structure, and warn when the reference CIF fails to load.
+
+    Round-trips ``refined.cif``: every ensemble member must come back on the
+    5-atom model template (not the 3-atom input structure) carrying exactly the
+    coordinates of its slice of ``final_state``.
+    """
     refined_structure = {"asym_unit": build_test_atom_array(n_atoms=3, with_occupancy=True)}
     model_atom_array = build_test_atom_array(n_atoms=5, with_occupancy=False)
 
-    final_state = torch.zeros((1, 5, 3), dtype=torch.float32)
+    # (ensemble=2, atoms=5, 3)
+    final_state = torch.arange(30, dtype=torch.float32).reshape(2, 5, 3)
 
     args = GuidanceConfig(
         # Not a deposited structure id, so the reference load fails without touching RCSB.
@@ -99,7 +107,10 @@ def test_save_everything_uses_model_atom_array_for_mismatch(
         model_atom_array=model_atom_array,
     )
 
-    assert (tmp_path / "refined.cif").exists()
+    saved = ensure_atom_array_stack(load_any(tmp_path / "refined.cif"))
+    assert saved.stack_depth() == 2
+    np.testing.assert_array_equal(saved.atom_name, model_atom_array.atom_name)
+    np.testing.assert_allclose(saved.coord, final_state.numpy(), atol=1e-3)
     assert "without polymer entity categories" in caplog.text
 
 
