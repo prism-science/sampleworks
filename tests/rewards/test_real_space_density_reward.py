@@ -17,6 +17,7 @@ from functools import partial
 from typing import cast
 
 import einx
+import gemmi
 import numpy as np
 import pytest
 import torch
@@ -110,6 +111,93 @@ class TestSetupScatteringParams:
         _, elements, _, _ = extract_density_inputs_from_atomarray(aa, device)
         assert elements.squeeze(0)[0].item() == 0
         assert params[0].sum().item() == 0
+
+    def test_it1992_reproduce_the_it92_scattering_factor(self, device):
+        """IT92 is four Gaussians plus a constant, padded into the six-term layout
+        with the constant as a Gaussian of b = 0, so summing all six terms must
+        equal f(s) from gemmi's coefficients."""
+        from sampleworks.core.rewards.real_space_density import ELEMENT_TO_SCATTERING_INDEX
+
+        params = setup_scattering_params(em_mode=False, device=device, scattering_table="it1992")
+        s = torch.linspace(0.0, 0.6, 7, device=device)
+
+        for element in ["H", "C", "N", "O", "S", "Se"]:
+            row = params[ELEMENT_TO_SCATTERING_INDEX[element]]
+            padded = (row[:, 0:1] * torch.exp(-row[:, 1:2] * s**2)).sum(0)
+            it92 = gemmi.Element(element).it92
+            a = torch.tensor(it92.a, device=device).unsqueeze(1)
+            b = torch.tensor(it92.b, device=device).unsqueeze(1)
+            expected = (a * torch.exp(-b * s**2)).sum(0) + it92.c
+            torch.testing.assert_close(
+                padded, expected, msg=lambda m: f"Mismatch for '{element}': {m}"
+            )
+
+    def test_it1992_match_the_published_carbon_values(self, device):
+        """International Tables Vol. C, Table 6.1.1.4, carbon: a, b, then c in the
+        sixth a-slot with a zero fifth pair."""
+        from sampleworks.core.rewards.real_space_density import ELEMENT_TO_SCATTERING_INDEX
+
+        params = setup_scattering_params(em_mode=False, device=device, scattering_table="it1992")
+        row = params[ELEMENT_TO_SCATTERING_INDEX["C"]].cpu()
+
+        torch.testing.assert_close(row[:4, 0], torch.tensor([2.31, 1.02, 1.5886, 0.865]))
+        torch.testing.assert_close(row[:4, 1], torch.tensor([20.8439, 10.2075, 0.5687, 51.6512]))
+        assert row[4].tolist() == [0.0, 0.0]
+        assert row[5, 0].item() == pytest.approx(0.2156)
+        assert row[5, 1].item() == 0.0
+
+    def test_it1992_ignore_formal_charge(self, device):
+        """IT92 tabulates neutral atoms, so ionic rows take their element's factors
+        rather than scattering off nothing."""
+        from sampleworks.core.rewards.real_space_density import ELEMENT_TO_SCATTERING_INDEX
+
+        params = setup_scattering_params(em_mode=False, device=device, scattering_table="it1992")
+        for ion, neutral in (("Fe2+", "Fe"), ("O1-", "O")):
+            torch.testing.assert_close(
+                params[ELEMENT_TO_SCATTERING_INDEX[ion]],
+                params[ELEMENT_TO_SCATTERING_INDEX[neutral]],
+            )
+
+    def test_it1992_zero_fill_only_what_it92_lacks(self, device):
+        """Every real element gets a row. The ``'?'`` placeholder and qFit's
+        valence-state pseudo-element have no IT92 entry and stay zero rather than
+        borrowing a neighbour's factors."""
+        from sampleworks.core.rewards.real_space_density import ELEMENT_TO_SCATTERING_INDEX
+
+        params = setup_scattering_params(em_mode=False, device=device, scattering_table="it1992")
+        zero_rows = {
+            element
+            for element, idx in ELEMENT_TO_SCATTERING_INDEX.items()
+            if params[idx].abs().sum().item() == 0
+        }
+        assert zero_rows == {"?", "Cval"}
+
+    def test_em_mode_defaults_to_the_electron_table(self, device):
+        """``None`` resolves to the electron table with em_mode and WK1995 without."""
+        em_default = setup_scattering_params(em_mode=True, device=device)
+        em_named = setup_scattering_params(em_mode=True, device=device, scattering_table="electron")
+        xray_default = setup_scattering_params(em_mode=False, device=device)
+        xray_named = setup_scattering_params(
+            em_mode=False, device=device, scattering_table="wk1995"
+        )
+        assert torch.equal(em_default, em_named)
+        assert torch.equal(xray_default, xray_named)
+        assert not torch.equal(em_default, xray_default)
+
+    def test_tables_must_match_the_mode(self, device):
+        """An X-ray table with em_mode, or the electron table without, is rejected."""
+        with pytest.raises(ValueError, match="X-ray table"):
+            setup_scattering_params(em_mode=True, device=device, scattering_table="wk1995")
+        with pytest.raises(ValueError, match="needs em_mode"):
+            setup_scattering_params(em_mode=False, device=device, scattering_table="electron")
+        with pytest.raises(ValueError, match="Unknown scattering_table"):
+            setup_scattering_params(em_mode=False, device=device, scattering_table="n_gaussian")
+
+    def test_it1992_reject_em_mode_until_c4322_is_wired(self, device):
+        """gemmi carries an electron table too (C4322), but it is not wired up, so
+        the combination fails loudly rather than silently using the X-ray one."""
+        with pytest.raises(ValueError, match="C4322"):
+            setup_scattering_params(em_mode=True, device=device, scattering_table="it1992")
 
 
 class TestStructureToRewardInput:

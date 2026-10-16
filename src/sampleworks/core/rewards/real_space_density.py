@@ -1,5 +1,6 @@
 from typing import Any, cast
 
+import gemmi
 import numpy as np
 import torch
 from biotite.structure import AtomArray, AtomArrayStack
@@ -23,7 +24,71 @@ from sampleworks.utils.elements import elements_to_scattering_indices
 from sampleworks.utils.torch_utils import try_gpu
 
 
-def setup_scattering_params(em_mode: bool, device: torch.device) -> torch.Tensor:
+def it92_structure_factors() -> dict[str, list[list[float]]]:
+    """IT92 X-ray scattering coefficients from gemmi, laid out like ATOM_STRUCTURE_FACTORS.
+
+    IT92 is four Gaussians plus a constant. The constant takes the sixth ``a``
+    slot and the fifth pair is zero, which is how the six-term integrand already
+    reads a row, so no change downstream. Symbols gemmi does not recognise -- the
+    ``'?'`` placeholder and qFit's valence pseudo-elements -- are left out and
+    fall to the caller's zero-fill.
+    """
+    factors = {}
+    for element in ELEMENT_TO_SCATTERING_INDEX:
+        # IT92 tabulates neutral atoms, so the charge suffix is dropped: Fe2+ -> Fe.
+        gemmi_element = gemmi.Element(element.rstrip("+-0123456789"))
+        if gemmi_element.atomic_number == 0:
+            continue
+        it92 = gemmi_element.it92
+        factors[element] = [[*it92.a, 0.0, it92.c], [*it92.b, 0.0, 0.0]]
+    return factors
+
+
+SCATTERING_TABLES = ("wk1995", "it1992", "electron")
+
+
+def resolve_scattering_table(em_mode: bool, scattering_table: str | None) -> str:
+    """Pick the scattering table for a mode, and reject a table that does not fit it.
+
+    Parameters
+    ----------
+    em_mode
+        Whether electron scattering factors are wanted.
+    scattering_table
+        One of :data:`SCATTERING_TABLES`, or ``None`` for the mode's default:
+        ``"electron"`` with ``em_mode``, ``"wk1995"`` otherwise.
+
+    Returns
+    -------
+    str
+        The table name to use.
+
+    Raises
+    ------
+    ValueError
+        If the name is unknown, or an X-ray table is paired with ``em_mode`` or the
+        electron table without it.
+    """
+    if scattering_table is None:
+        return "electron" if em_mode else "wk1995"
+    if scattering_table not in SCATTERING_TABLES:
+        raise ValueError(
+            f"Unknown scattering_table {scattering_table!r}; use one of {SCATTERING_TABLES}."
+        )
+    # TODO(#466): wire gemmi's electron table (C4322) so em_mode has a gemmi option.
+    if em_mode and scattering_table != "electron":
+        raise ValueError(
+            f"scattering_table={scattering_table!r} is an X-ray table and cannot be used "
+            "with em_mode; use 'electron' (gemmi's electron table, C4322, is not wired up)."
+        )
+    if not em_mode and scattering_table == "electron":
+        raise ValueError("scattering_table='electron' needs em_mode; use 'wk1995' or 'it1992'.")
+    return scattering_table
+
+
+def setup_scattering_params(
+    em_mode: bool, device: torch.device, scattering_table: str | None = None
+) -> torch.Tensor:
     """Set up atomic scattering parameters for density calculation.
 
     The returned tensor is indexed by the values in
@@ -39,14 +104,31 @@ def setup_scattering_params(em_mode: bool, device: torch.device) -> torch.Tensor
         ``False``, use X-ray scattering factors.
     device
         PyTorch device that should own the returned lookup tensor.
+    scattering_table
+        Table name as in Phenix: ``"wk1995"`` (Waasmaier & Kirfel 1995, the qFit
+        table above), ``"it1992"`` (International Tables for Crystallography
+        Vol. C, Table 6.1.1.4, read from gemmi) or ``"electron"`` (Peng et al.
+        1996). ``None`` takes the mode's default, ``"electron"`` for ``em_mode``
+        and ``"wk1995"`` otherwise; see :func:`resolve_scattering_table`.
 
     Returns
     -------
     torch.Tensor
         Tensor of shape ``(n_indices, n_coeffs, 2)`` containing scattering
         coefficients.
+
+    Raises
+    ------
+    ValueError
+        If ``scattering_table`` is unknown or does not match ``em_mode``.
     """
-    structure_factors = ELECTRON_SCATTERING_FACTORS if em_mode else ATOM_STRUCTURE_FACTORS
+    scattering_table = resolve_scattering_table(em_mode, scattering_table)
+    if scattering_table == "it1992":
+        structure_factors = it92_structure_factors()
+    elif scattering_table == "electron":
+        structure_factors = ELECTRON_SCATTERING_FACTORS
+    else:
+        structure_factors = ATOM_STRUCTURE_FACTORS
     n_coeffs = len(structure_factors["C"][0])
     n_elements = max(ELEMENT_TO_SCATTERING_INDEX.values()) + 1
     scattering_tensor = torch.zeros((n_elements, n_coeffs, 2), dtype=torch.float32, device=device)
@@ -322,8 +404,8 @@ def build_real_space_density_reward(
     Parameters
     ----------
     options
-        Density reward options: map path, resolution, loss order, and whether to
-        use electron scattering factors.
+        Density reward options: map path, resolution, loss order, and which
+        scattering factors to use.
     context
         Run-level inputs; the parsed input structure and the target device.
 
@@ -355,7 +437,9 @@ def build_real_space_density_reward(
 
     logger.debug("Setting up scattering parameters")
     atom_array = context.structure["asym_unit"]
-    scattering_params = setup_scattering_params(em_mode=options.em, device=device)
+    scattering_params = setup_scattering_params(
+        em_mode=options.em, device=device, scattering_table=options.scattering_table
+    )
 
     selection_mask = atom_array.occupancy > 0
     logger.info(f"Selected {selection_mask.sum()} atoms with occupancy > 0")

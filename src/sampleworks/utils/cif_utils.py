@@ -1,4 +1,5 @@
 import itertools
+import re
 import tempfile
 from collections import OrderedDict
 from collections.abc import Iterable
@@ -19,6 +20,10 @@ from sampleworks.utils.atom_array_utils import (
     select_altloc,
 )
 
+
+# Extended PDB IDs use `pdb_` plus eight alphanumerics. Legacy IDs have four
+# alphanumerics and start with a digit, which excludes folder names such as `TEST`.
+RCSB_ID_PATTERN = re.compile(r"pdb_[A-Za-z0-9]{8}|[0-9][A-Za-z0-9]{3}")
 
 _POLYMER_ENTITY_CATEGORIES = ("entity", "entity_poly", "entity_poly_seq")
 # The author-number lookup additionally needs these; without them the carry falls back to

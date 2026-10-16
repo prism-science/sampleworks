@@ -148,7 +148,7 @@ readiness table, and [docs/IT_OPT_TESTING.md](docs/IT_OPT_TESTING.md) for how to
 
 | Reward                         | Guided by                                      | Its options                                                                                    |
 | ------------------------------ | ---------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `real_space_density` (default) | Fit to a density map                           | `--density`, `--resolution`, `--loss-order`, `--em`                                            |
+| `real_space_density` (default) | Fit to a density map                           | `--density`, `--resolution`, `--loss-order`, `--em`, `--scattering-table`                      |
 | `structure_factor`             | Fit to structure-factor amplitudes from an MTZ | `--mtzfile`, `--expcolumns`, `--resolution`, `--bulk-solvent`, `--scattering-factor-mode`, ... |
 
 ```bash
@@ -432,7 +432,7 @@ For lightweight source-checkout development, use [uv](https://docs.astral.sh/uv/
 ```bash
 uv sync --group dev
 uv run sampleworks-guidance --help
-uv run pytest tests -m 'not slow'
+uv run pytest tests -m 'not slow and not gpu'
 ```
 
 Additional uv dependency groups are available for development and analysis:
@@ -470,7 +470,7 @@ extras unless you know they are supported on your machine:
 ```bash
 brew install uv
 uv sync --group dev
-uv run pytest tests -m 'not slow'
+uv run pytest tests -m 'not slow and not gpu'
 ```
 
 `protenix` currently requires `triton`/NVIDIA GPU support and is not expected to

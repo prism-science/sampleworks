@@ -243,7 +243,7 @@ Model wrappers for Boltz, Protenix, and RF3 have mutually incompatible dependenc
 
 | Task | Command | Description |
 |------|---------|-------------|
-| `tests` | `pixi run -e <env>-dev tests` | Fast tests only (`-m 'not slow'`), single env |
+| `tests` | `pixi run -e <env>-dev tests` | Fast tests only (`-m 'not slow and not gpu'`), single env |
 | `all-tests` | `pixi run -e <env>-dev all-tests` | All tests including slow (GPU/weights), single env |
 | `test-fast` | `pixi run test-fast` | Fast tests across all three model dev envs |
 | `test-all` | `pixi run test-all` | All tests across all three model dev envs |
@@ -255,7 +255,7 @@ pixi run -e boltz-dev tests -- -k integration   # Run only integration tests
 pixi run -e rf3-dev tests -- -x                 # Stop on first failure
 ```
 
-The `@pytest.mark.slow` marker gates tests that require a GPU or model checkpoint files. Fast test runs (`tests` / `test-fast`) skip these automatically.
+The `@pytest.mark.slow` marker gates tests that require a GPU or model checkpoint files. Fast test runs (`tests` / `test-fast`) skip these automatically, along with `@pytest.mark.gpu` tests, which need CUDA (on CPU they crash or exhaust memory). Run those with `pixi run -e <env>-dev gpu-tests` on a GPU machine.
 
 **Pre-commit hooks**: ruff (lint/format), ty (type checking, per-environment), toml-sort. Hooks block commits on failure. We use [prek](https://github.com/j178/prek) (a Rust-reimplementation of pre-commit) as the hook runner.
 

@@ -11,11 +11,17 @@ import warnings
 from importlib.resources import files
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+from biotite.structure import AtomArray, AtomArrayStack
 from loguru import logger
 from sampleworks.eval.constants import OCCUPANCY_LEVELS
 from sampleworks.eval.eval_dataclasses import ProteinConfig, Trial, TrialList
-from sampleworks.eval.occupancy_utils import extract_protein_and_occupancy
+from sampleworks.eval.occupancy_utils import (
+    extract_protein_and_occupancy,
+    rcsb_id_from_protein_name,
+)
+from sampleworks.utils.atom_array_utils import BLANK_ALTLOC_IDS, map_altlocs_to_stack
 from sampleworks.utils.guidance_constants import StructurePredictor
 
 
@@ -276,6 +282,9 @@ def scan_grid_search_results(
         method, path_model = get_method_and_model_name(model_dir.name)
         protein_value = _metadata_value(metadata, "protein", path_protein)
         protein = str(protein_value) if protein_value is not None else None
+        if protein is not None:
+            # Older job_metadata.json files record the full protein name, e.g. 3T94_1.0occA.
+            protein = rcsb_id_from_protein_name(protein) or protein
         altloc_occupancies = _metadata_occupancies(metadata, path_altloc_occupancies)
         model_value = _metadata_value(metadata, "model_name", path_model, aliases=("model",))
         model = str(model_value)
@@ -352,6 +361,51 @@ def scan_grid_search_results(
             trials.extend(grid_search_trials)
 
     return trials
+
+
+def build_reference_frames(reference: AtomArray | AtomArrayStack, selection: str) -> AtomArrayStack:
+    r"""Split a reference into one frame per conformer, keeping anchor atoms plus the selection.
+
+    Anchors are the blank-altloc atoms, which every conformer shares. Each reference frame holds
+    all anchor atoms plus that conformer's copy of the selection, so a prediction aligned to it is
+    superimposed on the shared atoms and the segment of interest together. The selection or the
+    segment of interest is expected to be on non-blank altloc atoms.
+
+    Two reference layouts are supported:
+
+    - A single-model reference with altlocs (e.g. a deposited structure) is split with
+      ``map_altlocs_to_stack``, one frame per altloc in sorted altloc ID order.
+      An example layout of the reference structure file is:
+      MODEL 1: blank-altloc atoms -- altloc A atoms
+                                 \__ altloc B atoms
+    - A multi-model ensemble with altloc annotation. Each model should have blank altloc ID and
+      one non-blank altloc ID, and each atom has the same altloc ID across the models.
+      MODEL 1: blank-altloc atoms -- altloc X atoms (conformation A)
+      MODEL 2: blank-altloc atoms -- altloc X atoms (conformation B)
+      The main difference from the single-model reference is that the blank-altloc atoms in MODEL
+      1 and 2 can have slightly different coordinates, as a result of energy relaxation of each
+      conformations from PDBFixer.
+
+    Parameters
+    ----------
+    reference
+        Reference structure, as returned by ``get_reference_atomarraystack``.
+    selection
+        Atomworks-style selection of the scored region.
+
+    Returns
+    -------
+    AtomArrayStack
+        Reference stack with one frame per conformer.
+    """
+    if isinstance(reference, AtomArrayStack) and reference.stack_depth() > 1:
+        anchors = np.isin(reference.altloc_id, list(BLANK_ALTLOC_IDS))
+        selected = reference.mask(selection)
+        if not selected.any():
+            raise ValueError(f"No atoms in reference match selection '{selection}'")
+        return reference[:, anchors | selected]
+    stack, _ = map_altlocs_to_stack(reference, selection=selection, return_full_array=True)
+    return stack
 
 
 def translate_selection(selection: str) -> str:

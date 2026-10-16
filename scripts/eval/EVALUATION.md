@@ -39,8 +39,6 @@ You can run the following command, which assumes:
 - the output is organized by RCSB PDB ID in directories like `/home/ubuntu/grid_search_results/1VME/...`,
   see the `--rcsb-pattern` argument which is a regex to match the RCSB PDB ID
 - the input PDB cif files are stored in `/home/ubuntu/grid_search_inputs` as required for running the
-  the grid search (see GRID_SEARCH.md)
-- the input PDB cif files are stored in `/home/ubuntu/grid_search_inputs` as required for running the
   the grid search (see GRID_SEARCH.md). The files will have paths like, e.g.,
   `/home/ubuntu/grid_search_inputs/1VME/1VME_original.cif`. See also the `--input-pdb-pattern`
   argument, which is a python format string which must use the `pdb_id` variable to refer to the
@@ -110,11 +108,18 @@ The file has the following columns:
 - `protein`, the PDB id of the protein to evaluate.
 - `selection`, a semicolon separated list of selections, with a (very) limited PyMOL like algebra
 or a more complete atomworks-style selection syntax. See examples in the files in
-`sampleworks/data/`. Selections are only used by the RSCC and LDDT scripts.
+`sampleworks/data/`. Selections are only used by the RSCC, LDDT, and RMSD scripts.
 - `structure_pattern`, the filename of the reference PDB file passed to the sampleworks generation script,
   probably through an input configuration CSV file if you used the `run_grid_search.py` script. If a
   different reference structure was used for different occupancies, you can use the variable `occ_str`
   in the pattern, which is replaced with the occupancy values one by one.
+  The reference is either a single model with altlocs (e.g. a deposited structure) or a multi-model
+  ensemble (e.g. from the synthetic_sampleworks preprocessing pipeline). This multi-model ensemble shares
+  one `altloc_id` annotation: blank on the anchor atoms every conformer shares (i.e. previously the blank
+  altloc in the single model source structure), and a non-blank label (e.g. `X`) elsewhere. The LDDT and
+  RMSD scripts align predicted and reference structures on the anchors plus the selection. The RSCC script
+  aligns to the first model, consistent with the single model where only first altloc kept.
+  See `build_reference_frames` in `sampleworks/eval/grid_search_eval_utils.py` for more details.
 - `map_pattern`, Similar to `structure_pattern`, but for the density map files.
 - `base_map_dir` The code assumes the maps for each protein are in their own subdirectory of the inputs
 directory specified by `grid_search_inputs_path`, e.g., `processed/1VME`.

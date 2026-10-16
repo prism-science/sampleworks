@@ -8,6 +8,7 @@ from typing import Any, cast, overload
 import numpy as np
 import torch
 from atomworks.io.transforms.atom_array import ensure_atom_array_stack
+from atomworks.io.utils.io_utils import load_any
 from biotite.structure import AtomArray, AtomArrayStack, from_template
 from loguru import logger
 
@@ -17,8 +18,8 @@ from sampleworks.models.protocol import GenerativeModelInput
 from sampleworks.utils import atom_array_utils
 from sampleworks.utils.atom_array_utils import (
     _closest_canonical_amino_acid,
+    apply_selection,
     BLANK_ALTLOC_IDS,
-    load_structure_with_altlocs,
 )
 from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.framework_utils import match_batch
@@ -317,48 +318,6 @@ def selection_to_residues(atom_array: AtomArray, selection: str) -> set[tuple[st
     }
 
 
-def filter_to_selection(
-    atom_array: AtomArray | AtomArrayStack, selection: str
-) -> AtomArray | AtomArrayStack:
-    """Restrict an atom array to the atoms matching ``selection``.
-
-    The selection mask is computed exactly as in
-    :func:`extract_selection_coordinates`. For an
-    :class:`~biotite.structure.AtomArrayStack`, the mask is derived from the first
-    model but applied across every model, so the returned structure keeps all models.
-
-    Parameters
-    ----------
-    atom_array : AtomArray | AtomArrayStack
-        Atomworks parsed structure. For a stack, the same atom mask is applied to all models.
-    selection : str
-        Selection string, either legacy (``chain A and resi 326-339``) or atomworks-style
-        (``chain_id == 'A' and ...``).
-
-    Returns
-    -------
-    AtomArray | AtomArrayStack
-        The subset of ``atom_array`` matching ``selection``, of the same type as the input.
-    """
-    # TODO: we will need to handle other kinds of selections later, like radius around a point.
-    #   surely biotite has this capability?
-    if isinstance(atom_array, AtomArrayStack):
-        working_array = cast(AtomArray, atom_array[0])
-    else:
-        working_array = atom_array
-
-    if not any(x in selection for x in atom_array_utils.ATOMWORKS_COMPARISON_OPS):
-        mask = atom_array_utils.get_mask_from_old_selection_string(atom_array, selection)
-    else:
-        mask = working_array.mask(selection)
-
-    # Indexing is typed as possibly returning a single ``Atom``; the boolean mask always
-    # yields an array, so coerce back to the container type.
-    if isinstance(atom_array, AtomArrayStack):
-        return cast(AtomArrayStack, atom_array[:, mask])
-    return cast(AtomArray, atom_array[mask])
-
-
 def extract_selection_coordinates(
     atom_array: AtomArray | AtomArrayStack, selection: str
 ) -> np.ndarray:
@@ -379,7 +338,7 @@ def extract_selection_coordinates(
     RuntimeError: If no atoms match the selection or coordinates are invalid
     TypeError: If the "asym_unit" in `structure` is not an AtomArray or AtomArrayStack
     """
-    selected = filter_to_selection(atom_array, selection)
+    selected = apply_selection(atom_array, selection)
     # This function returns coordinates for a single model; use the first model of a stack
     # (the selection mask already matches across all models).
     selected_coords = cast(np.ndarray, selected.coord)
@@ -565,16 +524,26 @@ def get_reference_atomarraystack(
     altloc_occupancies : dict[str, float]
         Mapping of altloc labels to occupancy values,
         e.g. ``{"A": 0.5, "B": 0.5}``.
+
+    Returns
+    -------
+    tuple[Path | str | None, AtomArrayStack | None]
+        The reference path and structure, or ``(None, None)`` if no reference exists. Every
+        model in the file is kept, so a multi-model ensemble reference (one model per
+        conformer) comes back with one frame per conformer and a single-model reference with
+        one frame.
     """
     ref_path = protein_config.get_reference_structure_path(altloc_occupancies)
     if ref_path is None:
         return None, None
 
+    # Same loading as load_structure_with_altlocs, which keeps only the first model.
+    ref_struct = load_any(ref_path, altloc="all", extra_fields=["occupancy", "b_factor"])
     # A modified residue (e.g. CSO) recorded as an altloc at the same position as its canonical
     # form (e.g. CYS) makes map_altlocs_to_stack fail: the conformers disagree on res_name/hetero
     # so biotite.stack() rejects them. Canonicalize these residues to get map_altlocs_to_stack to
     # work
-    ref_struct = canonicalize_mixed_altloc_residues(load_structure_with_altlocs(ref_path))
+    ref_struct = canonicalize_mixed_altloc_residues(ref_struct)
     if ref_struct.coord is None:
         raise ValueError(f"Unable to load coordinates from {ref_path} Please check file")
     if isinstance(ref_struct, AtomArray):
@@ -604,7 +573,24 @@ def get_reference_structure_coords(
             for selection in protein_config.selection:
                 try:
                     # TODO: enumerate actual exceptions this can raise.
-                    coords = extract_selection_coordinates(ref_struct, selection)
+                    # One coordinate set per model: a multi-model ensemble reference holds
+                    # each conformer in its own model rather than as altloc atoms. A model with
+                    # no usable coordinates is skipped so the others still define the region.
+                    model_coords = []
+                    for model_index, model in enumerate(ref_struct):
+                        try:
+                            model_coords.append(extract_selection_coordinates(model, selection))
+                        except RuntimeError as e:
+                            logger.warning(
+                                f"  Skipping model {model_index} of {ref_path} "
+                                f"for selection '{selection}': {e}"
+                            )
+                    if not model_coords:
+                        raise RuntimeError(
+                            f"No model in {ref_path} has usable coordinates "
+                            f"for selection '{selection}'"
+                        )
+                    coords = np.vstack(model_coords)
                     if not len(coords):
                         logger.warning(f"  No atoms in selection '{selection}' for {protein_key}")
                     elif not np.isfinite(coords).all():

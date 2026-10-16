@@ -262,13 +262,54 @@ class TestRewardGradientFlow:
     ],
 )
 class TestRewardBatchHandling:
-    """Various batch shapes (incl. a large ensemble) produce a valid finite scalar."""
+    """The batch dim is an ensemble: an occupancy-weighted mixture of every conformer.
 
-    def test_batch_shape(self, reward_case, batch_size):
-        """The given batch shape produces a valid finite scalar loss."""
-        loss = reward_case.reward_function(**reward_case.batch(batch_size))
-        assert loss.shape == torch.Size([])
-        assert torch.isfinite(loss)
+    The pipeline gives each of ``B`` conformers occupancy ``1/B`` and every reward sums the
+    conformers' contributions (density, or complex structure factors). The tests use
+    perturbed coordinates rather than the true structure, keeping the loss large enough for
+    reliable relative comparisons.
+    """
+
+    def test_identical_conformers_at_split_occupancy_match_one_conformer(
+        self, reward_case, batch_size
+    ):
+        """``B`` copies of a conformer at occupancy/B score like that conformer alone.
+
+        Fails if the batch is averaged instead of summed, or only one conformer is scored.
+        """
+        torch.manual_seed(42)
+        coords = reward_case.coords + torch.randn_like(reward_case.coords) * 0.5  # [N, 3]
+
+        loss_single = reward_case.reward_function(**reward_case.batch(1, coords=coords))
+
+        ensemble = reward_case.batch(batch_size, coords=coords)
+        ensemble["occupancies"] = ensemble["occupancies"] / batch_size
+        loss_ensemble = reward_case.reward_function(**ensemble)
+
+        assert loss_ensemble.shape == torch.Size([])
+        assert loss_single.item() > _LOSS_THRESHOLDS[reward_case.name]
+        torch.testing.assert_close(loss_ensemble, loss_single, rtol=1e-4, atol=0.0)
+
+    def test_moving_only_the_last_conformer_changes_the_loss(self, reward_case, batch_size):
+        """Displacing the last conformer away from the truth raises the ensemble's loss.
+
+        Fails if any conformer is dropped from the sum (e.g. only ``[0]`` scored), since
+        the last conformer would then never be seen.
+        """
+        torch.manual_seed(42)
+        displaced = reward_case.coords + torch.randn_like(reward_case.coords) * 1.0  # [N, 3]
+
+        true_ensemble = reward_case.coords.unsqueeze(0).repeat(batch_size, 1, 1)  # [B, N, 3]
+        moved_ensemble = true_ensemble.clone()
+        moved_ensemble[-1] = displaced
+
+        def score(ensemble_coords: torch.Tensor) -> torch.Tensor:
+            inputs = reward_case.batch(batch_size)
+            inputs["coordinates"] = ensemble_coords
+            inputs["occupancies"] = inputs["occupancies"] / batch_size
+            return reward_case.reward_function(**inputs)
+
+        assert score(moved_ensemble).item() > score(true_ensemble).item()
 
 
 class TestRewardEdgeCases:

@@ -176,7 +176,8 @@ class AtomReconciler:
         model_reference
             Reference coordinates in model space, shape ``(*batch, n_model, 3)``.
         allow_gradients
-            Whether to preserve gradients through alignment.
+            Whether the returned coordinates stay attached to the autograd graph of
+            model_coords. False (default) returns detached coordinates.
         align_weights
             Optional per-atom weights in model space, shape ``(*batch, n_model)``.
             Only the common-atom subset is used. Higher values increase an
@@ -226,6 +227,12 @@ class AtomReconciler:
         )
 
         aligned = apply_forward_transform(model_coords, transform, rotation_only=False)
+
+        # to save compute, we detach the aligned result if gradients are not allowed.
+        # otherwise, the aligned result would still carry grad through the apply_forward_transform
+        # call even if gradients are not needed.
+        if not allow_gradients:
+            aligned = aligned.detach()
         return aligned, transform
 
     def struct_to_model(

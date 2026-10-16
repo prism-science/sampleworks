@@ -1,11 +1,13 @@
 """Shared utilities for synthetic structure-factor and density generation."""
 
-import math
+import csv
 import traceback
 from collections import Counter
 from collections.abc import Hashable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from itertools import pairwise
 from pathlib import Path
+from typing import Any
 
 import gemmi
 import numpy as np
@@ -30,6 +32,9 @@ from sampleworks.utils.atom_array_utils import (
 
 # How many explicit duplicates to show in an error message when converting atomarray to gemmi.
 MAX_REPORTED_DUPLICATES = 3
+
+VALID_EXTENSIONS = frozenset({".cif", ".mmcif"})
+LEGACY_EXTENSIONS = frozenset({".pdb", ".ent"})
 
 
 def resolve_parallel_jobs(device: torch.device | str, n_jobs: int) -> int:
@@ -118,12 +123,39 @@ def resolve_mtz_column(
     return candidates[0]
 
 
+def validate_structure_extension(filename: Path | str) -> None:
+    """Check that a structure file has a supported extension, warning on legacy PDB.
+
+    Parameters
+    ----------
+    filename
+        Structure file name or path.
+
+    Raises
+    ------
+    ValueError
+        If the extension is not a supported mmCIF or PDB extension.
+    """
+    ext = Path(filename).suffix.lower()
+    all_supported = VALID_EXTENSIONS | LEGACY_EXTENSIONS
+    if ext not in all_supported:
+        raise ValueError(
+            f"Invalid file extension '{ext}' for '{filename}'. "
+            f"Expected one of: {', '.join(sorted(all_supported))}"
+        )
+    if ext in LEGACY_EXTENSIONS:
+        logger.warning(
+            f"'{ext}' is a legacy PDB format and support may be removed in a future version. "
+            "Prefer .cif or .mmcif (mmCIF format)."
+        )
+
+
 def validate_occupancy_values(occupancy_values: list[float]) -> None:
     """Raise ValueError if any value is outside [0.0, 1.0] or values don't sum to 1.0."""
     for i, v in enumerate(occupancy_values):
         if not 0.0 <= v <= 1.0:
             raise ValueError(f"Occupancy value {v} at index {i} is out of range [0.0, 1.0]")
-    if occupancy_values and not math.isclose(sum(occupancy_values), 1.0):
+    if occupancy_values and not np.isclose(sum(occupancy_values), 1.0):
         raise ValueError(f"Occupancy values must sum to 1.0, got {sum(occupancy_values)}")
 
 
@@ -211,13 +243,15 @@ def load_structure_for_synthetic_reward(
     strip_waters: bool = False,
     strip_ligands: bool = False,
     selection: str | None = None,
+    b_factor: float | None = None,
+    model: int = 0,
 ) -> AtomArray | None:
     """Load and prepare a structure for synthetic reward generation.
 
     Handles loading, optional atom selection, stripping of unwanted atom classes,
-    and occupancy assignment. Returns None on load or selection errors (logged);
-    raises ValueError on invalid occupancy_mode or occupancy assignment errors (logged
-    before raising).
+    occupancy assignment, and removal of zero-occupancy atoms. Returns None on load
+    or selection errors (logged); raises ValueError on an invalid b_factor, an invalid
+    occupancy_mode, or occupancy assignment errors (the latter two logged before raising).
 
     Parameters
     ----------
@@ -237,18 +271,27 @@ def load_structure_for_synthetic_reward(
         If True, keep only polymer amino-acid atoms
     selection
         Optional atom selection string. If None, the full structure is used.
+    b_factor
+        Optional isotropic B-factor assigned to every retained atom. If None,
+        preserve the values from the input structure.
+    model
+        0-based index of the one model to load from a multi-model file. Callers that
+        need every model (e.g. ``generate_synthetic_sf_ensemble``) call this once per
+        model.
 
     Returns
     -------
     AtomArray | None
         Prepared structure, or None if loading or selection failed
     """
+    if b_factor is not None and (not np.isfinite(b_factor) or b_factor < 0.0):
+        raise ValueError(f"B-factor must be finite and non-negative, got {b_factor}")
     if not structure_path.exists():
         logger.error(f"Structure not found: {structure_path}")
         return None
 
     try:
-        atom_array = load_structure_with_altlocs(structure_path)
+        atom_array = load_structure_with_altlocs(structure_path, model=model)
     except Exception as e:
         logger.error(
             f"Failed to load {structure_path} ({type(e).__name__}): {e}\n"
@@ -292,6 +335,15 @@ def load_structure_for_synthetic_reward(
     else:
         logger.error(f"Invalid occupancy mode '{occupancy_mode}' for {structure_path}")
         raise ValueError(f"Invalid occupancy mode '{occupancy_mode}'")
+
+    zero_occupancy = atom_array.occupancy == 0.0
+    if zero_occupancy.any():
+        logger.info(f"Removed {zero_occupancy.sum()} zero-occupancy atoms")
+        atom_array = atom_array[~zero_occupancy]
+
+    if b_factor is not None:
+        atom_array.b_factor = np.full(len(atom_array), b_factor, dtype=np.float32)
+        logger.info(f"Assigned B-factor {b_factor:g} to {len(atom_array)} atoms")
 
     return atom_array
 
@@ -364,9 +416,9 @@ def _check_no_repeated_atoms(atom_array: AtomArray, altlocs: list[str]) -> None:
     gemmi (0.6.7) identifies an atom within a residue by that pair (seqid.hpp:124-141),
     so a repeat yields two indistinguishable atoms.
 
-    Keyed on the full ``(chain_id, res_id, atom_name, altloc)`` for informative error
-    message. Assumes that each ``(chain_id, res_id)`` occupies exactly one span, which
-    should have been established by ``_prepare_residue_spans``.
+    Keyed on the full ``(chain_id, res_id, ins_code, atom_name, altloc)`` for an
+    informative error message. Assumes each residue occupies exactly one span,
+    which should have been established by ``_prepare_residue_spans``.
 
     Parameters
     ----------
@@ -380,10 +432,16 @@ def _check_no_repeated_atoms(atom_array: AtomArray, altlocs: list[str]) -> None:
     ValueError
         If any ``(atom_name, altloc)`` pair repeats within a residue.
     """
+    ins_codes = (
+        atom_array.ins_code.tolist()
+        if "ins_code" in atom_array.get_annotation_categories()
+        else [""] * len(atom_array)
+    )
     _check_keys_unique(
         {
             "chain_id": atom_array.chain_id.tolist(),
             "res_id": atom_array.res_id.tolist(),
+            "ins_code": ins_codes,
             "atom_name": atom_array.atom_name.tolist(),
             "altloc": altlocs,
         },
@@ -399,9 +457,8 @@ def _prepare_residue_spans(atom_array: AtomArray) -> Iterator[tuple[int, int]]:
     the chain loop in ``atomarray_to_gemmi`` assumes contiguous chains and residues.
     This function checks both assumptions and raises an error if they are violated.
 
-    Residues are keyed on ``(chain_id, res_id)``, the only fields identifying a residue
-    that ``_build_gemmi_residue`` writes. ``ins_code`` is not among them until issue #306
-    is resolved, so a span it splits off is reported as a duplicate rather than kept.
+    Residues are keyed on ``(chain_id, res_id, ins_code)``, matching the fields
+    ``_build_gemmi_residue`` writes into Gemmi's hierarchy.
 
     Parameters
     ----------
@@ -412,7 +469,8 @@ def _prepare_residue_spans(atom_array: AtomArray) -> Iterator[tuple[int, int]]:
     -------
     Iterator of tuple of int
         One ``(start_idx, stop_idx)`` per residue, covering the atoms
-        ``atom_array[start_idx:stop_idx]`` that share the same ``(chain_id, res_id)``.
+        ``atom_array[start_idx:stop_idx]`` that share the same
+        ``(chain_id, res_id, ins_code)``.
 
     Raises
     ------
@@ -427,10 +485,15 @@ def _prepare_residue_spans(atom_array: AtomArray) -> Iterator[tuple[int, int]]:
 
     residue_span_idx = get_residue_starts(atom_array, add_exclusive_stop=True)
     span_start_idx = residue_span_idx[:-1]  # (n_residues,)
+    if "ins_code" in atom_array.get_annotation_categories():
+        span_ins_codes = atom_array.ins_code[span_start_idx].tolist()
+    else:
+        span_ins_codes = [""] * len(span_start_idx)
     _check_keys_unique(
         {
             "chain_id": chain_id[span_start_idx].tolist(),
             "res_id": atom_array.res_id[span_start_idx].tolist(),
+            "ins_code": span_ins_codes,
         },
         level="residue",
     )
@@ -475,9 +538,14 @@ def _build_gemmi_residue(
         Residue populated with the atoms ``atom_array[start_idx:stop_idx]``.
     """
     res_id = int(atom_array.res_id[start_idx])
+    ins_code = (
+        atom_array.ins_code[start_idx]
+        if "ins_code" in atom_array.get_annotation_categories()
+        else ""
+    )
     residue = gemmi.Residue()
     residue.name = atom_array.res_name[start_idx]
-    residue.seqid = gemmi.SeqId(str(res_id))  # writes auth_seq_id
+    residue.seqid = gemmi.SeqId(res_id, ins_code or " ")  # writes auth_seq_id and insertion code
     residue.label_seq = res_id  # writes label_seq_id, important for saving mmCIF
     # writes label_asym_id; nothing else assigns it, since atomarray_to_gemmi
     # deliberately skips setup_entities(). Must stay single-char -- SFcalculator's
@@ -564,3 +632,114 @@ def atomarray_to_gemmi(
     if space_group is not None:
         structure.spacegroup_hm = space_group
     return structure
+
+
+@dataclass
+class BatchRowForMTZ:
+    """A row from the batch processing CSV file. Each row represents one structure.
+
+    Attributes
+    ----------
+    filename
+        Path to the structure file (relative to base_dir, which is meant to be the
+        parent directory of all structures.)
+    mtzfile
+        Optional custom output filename for the MTZ
+    unit_cell
+        Optional unit cell to override the one in the structure file
+    space_group
+        Optional space group to override the one in the structure file. Accepts any
+        string (e.g. "P 21 21 2") or integer (space group number, e.g. 18) that gemmi
+        can convert to a SpaceGroup object, which is then converted to the international
+        notation (Hermann-Mauguin string). See gemmi documentation for more details
+        (https://gemmi.readthedocs.io/en/latest/symmetry.html#spacegroup).
+    selection
+        Optional atom selection string in pyMOL-like syntax (e.g., 'chain A and resi 10-50')
+    occupancy_values
+        Custom list of occupancy values for altlocs, must be in range [0.0, 1.0]
+    """
+
+    filename: Path | str
+    mtzfile: str | None = None
+    unit_cell: gemmi.UnitCell | None = None
+    space_group: str | None = None
+    selection: str | None = None
+    occupancy_values: list[float] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        validate_structure_extension(self.filename)
+        validate_occupancy_values(self.occupancy_values)
+
+    @classmethod
+    def from_dict(cls, row: dict[str, Any]) -> "BatchRowForMTZ":
+        """Create a BatchRowForMTZ from a CSV row dictionary.
+
+        CSV columns:
+        - filename (required): e.g. '1abc.cif', relative to base_dir
+        - mtzfile: e.g. 'output/1abc.mtz'
+        - unit_cell (six floats separated by ':'): e.g. '1.0:1.0:1.0:90.0:90.0:90.0'
+          in units of Angstroms and degrees
+        - space_group (number or Hermann-Mauguin string): e.g. '18' or 'P 21 21 2'
+        - occupancy_values (colon-separated floats summing to 1.0): e.g. '0.3:0.7'
+        - selection (PyMOL-like syntax): e.g. 'chain A'
+        """
+        if "filename" not in row:
+            raise KeyError("CSV is missing required 'filename' column")
+
+        unit_cell: gemmi.UnitCell | None = None
+        if row.get("unit_cell"):
+            parts = [float(v.strip()) for v in row["unit_cell"].split(":")]
+            if len(parts) != 6:
+                raise ValueError(
+                    f"unit_cell must be 6 colon-separated values (a:b:c:alpha:beta:gamma), "
+                    f"got {len(parts)}: {row['unit_cell']!r}"
+                )
+            unit_cell = gemmi.UnitCell(*parts)
+
+        space_group: str | None = None
+        if row.get("space_group"):
+            space_group = row["space_group"]
+            if space_group.isdigit():
+                space_group = gemmi.SpaceGroup(int(space_group)).hm
+
+        occupancy_values: list[float] = []
+        if row.get("occupancy_values"):
+            occupancy_values = [float(v.strip()) for v in row["occupancy_values"].split(":")]
+
+        return cls(
+            filename=row["filename"],
+            mtzfile=row.get("mtzfile") or None,
+            unit_cell=unit_cell,
+            space_group=space_group,
+            selection=row.get("selection") or None,
+            occupancy_values=occupancy_values,
+        )
+
+
+def load_batch_csv(csv_path: Path) -> list[BatchRowForMTZ]:
+    """Load and parse a CSV file for batch processing.
+
+    Parameters
+    ----------
+    csv_path
+        Path to CSV file with columns: filename (required), mtzfile, unit_cell,
+        space_group, selection, occupancy_values (all optional)
+
+    Returns
+    -------
+    list[BatchRowForMTZ]
+        List of validated batch processing rows
+
+    Raises
+    ------
+    KeyError
+        If the CSV is missing the required 'filename' column
+    """
+    rows = []
+    with open(csv_path) as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None or "filename" not in reader.fieldnames:
+            raise KeyError(f"CSV file '{csv_path}' is missing required 'filename' column")
+        for row in reader:
+            rows.append(BatchRowForMTZ.from_dict(row))
+    return rows

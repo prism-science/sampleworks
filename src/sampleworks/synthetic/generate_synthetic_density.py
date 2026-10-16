@@ -4,16 +4,20 @@ import sys
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import ClassVar
 
 import torch
 from loguru import logger
 
 from sampleworks.core.forward_models.xray.real_space_density import XMap_torch
+from sampleworks.core.rewards.real_space_density import (
+    resolve_scattering_table,
+    SCATTERING_TABLES,
+)
 from sampleworks.synthetic.synthetic_utils import (
     load_structure_for_synthetic_reward,
     resolve_parallel_jobs,
     validate_occupancy_values,
+    validate_structure_extension,
 )
 from sampleworks.utils.atom_array_utils import save_structure_to_cif
 from sampleworks.utils.density_utils import compute_density_from_atomarray
@@ -36,27 +40,13 @@ class BatchRow:
         Optional custom output filename for the density map
     """
 
-    VALID_EXTENSIONS: ClassVar[frozenset[str]] = frozenset({".cif", ".mmcif"})
-    LEGACY_EXTENSIONS: ClassVar[frozenset[str]] = frozenset({".pdb", ".ent"})
-
     filename: str
     selection: str | None = None
     occupancy_values: list[float] = field(default_factory=list)
     mapfile: str | None = None
 
     def __post_init__(self) -> None:
-        ext = Path(self.filename).suffix.lower()
-        all_supported = self.VALID_EXTENSIONS | self.LEGACY_EXTENSIONS
-        if ext not in all_supported:
-            raise ValueError(
-                f"Invalid file extension '{ext}' for '{self.filename}'. "
-                f"Expected one of: {', '.join(sorted(all_supported))}"
-            )
-        if ext in self.LEGACY_EXTENSIONS:
-            logger.warning(
-                f"'{ext}' is a legacy PDB format and support may be removed in a future version. "
-                "Prefer .cif or .mmcif (mmCIF format)."
-            )
+        validate_structure_extension(self.filename)
         validate_occupancy_values(self.occupancy_values)
 
     @classmethod
@@ -155,6 +145,8 @@ def _process_single_row(
     strip_waters: bool = False,
     strip_ligands: bool = False,
     save_structure: bool = True,
+    scattering_table: str | None = None,
+    b_factor: float | None = None,
 ) -> None:
     """Process a single structure row.
 
@@ -186,6 +178,10 @@ def _process_single_row(
         TODO: be more thorough with this? We could make this a transform
     save_structure
         If True, save the processed structure to a CIF file in the input directory. Default is True.
+    scattering_table
+        ``"wk1995"``, ``"it1992"`` or ``"electron"``; ``None`` takes the mode's default.
+    b_factor
+        Optional isotropic B-factor assigned to every retained atom.
     """
     structure_path = base_dir / row.filename
     atom_array = load_structure_for_synthetic_reward(
@@ -196,13 +192,18 @@ def _process_single_row(
         strip_waters=strip_waters,
         strip_ligands=strip_ligands,
         selection=row.selection,
+        b_factor=b_factor,
     )
     if atom_array is None:
         return
 
     try:
         density, xmap_torch = compute_density_from_atomarray(
-            atom_array, resolution=resolution, em_mode=em_mode, device=device
+            atom_array,
+            resolution=resolution,
+            em_mode=em_mode,
+            device=device,
+            scattering_table=scattering_table,
         )
     except Exception as e:
         logger.error(
@@ -255,6 +256,8 @@ def process_batch(
     strip_waters: bool = False,
     strip_ligands: bool = False,
     save_structure: bool = False,
+    scattering_table: str | None = None,
+    b_factor: float | None = None,
 ) -> None:
     """Process multiple structures from a CSV file in batch mode.
 
@@ -282,6 +285,10 @@ def process_batch(
         If True, remove ligand molecules (non-water heteroatoms) before computing density.
     save_structure
         If True, save the processed structure to a CIF file in the input directory.
+    scattering_table
+        ``"wk1995"``, ``"it1992"`` or ``"electron"``; ``None`` takes the mode's default.
+    b_factor
+        Optional isotropic B-factor assigned to every retained atom.
     """
     from joblib import delayed, Parallel
 
@@ -298,10 +305,12 @@ def process_batch(
             resolution=resolution,
             em_mode=em_mode,
             device=device,
+            scattering_table=scattering_table,
             strip_hydrogens=strip_hydrogens,
             strip_waters=strip_waters,
             strip_ligands=strip_ligands,
             save_structure=save_structure,
+            b_factor=b_factor,
         )
         for row in rows
     )
@@ -353,7 +362,19 @@ def parse_args() -> argparse.Namespace:
         "--resolution", "-r", type=float, default=2.0, help="Map resolution in Angstroms"
     )
     density_group.add_argument(
+        "--b-factor",
+        type=float,
+        default=None,
+        help="Override every retained atom's isotropic B-factor",
+    )
+    density_group.add_argument(
         "--em-mode", action="store_true", help="Use electron scattering factors (EM mode)"
+    )
+    density_group.add_argument(
+        "--scattering-table",
+        choices=list(SCATTERING_TABLES),
+        default=None,
+        help="Scattering table, as in Phenix (default: electron with --em-mode, otherwise wk1995)",
     )
     density_group.add_argument(
         "--remove-hydrogens",
@@ -395,6 +416,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    try:
+        resolve_scattering_table(args.em_mode, args.scattering_table)
+    except ValueError as error:
+        logger.error(str(error))
+        sys.exit(1)
     device = try_gpu()
 
     if args.batch_csv:
@@ -406,11 +432,13 @@ def main() -> None:
             occupancy_mode=args.occupancy_mode,
             em_mode=args.em_mode,
             device=device,
+            scattering_table=args.scattering_table,
             n_jobs=args.n_jobs,
             strip_hydrogens=args.remove_hydrogens,
             strip_waters=args.remove_waters,
             strip_ligands=args.remove_ligands,
             save_structure=args.save_structure,
+            b_factor=args.b_factor,
         )
     elif args.structure:
         row = BatchRow(
@@ -429,10 +457,12 @@ def main() -> None:
             resolution=args.resolution,
             em_mode=args.em_mode,
             device=device,
+            scattering_table=args.scattering_table,
             strip_hydrogens=args.remove_hydrogens,
             strip_waters=args.remove_waters,
             strip_ligands=args.remove_ligands,
             save_structure=args.save_structure,
+            b_factor=args.b_factor,
         )
     else:
         logger.error("Please specify --structure or --batch-csv")

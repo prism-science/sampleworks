@@ -1,7 +1,7 @@
 name: Relock
 
 # Regenerate pixi.lock on Linux and commit it back to the dispatched branch.
-# The workspace pins system-requirements.cuda and uses git/editable deps, so a
+# The linux platform declares cuda = "12" and the workspace uses git/editable deps, so a
 # from-scratch solve must build them for linux-64 — which cannot be done on
 # macOS. Run this workflow (Actions tab -> Relock -> Run workflow, pick the
 # branch) whenever pyproject.toml changes and the lock needs refreshing.
@@ -24,7 +24,7 @@ jobs:
       - name: Install pixi
         uses: prefix-dev/setup-pixi@v0.8.8
         with:
-          pixi-version: v0.73.0
+          pixi-version: v0.82.0
           run-install: false
 
       - name: Regenerate lockfile

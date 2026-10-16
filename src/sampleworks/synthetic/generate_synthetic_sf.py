@@ -5,16 +5,14 @@ only, or when ``--simulate-solvent-and-scale`` is set, both the protein and tota
 (Fprotein/SIGFprotein/PHIFprotein and Ftotal/SIGFtotal/PHIFtotal) in the same
 MTZ. The MTZ file has dummy values for the SIGF column(s) and optionally an R-free flag
 column. Each structure can be optionally overridden with unit cell, space group, atom
-selection, and occupancy.
+selection, occupancy, and a flat isotropic B-factor.
 """
 
 import argparse
-import csv
 import sys
 import traceback
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast, ClassVar
+from typing import cast
 
 import gemmi
 import reciprocalspaceship as rs
@@ -26,108 +24,43 @@ from SFC_Torch.io import PDBParser
 
 from sampleworks.synthetic.synthetic_utils import (
     atomarray_to_gemmi,
+    BatchRowForMTZ,
+    load_batch_csv,
     load_structure_for_synthetic_reward,
     resolve_mtz_column,
     resolve_parallel_jobs,
-    validate_occupancy_values,
 )
 from sampleworks.utils.torch_utils import try_gpu
 
 
-@dataclass
-class BatchRowForMTZ:
-    """A row from the batch processing CSV file. Each row represents one structure.
+def write_sf_input_structure(
+    gemmi_structure: gemmi.Structure, structure_path: Path, output_dir: Path
+) -> Path:
+    """Save the structure that structure factors were computed from.
 
-    Attributes
+    Parameters
     ----------
-    filename
-        Path to the structure file (relative to base_dir, which is meant to be the
-        parent directory of all structures.)
-    mtzfile
-        Optional custom output filename for the MTZ
-    unit_cell
-        Optional unit cell to override the one in the structure file
-    space_group
-        Optional space group to override the one in the structure file. Accepts any
-        string (e.g. "P 21 21 2") or integer (space group number, e.g. 18) that gemmi
-        can convert to a SpaceGroup object, which is then converted to the international
-        notation (Hermann-Mauguin string). See gemmi documentation for more details
-        (https://gemmi.readthedocs.io/en/latest/symmetry.html#spacegroup).
-    selection
-        Optional atom selection string in pyMOL-like syntax (e.g., 'chain A and resi 10-50')
-    occupancy_values
-        Custom list of occupancy values for altlocs, must be in range [0.0, 1.0]
+    gemmi_structure
+        Processed structure passed to SFcalculator.
+    structure_path
+        Source structure path whose stem names the output.
+    output_dir
+        Directory in which to write ``<source_stem>_sf_input.cif``.
+
+    Returns
+    -------
+    Path
+        Written mmCIF path.
+
+    Notes
+    -----
+    This function creates ``output_dir`` and writes a file.
     """
-
-    VALID_EXTENSIONS: ClassVar[frozenset[str]] = frozenset({".cif", ".mmcif"})
-    LEGACY_EXTENSIONS: ClassVar[frozenset[str]] = frozenset({".pdb", ".ent"})
-
-    filename: Path | str
-    mtzfile: str | None = None
-    unit_cell: gemmi.UnitCell | None = None
-    space_group: str | None = None
-    selection: str | None = None
-    occupancy_values: list[float] = field(default_factory=list)
-
-    def __post_init__(self) -> None:
-        ext = Path(self.filename).suffix.lower()
-        all_supported = self.VALID_EXTENSIONS | self.LEGACY_EXTENSIONS
-        if ext not in all_supported:
-            raise ValueError(
-                f"Invalid file extension '{ext}' for '{self.filename}'. "
-                f"Expected one of: {', '.join(sorted(all_supported))}"
-            )
-        if ext in self.LEGACY_EXTENSIONS:
-            logger.warning(
-                f"'{ext}' is a legacy PDB format and support may be removed in a future version. "
-                "Prefer .cif or .mmcif (mmCIF format)."
-            )
-        validate_occupancy_values(self.occupancy_values)
-
-    @classmethod
-    def from_dict(cls, row: dict[str, Any]) -> "BatchRowForMTZ":
-        """Create a BatchRowForMTZ from a CSV row dictionary.
-
-        CSV columns:
-        - filename (required): e.g. '1abc.cif', relative to base_dir
-        - mtzfile: e.g. 'output/1abc.mtz'
-        - unit_cell (six floats separated by ':'): e.g. '1.0:1.0:1.0:90.0:90.0:90.0'
-          in units of Angstroms and degrees
-        - space_group (number or Hermann-Mauguin string): e.g. '18' or 'P 21 21 2'
-        - occupancy_values (colon-separated floats summing to 1.0): e.g. '0.3:0.7'
-        - selection (PyMOL-like syntax): e.g. 'chain A'
-        """
-        if "filename" not in row:
-            raise KeyError("CSV is missing required 'filename' column")
-
-        unit_cell: gemmi.UnitCell | None = None
-        if row.get("unit_cell"):
-            parts = [float(v.strip()) for v in row["unit_cell"].split(":")]
-            if len(parts) != 6:
-                raise ValueError(
-                    f"unit_cell must be 6 colon-separated values (a:b:c:alpha:beta:gamma), "
-                    f"got {len(parts)}: {row['unit_cell']!r}"
-                )
-            unit_cell = gemmi.UnitCell(*parts)
-
-        space_group: str | None = None
-        if row.get("space_group"):
-            space_group = row["space_group"]
-            if space_group.isdigit():
-                space_group = gemmi.SpaceGroup(int(space_group)).hm
-
-        occupancy_values: list[float] = []
-        if row.get("occupancy_values"):
-            occupancy_values = [float(v.strip()) for v in row["occupancy_values"].split(":")]
-
-        return cls(
-            filename=row["filename"],
-            mtzfile=row.get("mtzfile") or None,
-            unit_cell=unit_cell,
-            space_group=space_group,
-            selection=row.get("selection") or None,
-            occupancy_values=occupancy_values,
-        )
+    output_path = output_dir / f"{structure_path.stem}_sf_input.cif"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    gemmi_structure.make_mmcif_document().write_file(str(output_path))
+    logger.info(f"Saved processed structure to {output_path}")
+    return output_path
 
 
 def _build_rs_dataset_for_one_label(
@@ -285,6 +218,7 @@ def _process_single_row(
     strip_ligands: bool = False,
     simulate_solvent_and_scale: bool = False,
     save_structure: bool = False,
+    b_factor: float | None = None,
 ) -> None:
     """Compute synthetic protein structure factors for a single structure.
     Assume no anomalous scattering.
@@ -323,7 +257,9 @@ def _process_single_row(
         protein set is written. One set contains F{label}/SIGF{label}/PHIF{label}.
     save_structure
         If True, save the processed structure (after selection and occupancy assignment)
-        as mmCIF to output_dir. Unit cell and space group are preserved. Default is False.
+        as mmCIF beside the MTZ. Unit cell and space group are preserved. Default is False.
+    b_factor
+        Optional isotropic B-factor assigned to every retained atom.
     """
     structure_path = base_dir / row.filename
     atom_array = load_structure_for_synthetic_reward(
@@ -334,6 +270,7 @@ def _process_single_row(
         strip_waters=strip_waters,
         strip_ligands=strip_ligands,
         selection=row.selection,
+        b_factor=b_factor,
     )
     if atom_array is None:
         return
@@ -356,12 +293,10 @@ def _process_single_row(
         )
         return
 
+    output_path = output_dir / (row.mtzfile or f"{structure_path.stem}_{resolution:.2f}A.mtz")
     if save_structure:
-        structure_output_path = output_dir / f"{structure_path.stem}_sf_input.cif"
-        structure_output_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            gemmi_structure.make_mmcif_document().write_file(str(structure_output_path))
-            logger.info(f"Saved processed structure to {structure_output_path}")
+            write_sf_input_structure(gemmi_structure, structure_path, output_path.parent)
         except Exception as e:
             logger.error(
                 f"Failed to save structure for {row.filename} ({type(e).__name__}): {e}\n"
@@ -403,8 +338,6 @@ def _process_single_row(
         )
         return
 
-    # Output MTZ file
-    output_path = output_dir / (row.mtzfile or f"{structure_path.stem}_{resolution:.2f}A.mtz")
     try:
         process_amplitudes_to_dataset(
             sfc,
@@ -419,35 +352,6 @@ def _process_single_row(
             f"({type(e).__name__}): {e}\n"
             f"{''.join(traceback.format_tb(e.__traceback__))}"
         )
-
-
-def load_batch_csv(csv_path: Path) -> list[BatchRowForMTZ]:
-    """Load and parse a CSV file for batch processing.
-
-    Parameters
-    ----------
-    csv_path
-        Path to CSV file with columns: filename (required), mtzfile, unit_cell,
-        space_group, selection, occupancy_values (all optional)
-
-    Returns
-    -------
-    list[BatchRowForMTZ]
-        List of validated batch processing rows
-
-    Raises
-    ------
-    KeyError
-        If the CSV is missing the required 'filename' column
-    """
-    rows = []
-    with open(csv_path) as f:
-        reader = csv.DictReader(f)
-        if reader.fieldnames is None or "filename" not in reader.fieldnames:
-            raise KeyError(f"CSV file '{csv_path}' is missing required 'filename' column")
-        for row in reader:
-            rows.append(BatchRowForMTZ.from_dict(row))
-    return rows
 
 
 def process_batch(
@@ -466,6 +370,7 @@ def process_batch(
     strip_ligands: bool = False,
     simulate_solvent_and_scale: bool = False,
     save_structure: bool = False,
+    b_factor: float | None = None,
 ) -> None:
     """Process multiple structures from a CSV file in batch mode.
 
@@ -501,6 +406,8 @@ def process_batch(
         If True, compute bulk solvent and scale factors in addition to F_protein.
     save_structure
         If True, save each processed structure as mmCIF to output_dir.
+    b_factor
+        Optional isotropic B-factor assigned to every retained atom.
     """
     from joblib import delayed, Parallel
 
@@ -524,6 +431,7 @@ def process_batch(
             strip_ligands=strip_ligands,
             simulate_solvent_and_scale=simulate_solvent_and_scale,
             save_structure=save_structure,
+            b_factor=b_factor,
         )
         for row in rows
     )
@@ -573,6 +481,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="High-resolution (dmin) limit in Angstroms",
+    )
+    sf_group.add_argument(
+        "--b-factor",
+        type=float,
+        default=None,
+        help="Override every retained atom's isotropic B-factor",
     )
     sf_group.add_argument(
         "--scattering-factor-mode",
@@ -675,6 +589,7 @@ def main() -> None:
             strip_ligands=args.remove_ligands,
             simulate_solvent_and_scale=args.simulate_solvent_and_scale,
             save_structure=args.save_structure,
+            b_factor=args.b_factor,
         )
     elif args.structure:
         row = BatchRowForMTZ.from_dict(
@@ -702,6 +617,7 @@ def main() -> None:
             strip_ligands=args.remove_ligands,
             simulate_solvent_and_scale=args.simulate_solvent_and_scale,
             save_structure=args.save_structure,
+            b_factor=args.b_factor,
         )
     else:
         logger.error("Please specify --structure or --batch-csv")
