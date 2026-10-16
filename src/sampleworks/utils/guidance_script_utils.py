@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import pickle
-import re
 import traceback
 from datetime import datetime
 from importlib.resources import files
@@ -86,49 +85,32 @@ except (ImportError, OSError):  # OSError can arise from a missing model_params 
 from sampleworks.utils.torch_utils import try_gpu
 
 
-_RCSB_ID_PATTERN = re.compile(r"^(pdb_[A-Za-z0-9]{8}|[0-9][A-Za-z0-9]{3})(?:_|$)")
 _RCSB_CACHE = Path("~/.sampleworks/rcsb").expanduser()
 
 
-def _resolve_rcsb_id(protein: str) -> str:
-    """Resolve a deposited structure ID from a suffixed protein name.
-
-    Parameters
-    ----------
-    protein : str
-        Legacy or extended PDB ID, optionally followed by underscore suffixes.
-
-    Returns
-    -------
-    str
-        Lowercase deposited structure ID.
-
-    Raises
-    ------
-    ValueError
-        If ``protein`` does not start with a valid deposited structure ID.
-    """
-    match = _RCSB_ID_PATTERN.match(protein)
-    if match is None:
-        raise ValueError(f"Cannot resolve an RCSB PDB ID from protein name {protein!r}")
-    return match.group(1).lower()
-
-
-def _load_reference_cif(protein: str) -> CIFFile:
+def _load_reference_cif(protein: str) -> CIFFile | None:
     """Fetch and parse one deposited CIF for output metadata carry.
 
     Parameters
     ----------
     protein : str
-        Protein name containing a deposited structure ID.
+        Protein name: an RCSB id followed only by occupancy tokens, as
+        ``rcsb_id_from_protein_name`` accepts (e.g. ``"1VME_0.5occA_0.5occB"``).
 
     Returns
     -------
-    CIFFile
-        Parsed deposited CIF from the local RCSB cache. The cache entry is populated
-        atomically, so concurrent first-time fetches cannot read a truncated file.
+    CIFFile | None
+        Parsed deposited CIF from the local RCSB cache, or ``None`` when the name is not an
+        RCSB id. The cache entry is populated atomically, so concurrent first-time fetches
+        cannot read a truncated file.
     """
-    rcsb_id = _resolve_rcsb_id(protein)
+    rcsb_id = rcsb_id_from_protein_name(protein)
+    if rcsb_id is None:
+        logger.warning(
+            f"Writing outputs without polymer entity categories: {protein!r} is not an RCSB id"
+        )
+        return None
+    rcsb_id = rcsb_id.lower()
     _RCSB_CACHE.mkdir(parents=True, exist_ok=True)
     cached_path = _RCSB_CACHE / f"{rcsb_id}.cif"
     if not cached_path.is_file():

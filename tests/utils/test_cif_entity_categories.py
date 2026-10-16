@@ -210,29 +210,48 @@ def test_carry_falls_back_to_alignment_for_renumbered_output():
 
 
 def test_carry_accepts_met_for_deposited_selenomethionine():
-    """A model that writes MET where the deposit has MSE still maps, and the deposit is kept."""
+    """A model that writes MET where the deposit has MSE maps, and MET joins the sequence.
+
+    The deposit's MSE row is kept and the modeled MET is added beside it as a heterogeneity
+    row, so ``atom_site`` keeps its ``entity_poly_seq`` parent and ``chem_comp`` lists both.
+    """
     output = _output([5, 6, 7])
     atom_site = output.block["atom_site"]
     names = atom_site["label_comp_id"].as_array(str)
     atom_site["label_comp_id"] = np.where(names == "MSE", "MET", names)
 
-    carry_polymer_entity_categories(output, _reference())
+    carry_polymer_entity_categories(
+        output, _reference(chem_comp_ids=["CYS", "HIS", "LYR", "MET", "MSE"])
+    )
 
-    assert "MSE" in _column(output, "entity_poly_seq", "mon_id")
+    rows = list(
+        zip(
+            _column(output, "entity_poly_seq", "num"),
+            _column(output, "entity_poly_seq", "mon_id"),
+            _column(output, "entity_poly_seq", "hetero"),
+            strict=True,
+        )
+    )
+    assert rows[5:9] == [("6", "HIS", "n"), ("7", "MSE", "y"), ("7", "MET", "y"), ("8", "CYS", "n")]
+    assert len(rows) == len(_SEQUENCE) + 2  # the deposit's CSO hetero row plus the new MET row
     assert _column(output, "atom_site", "label_seq_id") == ["6", "7", "8"] * 2
+    assert sorted(_column(output, "chem_comp", "id")) == ["CYS", "HIS", "LYR", "MET", "MSE"]
 
 
-def test_carry_copies_deposited_chem_comp_rows():
-    """Carry the deposited chemical-component rows the output uses."""
+def test_carry_copies_deposited_chem_comp_rows(caplog: pytest.LogCaptureFixture):
+    """Carry the deposited chem_comp rows the output names; warn about the ones it lacks."""
     output = _output([1, 2, 8])
 
     categories = carry_polymer_entity_categories(
-        output, _reference(chem_comp_ids=["GLY", "HIS", "LYR", "TRP"])
+        output, _reference(chem_comp_ids=["GLY", "HIS", "TRP"])
     )
 
     assert categories[-1] == "chem_comp"
-    assert sorted(_column(output, "chem_comp", "id")) == ["GLY", "HIS", "LYR"]
+    assert sorted(_column(output, "chem_comp", "id")) == ["GLY", "HIS"]
     assert all(name.startswith("DEPOSITED ") for name in _column(output, "chem_comp", "name"))
+    assert "Reference CIF lacks chem_comp rows for" in caplog.text
+    assert "'LYR'" in caplog.text
+    assert _column(output, "atom_site", "label_seq_id") == ["2", "3", "9"] * 2
 
 
 def test_carry_keeps_polymer_beside_non_polymer():

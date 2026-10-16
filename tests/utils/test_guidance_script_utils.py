@@ -12,7 +12,6 @@ from biotite.structure import AtomArrayStack
 from biotite.structure.io.pdbx.cif import CIFFile
 from sampleworks.utils.guidance_script_arguments import GuidanceConfig, JobResult
 from sampleworks.utils.guidance_script_utils import (
-    _resolve_rcsb_id,
     _three_state_resolver,
     _write_job_metadata,
     get_model_and_device,
@@ -104,23 +103,15 @@ def test_save_everything_uses_model_atom_array_for_mismatch(
     assert "without polymer entity categories" in caplog.text
 
 
-@pytest.mark.parametrize(
-    ("protein", "expected"),
-    [
-        ("1vme", "1vme"),
-        ("1VME_0.5occA_0.5occB", "1vme"),
-        ("pdb_00004HHB_run_2", "pdb_00004hhb"),
-    ],
-)
-def test_resolve_rcsb_id_handles_run_suffixes(protein: str, expected: str):
-    """Resolve legacy and extended deposited IDs without consuming run suffixes."""
-    assert _resolve_rcsb_id(protein) == expected
+def test_load_reference_cif_returns_none_for_non_deposited_name(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+):
+    """A name that is not an RCSB id loads nothing, warns, and never touches the cache."""
+    monkeypatch.setattr(guidance_script_utils, "_RCSB_CACHE", tmp_path / "rcsb-cache")
 
-
-def test_resolve_rcsb_id_rejects_non_deposited_name():
-    """Reject names that cannot identify a deposited RCSB structure."""
-    with pytest.raises(ValueError, match="Cannot resolve"):
-        _resolve_rcsb_id("example_run")
+    assert guidance_script_utils._load_reference_cif("example_run") is None
+    assert "without polymer entity categories" in caplog.text
+    assert not (tmp_path / "rcsb-cache").exists()
 
 
 def test_load_reference_cif_caches_atomically(
@@ -158,6 +149,7 @@ def test_load_reference_cif_caches_atomically(
     first = guidance_script_utils._load_reference_cif("1vme_0.5occA")
     second = guidance_script_utils._load_reference_cif("1VME_1.0occB")
 
+    assert first is not None and second is not None
     assert len(fetch_calls) == 1
     # The download never lands in the shared cache directory itself, so a concurrent
     # reader cannot observe a partially written entry.

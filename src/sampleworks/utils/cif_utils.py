@@ -25,10 +25,24 @@ from sampleworks.utils.atom_array_utils import (
 # alphanumerics and start with a digit, which excludes folder names such as `TEST`.
 RCSB_ID_PATTERN = re.compile(r"pdb_[A-Za-z0-9]{8}|[0-9][A-Za-z0-9]{3}")
 
-_POLYMER_ENTITY_CATEGORIES = ("entity", "entity_poly", "entity_poly_seq")
+# mmCIF category names used by the entity carry, spelled once: a mistyped key would silently
+# skip a category instead of raising.
+_ATOM_SITE = "atom_site"
+_ENTITY = "entity"
+_ENTITY_POLY = "entity_poly"
+_ENTITY_POLY_SEQ = "entity_poly_seq"
+_STRUCT_ASYM = "struct_asym"
+_PDBX_POLY_SEQ_SCHEME = "pdbx_poly_seq_scheme"
+_CHEM_COMP = "chem_comp"
+# entity_poly_seq.hetero marks positions with more than one monomer; absent, it defaults to no.
+_HETERO = "hetero"
+_HETERO_YES = "y"
+_HETERO_NO = "n"
+
+_POLYMER_ENTITY_CATEGORIES = (_ENTITY, _ENTITY_POLY, _ENTITY_POLY_SEQ)
 # The author-number lookup additionally needs these; without them the carry falls back to
 # sequence alignment.
-_SCHEME_CATEGORIES = ("struct_asym", "pdbx_poly_seq_scheme")
+_SCHEME_CATEGORIES = (_STRUCT_ASYM, _PDBX_POLY_SEQ_SCHEME)
 
 
 def find_altloc_selections(
@@ -282,7 +296,7 @@ def renumber_atom_site_ids(cif_file: CIFFile) -> None:
     cif_file : CIFFile
         Single-block CIF file whose ``atom_site`` category is modified in place.
     """
-    category = cif_file.block["atom_site"]
+    category = cif_file.block[_ATOM_SITE]
     category["id"] = np.arange(1, category.row_count + 1)
 
 
@@ -327,6 +341,14 @@ def _canonical_monomer(name: str) -> str:
     return _closest_canonical_amino_acid(name) or name
 
 
+# Dynamic-programming key: (modeled residues placed so far, whether the path is currently
+# skipping reference residues).
+_DPKey = tuple[int, bool]
+# Dynamic-programming state: (deletion runs so far, matched reference indices or None once the
+# path is ambiguous, number of equally optimal paths capped at 2).
+_DPState = tuple[int, tuple[int, ...] | None, int]
+
+
 def _unique_subsequence_indices(reference: list[str], modeled: list[str]) -> list[int] | None:
     """Find a unique ordered embedding with the fewest deletion runs.
 
@@ -347,13 +369,11 @@ def _unique_subsequence_indices(reference: list[str], modeled: list[str]) -> lis
     """
     reference = [_canonical_monomer(name) for name in reference]
     modeled = [_canonical_monomer(name) for name in modeled]
-    states: dict[tuple[int, bool], tuple[int, tuple[int, ...] | None, int]] = {
-        (0, False): (0, (), 1)
-    }
+    states: dict[_DPKey, _DPState] = {(0, False): (0, (), 1)}
 
     def update(
-        target: dict[tuple[int, bool], tuple[int, tuple[int, ...] | None, int]],
-        key: tuple[int, bool],
+        target: dict[_DPKey, _DPState],
+        key: _DPKey,
         cost: int,
         path: tuple[int, ...] | None,
         count: int,
@@ -364,7 +384,7 @@ def _unique_subsequence_indices(reference: list[str], modeled: list[str]) -> lis
         ----------
         target : dict
             Dynamic-programming states for the next reference residue.
-        key : tuple[int, bool]
+        key : _DPKey
             Modeled position and whether the path is deleting reference residues.
         cost : int
             Number of deletion runs in the candidate path.
@@ -379,8 +399,12 @@ def _unique_subsequence_indices(reference: list[str], modeled: list[str]) -> lis
         elif cost == current[0]:
             target[key] = (cost, None, min(2, current[2] + count))
 
+    # One pass per reference residue. Every state either skips it (cost +1 when that starts a
+    # new deletion run) or, when the names agree, matches it to the next modeled residue. A
+    # state reached twice at the same cost loses its path and keeps a count, so a non-unique
+    # optimum is reported as ambiguous instead of picked arbitrarily.
     for reference_index, reference_name in enumerate(reference):
-        next_states: dict[tuple[int, bool], tuple[int, tuple[int, ...] | None, int]] = {}
+        next_states: dict[_DPKey, _DPState] = {}
         for (modeled_index, deleting), (cost, path, count) in states.items():
             update(next_states, (modeled_index, True), cost + (not deleting), path, count)
             if modeled_index < len(modeled) and reference_name == modeled[modeled_index]:
@@ -420,13 +444,13 @@ def _matching_entity(reference_block: CIFBlock, residue_names: list[str]) -> tup
     """
     if not residue_names:
         raise ValueError("Output entity has no polymer residues")
-    sequence = reference_block["entity_poly_seq"]
+    sequence = reference_block[_ENTITY_POLY_SEQ]
     sequence_ids = np.asarray(sequence["entity_id"].as_array(str))
     sequence_nums = np.asarray(sequence["num"].as_array(str))
     sequence_names = np.asarray(sequence["mon_id"].as_array(str))
     matches: list[tuple[str, list[str]]] = []
     ambiguous: list[str] = []
-    for entity_id in reference_block["entity_poly"]["entity_id"].as_array(str):
+    for entity_id in reference_block[_ENTITY_POLY]["entity_id"].as_array(str):
         rows = np.flatnonzero(sequence_ids == entity_id)
         # Microheterogeneity lists several monomers at one num (e.g. CYS/CSO); keep the first.
         rows = rows[np.unique(sequence_nums[rows], return_index=True)[1]]
@@ -588,7 +612,7 @@ def _output_polymer_entities(
     ValueError
         If no entity has polymer residues, or an entity has conflicting residue names.
     """
-    atom_site = output_block["atom_site"]
+    atom_site = output_block[_ATOM_SITE]
     entity_ids = atom_site["label_entity_id"].as_array(str)
     chain_ids = atom_site["label_asym_id"].as_array(str)
     sequence_ids = atom_site["label_seq_id"].as_array(str)
@@ -712,7 +736,7 @@ def _labels_from_author_numbering(
     missing = [name for name in _SCHEME_CATEGORIES if name not in reference_block]
     if missing:
         raise ValueError(f"Reference CIF lacks {missing}")
-    scheme = reference_block["pdbx_poly_seq_scheme"]
+    scheme = reference_block[_PDBX_POLY_SEQ_SCHEME]
     scheme_keys = zip(
         scheme["pdb_strand_id"].as_array(str),
         scheme["pdb_seq_num"].as_array(str),
@@ -729,7 +753,7 @@ def _labels_from_author_numbering(
         lookup.setdefault(key, label)  # microheterogeneity rows (e.g. CYS/CSO) share a seq_id
         monomers.setdefault(key, set()).add(_canonical_monomer(monomer))
 
-    atom_site = output_block["atom_site"]
+    atom_site = output_block[_ATOM_SITE]
     residue_keys = list(
         zip(
             atom_site["auth_asym_id"].as_array(str),
@@ -764,14 +788,14 @@ def _labels_from_author_numbering(
             [_select_category_rows(reference_block[name], column, value) for value in sorted(keep)]
         )
         for name, column, keep in (
-            ("entity", "id", entity_ids),
-            ("entity_poly", "entity_id", entity_ids),
-            ("entity_poly_seq", "entity_id", entity_ids),
-            ("struct_asym", "id", asym_ids),
-            ("pdbx_poly_seq_scheme", "asym_id", asym_ids),
+            (_ENTITY, "id", entity_ids),
+            (_ENTITY_POLY, "entity_id", entity_ids),
+            (_ENTITY_POLY_SEQ, "entity_id", entity_ids),
+            (_STRUCT_ASYM, "id", asym_ids),
+            (_PDBX_POLY_SEQ_SCHEME, "asym_id", asym_ids),
         )
     }
-    carried_scheme = categories["pdbx_poly_seq_scheme"]
+    carried_scheme = categories[_PDBX_POLY_SEQ_SCHEME]
     modeled = {(asym_id, seq_id) for asym_id, seq_id, _ in polymer_labels}
     has_coords = [
         row in modeled
@@ -821,7 +845,7 @@ def _labels_from_sequence_alignment(
             remap[(output_id, str(number))] = (reference_id, num)
         chain_entities.update(dict.fromkeys(chains, reference_id))
 
-    atom_site = output_block["atom_site"]
+    atom_site = output_block[_ATOM_SITE]
     labels: list[_Label | None] = []
     for chain, entity, seq in zip(
         atom_site["label_asym_id"].as_array(str),
@@ -838,16 +862,75 @@ def _labels_from_sequence_alignment(
             [_select_category_rows(reference_block[name], column, value) for value in entity_ids]
         )
         for name, column in (
-            ("entity", "id"),
-            ("entity_poly", "entity_id"),
-            ("entity_poly_seq", "entity_id"),
+            (_ENTITY, "id"),
+            (_ENTITY_POLY, "entity_id"),
+            (_ENTITY_POLY_SEQ, "entity_id"),
         )
     }
-    categories["struct_asym"] = {
+    categories[_STRUCT_ASYM] = {
         "id": sorted(chain_entities),
         "entity_id": [chain_entities[chain] for chain in sorted(chain_entities)],
     }
     return labels, categories
+
+
+def _add_modeled_monomers(
+    entity_poly_seq: dict[str, list[str]],
+    atom_site: CIFCategory,
+    labels: list[_Label | None],
+) -> None:
+    """Add each modeled monomer that differs from the deposit's as a heterogeneity row.
+
+    The alignment accepts a canonical parent for a modified residue (MET for MSE, CYS for
+    CSO), but ``atom_site`` is a child of ``entity_poly_seq`` on ``(entity_id, num,
+    mon_id)``, so a modeled MET at a deposited MSE position has no parent row. The mmCIF
+    dictionary's form for two monomers at one position (microheterogeneity, e.g. a CYS/CSO
+    site) is two rows sharing ``num`` with ``_entity_poly_seq.hetero`` set, and that is what
+    is written: the deposit's row is kept, its flag set, and the modeled name inserted after
+    it. On 1VME position 13::
+
+        entity_id  num  mon_id  hetero          entity_id  num  mon_id  hetero
+        1          13   MSE     n        ->     1          13   MSE     y
+                                                1          13   MET     y
+
+    Side effect: ``entity_poly_seq`` is rewritten in place; a ``hetero`` column is created
+    when the deposit has none. Nothing changes when every modeled name is the deposit's.
+
+    Parameters
+    ----------
+    entity_poly_seq : dict[str, list[str]]
+        Carried ``entity_poly_seq`` columns.
+    atom_site : CIFCategory
+        Output ``atom_site``.
+    labels : list[_Label | None]
+        Deposit label per ``atom_site`` row, ``None`` for rows outside the polymer entities.
+    """
+    keys = list(zip(entity_poly_seq["entity_id"], entity_poly_seq["num"], strict=True))
+    deposited = set(zip(keys, entity_poly_seq["mon_id"], strict=True))
+    modeled = {
+        ((label[2], label[1]), str(name))
+        for label, name in zip(labels, atom_site["label_comp_id"].as_array(str), strict=True)
+        if label is not None
+    }
+    added = sorted(modeled - deposited)
+    if not added:
+        return
+    if _HETERO not in entity_poly_seq:
+        entity_poly_seq[_HETERO] = [_HETERO_NO] * len(keys)
+    last_row = {key: index for index, key in enumerate(keys)}  # the later row wins
+    source_rows = np.array([last_row[key] for key, _ in added])
+    hetero_keys = {key for key, _ in added}
+    is_hetero = np.array([key in hetero_keys for key in keys])
+    for column, values in entity_poly_seq.items():
+        column_values = np.asarray(values, dtype=object)
+        if column == _HETERO:
+            column_values = np.where(is_hetero, _HETERO_YES, column_values)
+            new_values = np.full(len(added), _HETERO_YES, dtype=object)
+        elif column == "mon_id":
+            new_values = np.array([mon_id for _, mon_id in added], dtype=object)
+        else:
+            new_values = column_values[source_rows]
+        entity_poly_seq[column] = list(np.insert(column_values, source_rows + 1, new_values))
 
 
 def carry_polymer_entity_categories(
@@ -862,8 +945,11 @@ def carry_polymer_entity_categories(
     from that row, and the deposit's polymer categories are carried unchanged for the chains
     present. When the output does not keep the deposit's author numbering, each output entity's
     sequence is aligned to the deposited ones instead and mapped onto the deposited
-    ``entity_poly_seq`` numbering. The output is modified only after every residue has been
-    matched and validated.
+    ``entity_poly_seq`` numbering. Where the model writes the canonical parent of a deposited
+    modified residue (MET for MSE), the modeled monomer is added to ``entity_poly_seq`` as a
+    heterogeneity row beside the deposit's, and ``chem_comp`` rows are carried for every
+    monomer either names (a row the deposit lacks is warned about, not fatal). The output is
+    modified only after every residue has been matched and validated.
 
     Parameters
     ----------
@@ -901,16 +987,25 @@ def carry_polymer_entity_categories(
                 f"author lookup: {lookup_error}; sequence alignment: {alignment_error}"
             ) from alignment_error
 
-    atom_site = output_block["atom_site"]
-    if "chem_comp" in reference_block:
-        modeled_components = set(atom_site["label_comp_id"].as_array(str))
-        chem_comp = reference_block["chem_comp"]
+    atom_site = output_block[_ATOM_SITE]
+    _add_modeled_monomers(categories[_ENTITY_POLY_SEQ], atom_site, labels)
+    if _CHEM_COMP in reference_block:
+        # Every monomer named by atom_site or by the carried sequence needs a chem_comp parent.
+        components = set(atom_site["label_comp_id"].as_array(str)) | set(
+            categories[_ENTITY_POLY_SEQ]["mon_id"]
+        )
+        chem_comp = reference_block[_CHEM_COMP]
         reference_components = np.asarray(chem_comp["id"].as_array(str))
-        component_mask = np.isin(reference_components, list(modeled_components))
-        missing_components = modeled_components - set(reference_components[component_mask])
+        component_mask = np.isin(reference_components, list(components))
+        missing_components = sorted(
+            map(str, components - set(reference_components[component_mask]))
+        )
         if missing_components:
-            raise ValueError(f"Reference CIF lacks chem_comp rows for {sorted(missing_components)}")
-        categories["chem_comp"] = {
+            logger.warning(
+                f"Reference CIF lacks chem_comp rows for {missing_components}; "
+                "carrying the rows it has"
+            )
+        categories[_CHEM_COMP] = {
             column: list(np.asarray(chem_comp[column].as_array(str))[component_mask])
             for column in chem_comp
         }
