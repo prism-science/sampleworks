@@ -8,9 +8,7 @@ from typing import Any, cast, overload
 import numpy as np
 import torch
 from atomworks.io.transforms.atom_array import ensure_atom_array_stack
-from atomworks.io.utils.ccd import ChainType, UNKNOWN_AA
 from atomworks.io.utils.io_utils import load_any
-from atomworks.io.utils.sequence import get_1_from_3_letter_code, get_3_from_1_letter_code
 from biotite.structure import AtomArray, AtomArrayStack, from_template
 from loguru import logger
 
@@ -18,7 +16,11 @@ from sampleworks.core.rewards.protocol import RewardInputs
 from sampleworks.eval.eval_dataclasses import ProteinConfig
 from sampleworks.models.protocol import GenerativeModelInput
 from sampleworks.utils import atom_array_utils
-from sampleworks.utils.atom_array_utils import apply_selection, BLANK_ALTLOC_IDS
+from sampleworks.utils.atom_array_utils import (
+    _closest_canonical_amino_acid,
+    apply_selection,
+    BLANK_ALTLOC_IDS,
+)
 from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.framework_utils import match_batch
 
@@ -395,29 +397,6 @@ def get_asym_unit_from_structure(
     if not isinstance(atom_array, (AtomArray, AtomArrayStack)):
         raise TypeError(f"Unexpected atom array type: {type(atom_array)}")
     return atom_array
-
-
-def _closest_canonical_amino_acid(res_name: str) -> str | None:
-    """Map a (possibly modified) residue name to its canonical parent amino acid.
-
-    Uses atomworks' mapping, e.g. ``CSO -> CYS``, ``MSE -> MET``. Standard amino
-    acids map to themselves and "residues" with no amino-acid (ligands, waters) return ``None``.
-
-    Parameters
-    ----------
-    res_name : str
-        Three letter amino acid name.
-
-    Returns
-    -------
-    str | None
-        Canonical three letter amino acid name, or ``None`` if HETATM.
-    """
-    one_letter = get_1_from_3_letter_code(
-        res_name, ChainType.POLYPEPTIDE_L, use_closest_canonical=True
-    )
-    parent = get_3_from_1_letter_code(one_letter, ChainType.POLYPEPTIDE_L)
-    return None if parent == UNKNOWN_AA else parent
 
 
 def canonicalize_mixed_altloc_residues(

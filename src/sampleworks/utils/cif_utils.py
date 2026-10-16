@@ -8,11 +8,13 @@ from typing import Any
 
 import numpy as np
 from atomworks.io.utils.io_utils import load_any
+from biotite.sequence import ProteinSequence
 from biotite.structure import AtomArrayStack
-from biotite.structure.io.pdbx.cif import CIFCategory, CIFFile
+from biotite.structure.io.pdbx.cif import CIFBlock, CIFCategory, CIFFile
 from loguru import logger
 
 from sampleworks.utils.atom_array_utils import (
+    _closest_canonical_amino_acid,
     find_all_altloc_ids,
     save_structure_to_cif,
     select_altloc,
@@ -22,6 +24,25 @@ from sampleworks.utils.atom_array_utils import (
 # Extended PDB IDs use `pdb_` plus eight alphanumerics. Legacy IDs have four
 # alphanumerics and start with a digit, which excludes folder names such as `TEST`.
 RCSB_ID_PATTERN = re.compile(r"pdb_[A-Za-z0-9]{8}|[0-9][A-Za-z0-9]{3}")
+
+# mmCIF category names used by the entity carry, spelled once: a mistyped key would silently
+# skip a category instead of raising.
+_ATOM_SITE = "atom_site"
+_ENTITY = "entity"
+_ENTITY_POLY = "entity_poly"
+_ENTITY_POLY_SEQ = "entity_poly_seq"
+_STRUCT_ASYM = "struct_asym"
+_PDBX_POLY_SEQ_SCHEME = "pdbx_poly_seq_scheme"
+_CHEM_COMP = "chem_comp"
+# entity_poly_seq.hetero marks positions with more than one monomer; absent, it defaults to no.
+_HETERO = "hetero"
+_HETERO_YES = "y"
+_HETERO_NO = "n"
+
+_POLYMER_ENTITY_CATEGORIES = (_ENTITY, _ENTITY_POLY, _ENTITY_POLY_SEQ)
+# The author-number lookup additionally needs these; without them the carry falls back to
+# sequence alignment.
+_SCHEME_CATEGORIES = (_STRUCT_ASYM, _PDBX_POLY_SEQ_SCHEME)
 
 
 def find_altloc_selections(
@@ -263,6 +284,260 @@ def resolve_mixed_hetatm_atom_altlocs(cif_path: Path | str) -> Path:
     return tmp_path
 
 
+def renumber_atom_site_ids(cif_file: CIFFile) -> None:
+    """Renumber ``_atom_site.id`` values across all models in place.
+
+    ``set_structure()`` copies and tiles an ``atom_id`` annotation for multi-model
+    structures, which can produce duplicate category keys. Call this function after
+    ``set_structure()`` on a single-block CIF file.
+
+    Parameters
+    ----------
+    cif_file : CIFFile
+        Single-block CIF file whose ``atom_site`` category is modified in place.
+    """
+    category = cif_file.block[_ATOM_SITE]
+    category["id"] = np.arange(1, category.row_count + 1)
+
+
+def _single_block(cif_file: CIFFile) -> CIFBlock:
+    """Return the sole data block from a CIF file.
+
+    Parameters
+    ----------
+    cif_file : CIFFile
+        CIF file expected to contain exactly one data block.
+
+    Returns
+    -------
+    CIFBlock
+        The sole data block.
+
+    Raises
+    ------
+    ValueError
+        If the CIF file does not contain exactly one data block.
+    """
+    block_names = list(cif_file.keys())
+    if len(block_names) != 1:
+        raise ValueError(f"Expected one CIF block, found {len(block_names)}")
+    return cif_file[block_names[0]]
+
+
+def _canonical_monomer(name: str) -> str:
+    """Return the canonical name used for conservative sequence matching.
+
+    Parameters
+    ----------
+    name : str
+        Three-letter monomer name.
+
+    Returns
+    -------
+    str
+        Canonical parent amino acid (e.g. ``MSE -> MET``, ``CSO -> CYS``), or ``name`` itself
+        when it is not an amino acid.
+    """
+    return _closest_canonical_amino_acid(name) or name
+
+
+# Dynamic-programming key: (modeled residues placed so far, whether the path is currently
+# skipping reference residues).
+_DPKey = tuple[int, bool]
+# Dynamic-programming state: (deletion runs so far, matched reference indices or None once the
+# path is ambiguous, number of equally optimal paths capped at 2, first reference index at
+# which equally optimal paths disagree or None while the path is unique).
+_DPState = tuple[int, tuple[int, ...] | None, int, int | None]
+
+
+def _first_disagreement(first: tuple[int, ...], second: tuple[int, ...]) -> int | None:
+    """Return the smaller reference index at the first position where two paths differ."""
+    return next((min(a, b) for a, b in zip(first, second, strict=True) if a != b), None)
+
+
+def _unique_subsequence_indices(
+    reference: list[str], modeled: list[str]
+) -> tuple[list[int] | None, int | None]:
+    """Find a unique ordered embedding with the fewest deletion runs.
+
+    Cost counts runs of consecutive skipped reference residues, not residues, so a single
+    gap of three costs 1 while two separate one-residue gaps cost 2.
+
+    Parameters
+    ----------
+    reference : list[str]
+        Deposited monomer names.
+    modeled : list[str]
+        Modeled monomer names.
+
+    Returns
+    -------
+    tuple[list[int] | None, int | None]
+        ``(indices, None)`` with the reference index of each modeled residue when the optimal
+        embedding is unique; ``(None, index)`` when several embeddings are equally good, with
+        the first reference index at which they disagree; ``(None, None)`` when there is no
+        embedding at all.
+    """
+    reference = [_canonical_monomer(name) for name in reference]
+    modeled = [_canonical_monomer(name) for name in modeled]
+    states: dict[_DPKey, _DPState] = {(0, False): (0, (), 1, None)}
+
+    def update(
+        target: dict[_DPKey, _DPState],
+        key: _DPKey,
+        cost: int,
+        path: tuple[int, ...] | None,
+        count: int,
+        ambiguous_at: int | None,
+    ) -> None:
+        """Keep minimum-cost paths and mark equally optimal alternatives.
+
+        Parameters
+        ----------
+        target : dict
+            Dynamic-programming states for the next reference residue.
+        key : _DPKey
+            Modeled position and whether the path is deleting reference residues.
+        cost : int
+            Number of deletion runs in the candidate path.
+        path : tuple[int, ...] | None
+            Matched reference indices, or ``None`` for an ambiguous path.
+        count : int
+            Number of equally optimal paths, capped at two.
+        ambiguous_at : int | None
+            Where the candidate path first became ambiguous, or ``None``.
+        """
+        current = target.get(key)
+        if current is None or cost < current[0]:
+            target[key] = (cost, path, count, ambiguous_at)
+        elif cost == current[0]:
+            # Two equally good paths meet: remember the earliest residue they disagree on.
+            positions = [current[3], ambiguous_at]
+            if current[1] is not None and path is not None:
+                positions.append(_first_disagreement(current[1], path))
+            recorded = [position for position in positions if position is not None]
+            target[key] = (cost, None, min(2, current[2] + count), min(recorded, default=None))
+
+    # One pass per reference residue. Every state either skips it (cost +1 when that starts a
+    # new deletion run) or, when the names agree, matches it to the next modeled residue. A
+    # state reached twice at the same cost loses its path and keeps a count, so a non-unique
+    # optimum is reported as ambiguous instead of picked arbitrarily.
+    for reference_index, reference_name in enumerate(reference):
+        next_states: dict[_DPKey, _DPState] = {}
+        for (modeled_index, deleting), (cost, path, count, ambiguous_at) in states.items():
+            update(
+                next_states, (modeled_index, True), cost + (not deleting), path, count, ambiguous_at
+            )
+            if modeled_index < len(modeled) and reference_name == modeled[modeled_index]:
+                matched_path = None if path is None else (*path, reference_index)
+                update(
+                    next_states, (modeled_index + 1, False), cost, matched_path, count, ambiguous_at
+                )
+        states = next_states
+
+    candidates = [value for (index, _), value in states.items() if index == len(modeled)]
+    if not candidates:
+        return None, None
+    minimum_cost = min(value[0] for value in candidates)
+    optimal = [value for value in candidates if value[0] == minimum_cost]
+    if sum(value[2] for value in optimal) == 1 and optimal[0][1] is not None:
+        return list(optimal[0][1]), None
+    # Several optimal embeddings: the earliest recorded disagreement, or, when they survive as
+    # distinct unique paths, the first index on which those paths differ.
+    positions: list[int | None] = [value[3] for value in optimal]
+    paths = [value[1] for value in optimal if value[1] is not None]
+    if len(paths) > 1:
+        positions.append(_first_disagreement(paths[0], paths[-1]))
+    recorded = [position for position in positions if position is not None]
+    return None, min(recorded, default=0)
+
+
+def _matching_entity(reference_block: CIFBlock, residue_names: list[str]) -> tuple[str, list[str]]:
+    """Find one deposited entity with a unique ordered modeled sequence match.
+
+    Parameters
+    ----------
+    reference_block : CIFBlock
+        Deposited CIF block containing polymer entity categories.
+    residue_names : list[str]
+        Output residue names in ``label_seq_id`` order.
+
+    Returns
+    -------
+    tuple[str, list[str]]
+        Reference entity ID and the deposited ``entity_poly_seq.num`` of each output residue.
+
+    Raises
+    ------
+    ValueError
+        If the output is empty, unmatched, or ambiguously matched.
+    """
+    if not residue_names:
+        raise ValueError("Output entity has no polymer residues")
+    sequence = reference_block[_ENTITY_POLY_SEQ]
+    sequence_ids = np.asarray(sequence["entity_id"].as_array(str))
+    sequence_nums = np.asarray(sequence["num"].as_array(str))
+    sequence_names = np.asarray(sequence["mon_id"].as_array(str))
+    matches: list[tuple[str, list[str]]] = []
+    ambiguous: list[str] = []  # "entity 1 around deposited residue 158 (ALA)"
+    for entity_id in reference_block[_ENTITY_POLY]["entity_id"].as_array(str):
+        rows = np.flatnonzero(sequence_ids == entity_id)
+        # Microheterogeneity lists several monomers at one num (e.g. CYS/CSO); keep the first.
+        rows = rows[np.unique(sequence_nums[rows], return_index=True)[1]]
+        rows = rows[np.argsort(sequence_nums[rows].astype(int), kind="stable")]
+        reference_names = list(sequence_names[rows])
+        indices, ambiguous_at = _unique_subsequence_indices(reference_names, residue_names)
+        if indices is not None:
+            matches.append((str(entity_id), list(sequence_nums[rows][indices])))
+        elif ambiguous_at is not None:
+            ambiguous.append(
+                f"entity {entity_id} around deposited residue "
+                f"{sequence_nums[rows][ambiguous_at]} ({reference_names[ambiguous_at]})"
+            )
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        entity_ids = [entity_id for entity_id, _ in matches]
+        raise ValueError(f"Modeled sequence matches several deposited entities: {entity_ids}")
+    if ambiguous:
+        raise ValueError(
+            "Modeled sequence fits the deposited sequence in several equally good ways "
+            f"({'; '.join(ambiguous)}): a gap inside a run of repeated residues cannot be "
+            "placed from the sequence alone"
+        )
+    raise ValueError("No deposited entity contains the modeled sequence")
+
+
+def _select_category_rows(
+    category: CIFCategory,
+    column_name: str,
+    value: str,
+) -> dict[str, list[str]]:
+    """Select category rows whose key column equals a value.
+
+    Parameters
+    ----------
+    category : CIFCategory
+        Source CIF category.
+    column_name : str
+        Name of the column used to select rows.
+    value : str
+        Value to match.
+
+    Returns
+    -------
+    dict[str, list[str]]
+        Selected rows represented as column lists.
+    """
+    mask = np.asarray(category[column_name].as_array(str)) == value
+    return {name: list(np.asarray(category[name].as_array(str))[mask]) for name in category}
+
+
+def _blank_to_empty(values: np.ndarray) -> np.ndarray:
+    """Map CIF null markers (``.``/``?``) to empty strings so insertion codes compare equal."""
+    return np.where(np.isin(values, [".", "?"]), "", values)
+
+
 def add_category_to_cif(
     ciffile: CIFFile,
     data: dict[str, Any],
@@ -346,3 +621,433 @@ def _normalize_nulls(value: Any) -> Any:
     if isinstance(value, Iterable) and not isinstance(value, str | bytes):
         return ["?" if item is None else item for item in value]
     return "?" if value is None else value
+
+
+def _output_polymer_entities(
+    output_block: CIFBlock,
+) -> list[tuple[str, set[str], list[int], list[str]]]:
+    """Extract each output entity's unique polymer residue sequence.
+
+    Parameters
+    ----------
+    output_block : CIFBlock
+        Output CIF block containing ``atom_site``.
+
+    Returns
+    -------
+    list[tuple[str, set[str], list[int], list[str]]]
+        Entity ID, label chain IDs, residue numbers, and residue names. Entities without
+        polymer residues (ligands, waters) are omitted.
+
+    Raises
+    ------
+    ValueError
+        If no entity has polymer residues, or an entity has conflicting residue names.
+    """
+    atom_site = output_block[_ATOM_SITE]
+    entity_ids = atom_site["label_entity_id"].as_array(str)
+    chain_ids = atom_site["label_asym_id"].as_array(str)
+    sequence_ids = atom_site["label_seq_id"].as_array(str)
+    residue_names = atom_site["label_comp_id"].as_array(str)
+    entities: list[tuple[str, set[str], list[int], list[str]]] = []
+    for entity_id in dict.fromkeys(entity_ids):
+        residues: dict[int, str] = {}
+        chains: set[str] = set()
+        for row_entity, chain_id, sequence_id, residue_name in zip(
+            entity_ids, chain_ids, sequence_ids, residue_names, strict=True
+        ):
+            if row_entity != entity_id:
+                continue
+            chains.add(str(chain_id))
+            if sequence_id in (".", "?", ""):
+                continue
+            number = int(sequence_id)
+            if number in residues and residues[number] != residue_name:
+                raise ValueError(
+                    f"Output entity {entity_id} has conflicting names for residue {number}"
+                )
+            residues[number] = str(residue_name)
+        numbers = sorted(residues)
+        if not numbers:
+            # Ligands and waters have no entity_poly* rows to carry; the polymer entities
+            # alongside them still do.
+            continue
+        entities.append((str(entity_id), chains, numbers, [residues[number] for number in numbers]))
+    if not entities:
+        raise ValueError("Output has no polymer entities")
+    return entities
+
+
+# Unused since carry_polymer_entity_categories looks residues up in pdbx_poly_seq_scheme.
+def _one_letter_sequence(residue_names: list[str]) -> str:
+    """Convert three-letter residue names to a one-letter sequence.
+
+    Parameters
+    ----------
+    residue_names : list[str]
+        Three-letter residue names in sequence order.
+
+    Returns
+    -------
+    str
+        One-letter sequence.
+
+    Raises
+    ------
+    ValueError
+        If any name has no one-letter representation, for example a nucleotide or a
+        modified residue. ``ProteinSequence`` raises ``KeyError`` for those, which would
+        otherwise escape the callers that degrade on ``ValueError``.
+    """
+    letters: list[str] = []
+    for name in residue_names:
+        try:
+            letters.append(ProteinSequence.convert_letter_3to1(name))
+        except KeyError:
+            raise ValueError(f"Residue {name} has no one-letter representation") from None
+    return "".join(letters)
+
+
+def _concatenate_category_rows(rows: list[dict[str, list[str]]]) -> dict[str, list[str]]:
+    """Concatenate compatible CIF category row dictionaries.
+
+    Parameters
+    ----------
+    rows : list[dict[str, list[str]]]
+        Row dictionaries sharing the same columns.
+
+    Returns
+    -------
+    dict[str, list[str]]
+        Concatenated category columns.
+
+    Raises
+    ------
+    KeyError
+        If a row dictionary has columns the first one lacks, or lacks columns it has.
+    """
+    columns = {name: [] for name in rows[0]}
+    for row in rows:
+        if row.keys() != columns.keys():
+            raise KeyError(
+                f"Category rows disagree on columns: extra {sorted(row.keys() - columns.keys())}, "
+                f"missing {sorted(columns.keys() - row.keys())}"
+            )
+        for name, values in row.items():
+            columns[name].extend(values)
+    return columns
+
+
+_Label = tuple[str, str, str]  # (label_asym_id, label_seq_id, label_entity_id)
+
+
+def _labels_from_author_numbering(
+    output_block: CIFBlock, reference_block: CIFBlock
+) -> tuple[list[_Label | None], dict[str, dict[str, list[str]]]]:
+    """Label output residues by looking their author ids up in the deposit's scheme.
+
+    Parameters
+    ----------
+    output_block : CIFBlock
+        Output block whose ``atom_site`` keeps the deposit's author numbering.
+    reference_block : CIFBlock
+        Deposited block with ``pdbx_poly_seq_scheme`` and ``struct_asym``.
+
+    Returns
+    -------
+    tuple[list[_Label | None], dict[str, dict[str, list[str]]]]
+        One label per ``atom_site`` row (``None`` for rows outside the scheme, e.g. ligands),
+        and the deposited categories to carry for the chains present.
+
+    Raises
+    ------
+    ValueError
+        If scheme categories are absent, an ``ATOM`` residue has no scheme row, or a
+        residue's name disagrees with its scheme row.
+    """
+    missing = [name for name in _SCHEME_CATEGORIES if name not in reference_block]
+    if missing:
+        raise ValueError(f"Reference CIF lacks {missing}")
+    scheme = reference_block[_PDBX_POLY_SEQ_SCHEME]
+    scheme_keys = zip(
+        scheme["pdb_strand_id"].as_array(str),
+        scheme["pdb_seq_num"].as_array(str),
+        _blank_to_empty(scheme["pdb_ins_code"].as_array(str)),
+    )
+    scheme_labels = zip(
+        scheme["asym_id"].as_array(str),
+        scheme["seq_id"].as_array(str),
+        scheme["entity_id"].as_array(str),
+    )
+    lookup: dict[tuple[str, str, str], _Label] = {}
+    monomers: dict[tuple[str, str, str], set[str]] = {}
+    for key, label, monomer in zip(scheme_keys, scheme_labels, scheme["mon_id"].as_array(str)):
+        lookup.setdefault(key, label)  # microheterogeneity rows (e.g. CYS/CSO) share a seq_id
+        monomers.setdefault(key, set()).add(_canonical_monomer(monomer))
+
+    atom_site = output_block[_ATOM_SITE]
+    residue_keys = list(
+        zip(
+            atom_site["auth_asym_id"].as_array(str),
+            atom_site["auth_seq_id"].as_array(str),
+            _blank_to_empty(atom_site["pdbx_PDB_ins_code"].as_array(str)),
+        )
+    )
+    residue_names = atom_site["label_comp_id"].as_array(str)
+    is_atom = atom_site["group_PDB"].as_array(str) == "ATOM"
+    unmatched = {key for key, atom in zip(residue_keys, is_atom) if atom and key not in lookup}
+    if unmatched:
+        raise ValueError(
+            f"{len(unmatched)} residue(s) have no deposited pdbx_poly_seq_scheme row, "
+            f"e.g. {sorted(unmatched)[:3]}"
+        )
+    renamed = {
+        (key, name)
+        for key, name in zip(residue_keys, residue_names)
+        if key in lookup and _canonical_monomer(name) not in monomers[key]
+    }
+    if renamed:
+        raise ValueError(f"Residue names disagree with the deposit, e.g. {sorted(renamed)[:3]}")
+    labels = [lookup.get(key) for key in residue_keys]
+    polymer_labels = {label for label in labels if label is not None}
+    if not polymer_labels:
+        raise ValueError("Output has no polymer residues")
+
+    asym_ids = {asym_id for asym_id, _, _ in polymer_labels}
+    entity_ids = {entity_id for _, _, entity_id in polymer_labels}
+    categories = {
+        name: _concatenate_category_rows(
+            [_select_category_rows(reference_block[name], column, value) for value in sorted(keep)]
+        )
+        for name, column, keep in (
+            (_ENTITY, "id", entity_ids),
+            (_ENTITY_POLY, "entity_id", entity_ids),
+            (_ENTITY_POLY_SEQ, "entity_id", entity_ids),
+            (_STRUCT_ASYM, "id", asym_ids),
+            (_PDBX_POLY_SEQ_SCHEME, "asym_id", asym_ids),
+        )
+    }
+    carried_scheme = categories[_PDBX_POLY_SEQ_SCHEME]
+    modeled = {(asym_id, seq_id) for asym_id, seq_id, _ in polymer_labels}
+    has_coords = [
+        row in modeled
+        for row in zip(carried_scheme["asym_id"], carried_scheme["seq_id"], strict=True)
+    ]
+    for column, source in (("auth_seq_num", "pdb_seq_num"), ("auth_mon_id", "mon_id")):
+        carried_scheme[column] = [
+            value if present else "?"
+            for value, present in zip(carried_scheme[source], has_coords, strict=True)
+        ]
+    return labels, categories
+
+
+def _labels_from_sequence_alignment(
+    output_block: CIFBlock, reference_block: CIFBlock
+) -> tuple[list[_Label | None], dict[str, dict[str, list[str]]]]:
+    """Label output residues by aligning each output entity's sequence to the deposit's.
+
+    Used when the output does not keep the deposit's author numbering (a model that renumbers
+    residues, or residues the input never had). Each residue gets the deposited
+    ``entity_poly_seq.num`` it aligns to as ``label_seq_id`` and the deposited entity id;
+    ``label_asym_id`` keeps the output chain, so ``pdbx_poly_seq_scheme`` is not carried.
+
+    Parameters
+    ----------
+    output_block : CIFBlock
+        Output block containing ``atom_site``.
+    reference_block : CIFBlock
+        Deposited block with ``entity``, ``entity_poly`` and ``entity_poly_seq``.
+
+    Returns
+    -------
+    tuple[list[_Label | None], dict[str, dict[str, list[str]]]]
+        One label per ``atom_site`` row (``None`` for non-polymer rows), and the deposited
+        categories to carry.
+
+    Raises
+    ------
+    ValueError
+        If an output entity has no unique match among the deposited entities.
+    """
+    remap: dict[tuple[str, str], tuple[str, str]] = {}  # (entity, seq) -> (deposit entity, num)
+    chain_entities: dict[str, str] = {}
+    for output_id, chains, numbers, names in _output_polymer_entities(output_block):
+        reference_id, reference_nums = _matching_entity(reference_block, names)
+        for number, num in zip(numbers, reference_nums, strict=True):
+            remap[(output_id, str(number))] = (reference_id, num)
+        chain_entities.update(dict.fromkeys(chains, reference_id))
+
+    atom_site = output_block[_ATOM_SITE]
+    labels: list[_Label | None] = []
+    for chain, entity, seq in zip(
+        atom_site["label_asym_id"].as_array(str),
+        atom_site["label_entity_id"].as_array(str),
+        atom_site["label_seq_id"].as_array(str),
+        strict=True,
+    ):
+        match = remap.get((entity, seq))
+        labels.append(None if match is None else (chain, match[1], match[0]))
+
+    entity_ids = sorted(set(chain_entities.values()))
+    categories = {
+        name: _concatenate_category_rows(
+            [_select_category_rows(reference_block[name], column, value) for value in entity_ids]
+        )
+        for name, column in (
+            (_ENTITY, "id"),
+            (_ENTITY_POLY, "entity_id"),
+            (_ENTITY_POLY_SEQ, "entity_id"),
+        )
+    }
+    categories[_STRUCT_ASYM] = {
+        "id": sorted(chain_entities),
+        "entity_id": [chain_entities[chain] for chain in sorted(chain_entities)],
+    }
+    return labels, categories
+
+
+def _add_modeled_monomers(
+    entity_poly_seq: dict[str, list[str]],
+    atom_site: CIFCategory,
+    labels: list[_Label | None],
+) -> None:
+    """Add each modeled monomer that differs from the deposit's as a heterogeneity row.
+
+    The alignment accepts a canonical parent for a modified residue (MET for MSE, CYS for
+    CSO), but ``atom_site`` is a child of ``entity_poly_seq`` on ``(entity_id, num,
+    mon_id)``, so a modeled MET at a deposited MSE position has no parent row. The mmCIF
+    dictionary's form for two monomers at one position (microheterogeneity, e.g. a CYS/CSO
+    site) is two rows sharing ``num`` with ``_entity_poly_seq.hetero`` set, and that is what
+    is written: the deposit's row is kept, its flag set, and the modeled name inserted after
+    it. On 1VME position 13::
+
+        entity_id  num  mon_id  hetero          entity_id  num  mon_id  hetero
+        1          13   MSE     n        ->     1          13   MSE     y
+                                                1          13   MET     y
+
+    Side effect: ``entity_poly_seq`` is rewritten in place; a ``hetero`` column is created
+    when the deposit has none. Nothing changes when every modeled name is the deposit's.
+
+    Parameters
+    ----------
+    entity_poly_seq : dict[str, list[str]]
+        Carried ``entity_poly_seq`` columns.
+    atom_site : CIFCategory
+        Output ``atom_site``.
+    labels : list[_Label | None]
+        Deposit label per ``atom_site`` row, ``None`` for rows outside the polymer entities.
+    """
+    keys = list(zip(entity_poly_seq["entity_id"], entity_poly_seq["num"], strict=True))
+    deposited = set(zip(keys, entity_poly_seq["mon_id"], strict=True))
+    modeled = {
+        ((label[2], label[1]), str(name))
+        for label, name in zip(labels, atom_site["label_comp_id"].as_array(str), strict=True)
+        if label is not None
+    }
+    added = sorted(modeled - deposited)
+    if not added:
+        return
+    if _HETERO not in entity_poly_seq:
+        entity_poly_seq[_HETERO] = [_HETERO_NO] * len(keys)
+    last_row = {key: index for index, key in enumerate(keys)}  # the later row wins
+    source_rows = np.array([last_row[key] for key, _ in added])
+    hetero_keys = {key for key, _ in added}
+    is_hetero = np.array([key in hetero_keys for key in keys])
+    for column, values in entity_poly_seq.items():
+        column_values = np.asarray(values, dtype=object)
+        if column == _HETERO:
+            column_values = np.where(is_hetero, _HETERO_YES, column_values)
+            new_values = np.full(len(added), _HETERO_YES, dtype=object)
+        elif column == "mon_id":
+            new_values = np.array([mon_id for _, mon_id in added], dtype=object)
+        else:
+            new_values = column_values[source_rows]
+        entity_poly_seq[column] = list(np.insert(column_values, source_rows + 1, new_values))
+
+
+def carry_polymer_entity_categories(
+    output: CIFFile,
+    reference: str | Path | CIFFile,
+) -> tuple[str, ...]:
+    """Carry deposited polymer categories into an output CIF and match its label ids to them.
+
+    ``set_structure`` writes author values into ``label_asym_id`` and ``label_seq_id``. Each
+    output residue is first looked up by its author ``(chain, number, insertion code)`` in the
+    deposit's ``pdbx_poly_seq_scheme``; its label chain, sequence position and entity are taken
+    from that row, and the deposit's polymer categories are carried unchanged for the chains
+    present. When the output does not keep the deposit's author numbering, each output entity's
+    sequence is aligned to the deposited ones instead and mapped onto the deposited
+    ``entity_poly_seq`` numbering. Where the model writes the canonical parent of a deposited
+    modified residue (MET for MSE), the modeled monomer is added to ``entity_poly_seq`` as a
+    heterogeneity row beside the deposit's, and ``chem_comp`` rows are carried for every
+    monomer either names (a row the deposit lacks is warned about, not fatal). The output is
+    modified only after every residue has been matched and validated.
+
+    Parameters
+    ----------
+    output : CIFFile
+        Single-block output CIF containing ``atom_site``. Side effect: its polymer rows'
+        label ids are rewritten and the carried categories are added or replaced.
+    reference : str | Path | CIFFile
+        Deposited reference CIF or its path.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Names of the categories written to ``output``.
+
+    Raises
+    ------
+    ValueError
+        If required categories are absent, or neither the author-number lookup nor the
+        sequence alignment matches every polymer residue.
+    """
+    output_block = _single_block(output)
+    reference_file = reference if isinstance(reference, CIFFile) else CIFFile.read(str(reference))
+    reference_block = _single_block(reference_file)
+    missing = [name for name in _POLYMER_ENTITY_CATEGORIES if name not in reference_block]
+    if missing:
+        raise ValueError(f"Reference CIF lacks required categories: {missing}")
+
+    try:
+        labels, categories = _labels_from_author_numbering(output_block, reference_block)
+    except ValueError as lookup_error:
+        try:
+            labels, categories = _labels_from_sequence_alignment(output_block, reference_block)
+        except ValueError as alignment_error:
+            raise ValueError(
+                f"author lookup: {lookup_error}; sequence alignment: {alignment_error}"
+            ) from alignment_error
+
+    atom_site = output_block[_ATOM_SITE]
+    _add_modeled_monomers(categories[_ENTITY_POLY_SEQ], atom_site, labels)
+    if _CHEM_COMP in reference_block:
+        # Every monomer named by atom_site or by the carried sequence needs a chem_comp parent.
+        components = set(atom_site["label_comp_id"].as_array(str)) | set(
+            categories[_ENTITY_POLY_SEQ]["mon_id"]
+        )
+        chem_comp = reference_block[_CHEM_COMP]
+        reference_components = np.asarray(chem_comp["id"].as_array(str))
+        component_mask = np.isin(reference_components, list(components))
+        missing_components = sorted(
+            map(str, components - set(reference_components[component_mask]))
+        )
+        if missing_components:
+            logger.warning(
+                f"Reference CIF lacks chem_comp rows for {missing_components}; "
+                "carrying the rows it has"
+            )
+        categories[_CHEM_COMP] = {
+            column: list(np.asarray(chem_comp[column].as_array(str))[component_mask])
+            for column in chem_comp
+        }
+
+    # HETATM rows outside the scheme (ligands, waters) keep what set_structure wrote.
+    for column, index in (("label_asym_id", 0), ("label_seq_id", 1), ("label_entity_id", 2)):
+        current = atom_site[column].as_array(str)
+        atom_site[column] = np.array(
+            [value if label is None else label[index] for value, label in zip(current, labels)]
+        )
+    for name, data in categories.items():
+        add_category_to_cif(output, data, name, overwrite=True)
+    return tuple(categories)
