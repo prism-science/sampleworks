@@ -345,11 +345,19 @@ def _canonical_monomer(name: str) -> str:
 # skipping reference residues).
 _DPKey = tuple[int, bool]
 # Dynamic-programming state: (deletion runs so far, matched reference indices or None once the
-# path is ambiguous, number of equally optimal paths capped at 2).
-_DPState = tuple[int, tuple[int, ...] | None, int]
+# path is ambiguous, number of equally optimal paths capped at 2, first reference index at
+# which equally optimal paths disagree or None while the path is unique).
+_DPState = tuple[int, tuple[int, ...] | None, int, int | None]
 
 
-def _unique_subsequence_indices(reference: list[str], modeled: list[str]) -> list[int] | None:
+def _first_disagreement(first: tuple[int, ...], second: tuple[int, ...]) -> int | None:
+    """Return the smaller reference index at the first position where two paths differ."""
+    return next((min(a, b) for a, b in zip(first, second, strict=True) if a != b), None)
+
+
+def _unique_subsequence_indices(
+    reference: list[str], modeled: list[str]
+) -> tuple[list[int] | None, int | None]:
     """Find a unique ordered embedding with the fewest deletion runs.
 
     Cost counts runs of consecutive skipped reference residues, not residues, so a single
@@ -364,12 +372,15 @@ def _unique_subsequence_indices(reference: list[str], modeled: list[str]) -> lis
 
     Returns
     -------
-    list[int] | None
-        Reference indices for the unique optimal embedding, or ``None`` when absent or ambiguous.
+    tuple[list[int] | None, int | None]
+        ``(indices, None)`` with the reference index of each modeled residue when the optimal
+        embedding is unique; ``(None, index)`` when several embeddings are equally good, with
+        the first reference index at which they disagree; ``(None, None)`` when there is no
+        embedding at all.
     """
     reference = [_canonical_monomer(name) for name in reference]
     modeled = [_canonical_monomer(name) for name in modeled]
-    states: dict[_DPKey, _DPState] = {(0, False): (0, (), 1)}
+    states: dict[_DPKey, _DPState] = {(0, False): (0, (), 1, None)}
 
     def update(
         target: dict[_DPKey, _DPState],
@@ -377,6 +388,7 @@ def _unique_subsequence_indices(reference: list[str], modeled: list[str]) -> lis
         cost: int,
         path: tuple[int, ...] | None,
         count: int,
+        ambiguous_at: int | None,
     ) -> None:
         """Keep minimum-cost paths and mark equally optimal alternatives.
 
@@ -392,12 +404,19 @@ def _unique_subsequence_indices(reference: list[str], modeled: list[str]) -> lis
             Matched reference indices, or ``None`` for an ambiguous path.
         count : int
             Number of equally optimal paths, capped at two.
+        ambiguous_at : int | None
+            Where the candidate path first became ambiguous, or ``None``.
         """
         current = target.get(key)
         if current is None or cost < current[0]:
-            target[key] = (cost, path, count)
+            target[key] = (cost, path, count, ambiguous_at)
         elif cost == current[0]:
-            target[key] = (cost, None, min(2, current[2] + count))
+            # Two equally good paths meet: remember the earliest residue they disagree on.
+            positions = [current[3], ambiguous_at]
+            if current[1] is not None and path is not None:
+                positions.append(_first_disagreement(current[1], path))
+            recorded = [position for position in positions if position is not None]
+            target[key] = (cost, None, min(2, current[2] + count), min(recorded, default=None))
 
     # One pass per reference residue. Every state either skips it (cost +1 when that starts a
     # new deletion run) or, when the names agree, matches it to the next modeled residue. A
@@ -405,21 +424,32 @@ def _unique_subsequence_indices(reference: list[str], modeled: list[str]) -> lis
     # optimum is reported as ambiguous instead of picked arbitrarily.
     for reference_index, reference_name in enumerate(reference):
         next_states: dict[_DPKey, _DPState] = {}
-        for (modeled_index, deleting), (cost, path, count) in states.items():
-            update(next_states, (modeled_index, True), cost + (not deleting), path, count)
+        for (modeled_index, deleting), (cost, path, count, ambiguous_at) in states.items():
+            update(
+                next_states, (modeled_index, True), cost + (not deleting), path, count, ambiguous_at
+            )
             if modeled_index < len(modeled) and reference_name == modeled[modeled_index]:
                 matched_path = None if path is None else (*path, reference_index)
-                update(next_states, (modeled_index + 1, False), cost, matched_path, count)
+                update(
+                    next_states, (modeled_index + 1, False), cost, matched_path, count, ambiguous_at
+                )
         states = next_states
 
     candidates = [value for (index, _), value in states.items() if index == len(modeled)]
     if not candidates:
-        return None
+        return None, None
     minimum_cost = min(value[0] for value in candidates)
     optimal = [value for value in candidates if value[0] == minimum_cost]
-    if sum(value[2] for value in optimal) != 1 or optimal[0][1] is None:
-        return None
-    return list(optimal[0][1])
+    if sum(value[2] for value in optimal) == 1 and optimal[0][1] is not None:
+        return list(optimal[0][1]), None
+    # Several optimal embeddings: the earliest recorded disagreement, or, when they survive as
+    # distinct unique paths, the first index on which those paths differ.
+    positions: list[int | None] = [value[3] for value in optimal]
+    paths = [value[1] for value in optimal if value[1] is not None]
+    if len(paths) > 1:
+        positions.append(_first_disagreement(paths[0], paths[-1]))
+    recorded = [position for position in positions if position is not None]
+    return None, min(recorded, default=0)
 
 
 def _matching_entity(reference_block: CIFBlock, residue_names: list[str]) -> tuple[str, list[str]]:
@@ -449,20 +479,21 @@ def _matching_entity(reference_block: CIFBlock, residue_names: list[str]) -> tup
     sequence_nums = np.asarray(sequence["num"].as_array(str))
     sequence_names = np.asarray(sequence["mon_id"].as_array(str))
     matches: list[tuple[str, list[str]]] = []
-    ambiguous: list[str] = []
+    ambiguous: list[str] = []  # "entity 1 around deposited residue 158 (ALA)"
     for entity_id in reference_block[_ENTITY_POLY]["entity_id"].as_array(str):
         rows = np.flatnonzero(sequence_ids == entity_id)
         # Microheterogeneity lists several monomers at one num (e.g. CYS/CSO); keep the first.
         rows = rows[np.unique(sequence_nums[rows], return_index=True)[1]]
         rows = rows[np.argsort(sequence_nums[rows].astype(int), kind="stable")]
         reference_names = list(sequence_names[rows])
-        indices = _unique_subsequence_indices(reference_names, residue_names)
+        indices, ambiguous_at = _unique_subsequence_indices(reference_names, residue_names)
         if indices is not None:
             matches.append((str(entity_id), list(sequence_nums[rows][indices])))
-            continue
-        remaining = iter(_canonical_monomer(name) for name in reference_names)
-        if all(_canonical_monomer(name) in remaining for name in residue_names):
-            ambiguous.append(str(entity_id))
+        elif ambiguous_at is not None:
+            ambiguous.append(
+                f"entity {entity_id} around deposited residue "
+                f"{sequence_nums[rows][ambiguous_at]} ({reference_names[ambiguous_at]})"
+            )
     if len(matches) == 1:
         return matches[0]
     if matches:
@@ -470,8 +501,9 @@ def _matching_entity(reference_block: CIFBlock, residue_names: list[str]) -> tup
         raise ValueError(f"Modeled sequence matches several deposited entities: {entity_ids}")
     if ambiguous:
         raise ValueError(
-            f"Modeled sequence fits deposited entity {ambiguous} in several equally good ways "
-            "(e.g. a gap inside a run of repeated residues)"
+            "Modeled sequence fits the deposited sequence in several equally good ways "
+            f"({'; '.join(ambiguous)}): a gap inside a run of repeated residues cannot be "
+            "placed from the sequence alone"
         )
     raise ValueError("No deposited entity contains the modeled sequence")
 
