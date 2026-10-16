@@ -312,6 +312,22 @@ def test_carry_aligns_position_numbered_structure_to_deposit(carved_1vme, resour
         _canonical_monomer(carried[(entity, seq)]) == _canonical_monomer(name)
         for entity, seq, name in modeled
     )
+    # The carried sequence is the deposit's, whole and in order, in both its forms.
+    deposit_sequence = reference.block["entity_poly_seq"]
+    deposited = [
+        name
+        for entity, name in zip(
+            deposit_sequence["entity_id"].as_array(str),
+            deposit_sequence["mon_id"].as_array(str),
+            strict=True,
+        )
+        if entity == "1"
+    ]
+    assert _column(output, "entity_poly_seq", "mon_id") == deposited
+    for column in ("pdbx_seq_one_letter_code", "pdbx_seq_one_letter_code_can"):
+        assert "".join(_column(output, "entity_poly", column)[0].split()) == "".join(
+            reference.block["entity_poly"][column].as_array(str)[0].split()
+        )
 
 
 def test_unique_subsequence_indices():
