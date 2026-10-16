@@ -116,6 +116,20 @@ def test_occupancy_options_are_refused_for_multi_model_input(multi_model_cif: Pa
         _load(multi_model_cif, row={"occupancy_values": [0.5, 0.5]})
 
 
+def test_occupancy_options_are_refused_for_altloc_expansion(source_1vme: Path):
+    """The expansion sets alternate atoms to full occupancy and weights configurations
+    equally, so a requested occupancy has nowhere to go."""
+    with pytest.raises(ValueError, match="not supported with --altlocs-as-models"):
+        load_configurations(
+            source_1vme,
+            BatchRowForMTZ(filename=source_1vme.name),
+            "uniform",
+            altlocs_as_models=True,
+        )
+    with pytest.raises(ValueError, match="not supported with --altlocs-as-models"):
+        _load(source_1vme, row={"occupancy_values": [0.5, 0.5]}, altlocs_as_models=True)
+
+
 def test_altlocs_as_models_is_refused_for_multi_model_input(multi_model_cif: Path):
     """The models are already the ensemble."""
     with pytest.raises(ValueError, match="altlocs-as-models"):

@@ -150,8 +150,8 @@ def load_configurations(
     Raises
     ------
     ValueError
-        If a multi-model file is combined with an occupancy option or
-        ``--altlocs-as-models``, or if selection and stripping leave no atoms.
+        If a multi-model file or ``--altlocs-as-models`` is combined with an
+        occupancy option, or if selection and stripping leave no atoms.
     """
     loaded = load_any(structure_path, altloc="all", extra_fields=["occupancy", "b_factor"])
 
@@ -190,6 +190,13 @@ def load_configurations(
         return cast(AtomArrayStack, loaded)
 
     if altlocs_as_models:
+        # Alternate atoms are set to full occupancy below and the configurations are
+        # weighted equally, so there is no place for a requested occupancy to go.
+        if occupancy_mode != "default" or row.occupancy_values:
+            raise ValueError(
+                f"{structure_path.name}: --occupancy-mode and --occupancy-values are not "
+                "supported with --altlocs-as-models; configurations are weighted equally."
+            )
         # map_altlocs_to_stack repeats the shared atoms in every model and varies the
         # alternate conformations. It removes occupancy, b_factor and altloc_id from
         # the stack and returns them as (n_altloc, n_atoms) arrays; they go back onto
