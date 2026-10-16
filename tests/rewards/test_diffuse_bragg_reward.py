@@ -268,6 +268,15 @@ class TestWeightHandling:
         with pytest.raises(ValueError, match="diffuse_target is required"):
             DiffuseBraggRewardFunction(bragg_target=bragg_path, bragg_weight=0.5)
 
+    def test_numpy_scalar_weight_is_a_constant(self, ensemble, targets):
+        """A np.float32 weight is stored as a float, not mistaken for a callable."""
+        atom_array, coords = ensemble
+        reward = prepare(build_reward(targets, np.float32(0.5)), atom_array)
+
+        assert reward.bragg_weight == 0.5
+        loss, _ = score(reward, atom_array, coords)
+        assert torch.isfinite(loss)
+
     def test_weight_outside_the_unit_interval_is_rejected(self, targets):
         from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
 

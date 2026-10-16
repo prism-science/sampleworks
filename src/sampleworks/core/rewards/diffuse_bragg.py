@@ -145,7 +145,9 @@ class DiffuseBraggRewardFunction:
         test_set_value: int = 1,
         isotropic_background: Callable | None = None,
     ) -> None:
-        self.bragg_weight = bragg_weight
+        # A constant weight is stored as a float so that NumPy scalars are not taken
+        # for callables later.
+        self.bragg_weight = bragg_weight if callable(bragg_weight) else float(bragg_weight)
         self.resolution = resolution
         self.normalize = normalize
         self.fit_scale = fit_scale
