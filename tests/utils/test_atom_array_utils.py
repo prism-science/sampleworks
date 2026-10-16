@@ -588,11 +588,17 @@ class TestNormalizedAtomId:
         assert ids[0] != ids[1]
 
     def test_reordered_chains_same_ids(self, reordered_chains):
-        """Chain ordering [B,A] vs [A,B] produces identical normalized IDs."""
+        """Chain ordering [B,A] vs [A,B] gives each chain's atom the same ID in both arrays."""
         model, struct = reordered_chains
         model_ids = make_normalized_atom_id(model)
         struct_ids = make_normalized_atom_id(struct)
-        np.testing.assert_array_equal(sorted(model_ids), sorted(struct_ids))
+        model_chains = cast(np.ndarray, model.chain_id)
+        struct_chains = cast(np.ndarray, struct.chain_id)
+        for chain in ("A", "B"):
+            np.testing.assert_array_equal(
+                model_ids[model_chains == chain], struct_ids[struct_chains == chain]
+            )
+        assert model_ids[0] != model_ids[1]
 
     def test_1vme_symmetric_chains_produce_same_normalized_ids(self, structure_1vme):
         """1vme chains A and B are symmetric homodimers with identical topology."""
@@ -647,10 +653,19 @@ class TestFilterToCommonAtomsNormalized:
         assert fm.array_length() == 3
 
     def test_reordered_chains(self, reordered_chains):
-        """Chain ordering [B,A] vs [A,B] still finds all common atoms."""
+        """Chain ordering [B,A] vs [A,B] pairs chain A with A and B with B, not by position."""
         model, struct = reordered_chains
-        (fm, fs) = filter_to_common_atoms(model, struct, normalize_ids=True)
+        (fm, fs), (m_idx, s_idx) = filter_to_common_atoms(
+            model, struct, normalize_ids=True, return_indices=True
+        )
         assert fm.array_length() == 2
+        fm_chains = fm.chain_id
+        fs_chains = fs.chain_id
+        np.testing.assert_array_equal(fm_chains, fs_chains)
+        assert set(fm_chains) == {"A", "B"}
+        model_chains = model.chain_id
+        struct_chains = struct.chain_id
+        np.testing.assert_array_equal(model_chains[m_idx], struct_chains[s_idx])
 
     def test_1vme_normalized_atom_names_align(self, structure_1vme):
         """Normalized matching of 1vme chain A vs B produces atom-level alignment."""
