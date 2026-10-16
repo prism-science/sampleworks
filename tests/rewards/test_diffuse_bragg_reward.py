@@ -418,6 +418,16 @@ class TestBulkSolvent:
         assert reward._solvent.taper_width == pytest.approx(0.5 * reward._solvent.cutoff)
         assert "Solvent cutoff calibrated" in caplog.text
 
+    def test_recalibrates_when_prepared_again_for_another_topology(self, ensemble, targets):
+        """prepare() may be re-run for different inputs; the cutoff follows the new topology."""
+        atom_array, _ = ensemble
+        reward = prepare(build_reward(targets, 1.0, bulk_solvent="per_conformer"), atom_array)
+        first = reward._solvent.cutoff
+
+        prepare(reward, atom_array[np.asarray(atom_array.chain_id) == "A"])
+
+        assert reward._solvent.cutoff != first
+
     def test_explicit_cutoff_is_used_as_given(self, ensemble, targets):
         atom_array, _ = ensemble
         reward = prepare(

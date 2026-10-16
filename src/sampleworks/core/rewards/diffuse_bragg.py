@@ -160,6 +160,7 @@ class DiffuseBraggRewardFunction:
                 f"bulk_solvent must be one of {_BULK_SOLVENT_MODES}, got {bulk_solvent!r}."
             )
         self.bulk_solvent = bulk_solvent
+        self.solvent_cutoff = solvent_cutoff
         # A given cutoff is used as is; None is calibrated in prepare(), which has
         # the grid and the reference configuration the calibration needs.
         self._solvent = None
@@ -380,7 +381,9 @@ class DiffuseBraggRewardFunction:
         )
         self._hkl_t = torch.as_tensor(self._hkl, dtype=torch.long, device=device)
 
-        if self.bulk_solvent == "per_conformer" and self._solvent is None:
+        # Recalibrated on every prepare(): the matched cutoff belongs to the topology
+        # and grid prepared here, and prepare() may be re-run for different inputs.
+        if self.bulk_solvent == "per_conformer" and self.solvent_cutoff is None:
             reference = reward_inputs.to_atom_array()
             target = lunus_sf.geometric_solvent_fraction(
                 reference, reference.coord, self.unit_cell, self.space_group, self.setup.grid_shape
