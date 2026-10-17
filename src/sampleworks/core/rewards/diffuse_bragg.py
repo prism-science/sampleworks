@@ -6,12 +6,16 @@ and ``<|F|²> − |<F>|²`` (diffuse). Scoring them in one reward rather than tw
 avoids paying for the grid evaluation and FFT twice.
 
 The two terms are combined convexly, ``bragg_weight`` running from 1.0 (pure
-Bragg) to 0.0 (pure diffuse). For that dial to mean anything, each term is
-normalized first: a Bragg residual is an L2 on amplitudes and a diffuse residual
-an L2 on intensities, so their raw magnitudes differ by orders of magnitude and
-an unnormalized ``0.5`` would not be a half-and-half mixture. Normalizing also
-keeps the total O(1) across a weight sweep, so the sweep does not silently
-double as a step-size sweep.
+Bragg) to 0.0 (pure diffuse). Each term is ``||s·calc − obs||² / ||obs||²`` with
+``s`` the least-squares scale (``fit_scale``) and the denominator the
+normalization (``normalize``); with both on, a term is ``1 − cos²(calc, obs)``
+and lies in [0, 1]. This is the structure-factor reward's MSE divided by the
+mean squared target. The division is what lets ``bragg_weight`` mix the terms:
+a Bragg residual is an L2 on amplitudes and a diffuse residual an L2 on
+intensities, so their raw magnitudes differ by orders of magnitude and an
+unnormalized ``0.5`` would not be a half-and-half mixture. It also keeps the
+total O(1) across a weight sweep, so the sweep does not double as a step-size
+sweep.
 
 A weight of exactly zero means the term is **not computed** and its target is
 **not required** — not computed and multiplied by zero, which would let a
@@ -28,6 +32,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import reciprocalspaceship as rs
@@ -40,14 +45,19 @@ from sampleworks.core.rewards.protocol import RewardInputs
 from sampleworks.synthetic.synthetic_utils import resolve_mtz_column
 
 
+if TYPE_CHECKING:
+    from lunus.sf import IsotropicBackground
+
+
 # Bulk-solvent treatment, named as in StructureFactorRewardFunction. lunus builds
 # its mask per configuration, so there is no "combined" mode here.
 _BULK_SOLVENT_MODES = ("off", "per_conformer")
-# Taper width for an explicit solvent cutoff, e/A^3, as in generate_synthetic_sf_lunus.
-# The cutoff itself is calibrated by default; see prepare().
+# Taper width for an explicit solvent cutoff, in the cutoff's own units (e/A^3; the
+# mask thresholds blurred density), as in generate_synthetic_sf_lunus. The cutoff
+# itself is calibrated by default; see prepare().
 DEFAULT_SOLVENT_TAPER_WIDTH = 0.10
-# Retained-reflection thresholds, as in structure_factor.py: the fraction catches an
-# R-free convention mismatch, the count a reflection set too small to guide.
+# Retained-reflection thresholds, as in StructureFactorRewardFunction: the fraction
+# catches an R-free convention mismatch, the count a reflection set too small to guide.
 _MIN_RETAINED_REFLECTION_FRACTION = 0.75
 _MIN_RETAINED_REFLECTIONS = 5_000
 
@@ -84,14 +94,19 @@ class DiffuseBraggRewardFunction:
         High-resolution cutoff in Å applied to the reflection list, or ``None``
         to use everything the targets contain.
     normalize
-        Divide each term by the squared norm of its target, making both
-        dimensionless and O(1). Turning this off makes ``bragg_weight``
+        Divide each term (Bragg, diffuse) by the squared norm of its target,
+        making both dimensionless and O(1). Turning this off makes ``bragg_weight``
         effectively meaningless; it exists to diagnose that.
     fit_scale
-        Fit a least-squares scale factor per term per call, and **detach** it.
-        The model and target need not share an overall scale, and detaching
-        means the fit acts as a normalizer rather than as a parameter the
-        gradient can exploit by shrinking the structure.
+        Fit one scalar per term at every evaluation, the least-squares scale of
+        calc onto obs, so each term scores shape only and is invariant to the
+        overall scale of model and target. Needed for experimental data, where
+        Bragg amplitudes and diffuse intensities arrive on unrelated scales. It
+        discards the magnitude of disorder, which both observables carry, so turn
+        it off when the targets are on the model's absolute scale, as synthetic
+        ones are. The scale is detached; by the envelope theorem that gives the
+        exact gradient of the minimized residual, since ``∂/∂s`` vanishes at the
+        fitted ``s``.
     bulk_solvent
         ``"off"`` (default) scores ``|Fprotein|``; ``"per_conformer"`` adds a
         bulk-solvent contribution from a mask built on each configuration's own
@@ -99,12 +114,13 @@ class DiffuseBraggRewardFunction:
         lunus has no single-mask ``"combined"`` mode.
     solvent_cutoff, solvent_taper_width
         Density below which a voxel is solvent, and the width of the mask's smooth
-        transition, both in e/Å³. ``None`` (default) calibrates the cutoff in
-        :meth:`prepare` so the mask calls the same fraction of the cell solvent as
-        gemmi's geometric mask on the reference configuration, with the taper set
-        to half the cutoff, lunus's convention; the matched cutoff is not a constant
-        across systems or B-factor conventions. An explicit cutoff uses
-        ``solvent_taper_width``.
+        transition. Both are in e/Å³ because the mask thresholds the blurred
+        density itself, not a distance from atoms. ``None`` (default) calibrates
+        the cutoff in :meth:`prepare` so the mask calls the same fraction of the
+        cell solvent as gemmi's geometric mask on the reference configuration, with
+        the taper set to half the cutoff, lunus's convention; the matched cutoff is
+        not a constant across systems or B-factor conventions. An explicit cutoff
+        uses ``solvent_taper_width``.
     exclude_free_reflections
         If True, drop the R-free test set from the Bragg target before the
         reflection list is formed, so both terms score the working set only.
@@ -112,12 +128,6 @@ class DiffuseBraggRewardFunction:
         The Bragg MTZ's flag column (``None`` takes its sole integer column) and the
         flag value marking the test set. The default 1 is the Phenix convention the
         synthetic generators write; CCP4-convention files use 0.
-    isotropic_background
-        Factory for the anisotropic transform, called as
-        ``factory(d_star, shell_thickness, device=..., dtype=...)``. Defaults to
-        ``lunus.sf.IsotropicBackground``; injectable so the reward can be tested
-        against a reference implementation.
-
     Attributes
     ----------
     current_time
@@ -143,7 +153,6 @@ class DiffuseBraggRewardFunction:
         exclude_free_reflections: bool = False,
         free_flag_column: str | None = None,
         test_set_value: int = 1,
-        isotropic_background: Callable | None = None,
     ) -> None:
         # A constant weight is stored as a float so that NumPy scalars are not taken
         # for callables later.
@@ -171,18 +180,6 @@ class DiffuseBraggRewardFunction:
 
             self._solvent = SolventModel(cutoff=solvent_cutoff, taper_width=solvent_taper_width)
         self.current_time: float | None = None
-
-        if isotropic_background is None:
-            # Deliberately inline, unlike this module's other lunus import:
-            # lunus.sf maps its exports to submodules and imports them on first
-            # access (PEP 562), and IsotropicBackground is the only name here
-            # from aniso_torch, so a caller injecting its own factory never
-            # loads it. mean_and_diffuse is at module scope because it shares
-            # structure_factor_torch with the grid evaluation, already loaded by lunus_sf.
-            from lunus.sf import IsotropicBackground
-
-            isotropic_background = IsotropicBackground
-        self._isotropic_background = isotropic_background
 
         # Validate the weight against the targets now, not on first evaluation.
         # A constant weight tells us exactly which targets are needed; a callable
@@ -220,7 +217,9 @@ class DiffuseBraggRewardFunction:
         )
 
         self.setup: lunus_sf.LunusSetup | None = None
-        self._aniso: Callable | None = None
+        # lunus.sf.IsotropicBackground instance, built in prepare(); calling it
+        # returns the anisotropic component of a per-reflection intensity.
+        self._isotropic_background: IsotropicBackground | None = None
 
     def _load_targets(self, bragg_path, diffuse_path, bragg_column, diffuse_column):
         """Read the targets and reduce them to one shared reflection list.
@@ -255,6 +254,10 @@ class DiffuseBraggRewardFunction:
         elif diffuse_hkl is None:
             hkl, bragg, diffuse = bragg_hkl, bragg_values, None
         else:
+            # Both terms are scored on the reflections the two targets have in
+            # common; reflections present in only one are dropped. intersect1d
+            # returns one index into each target per shared reflection, so the
+            # Bragg hkl rows are the diffuse hkl rows and one copy is kept.
             shared, i_bragg, i_diffuse = np.intersect1d(
                 self._pack(bragg_hkl), self._pack(diffuse_hkl), return_indices=True
             )
@@ -315,12 +318,11 @@ class DiffuseBraggRewardFunction:
         """
         flag_column = resolve_mtz_column(dataset, rs.MTZIntDtype(), column=self.free_flag_column)
         finite = np.isfinite(dataset[column].to_numpy(dtype=np.float64))
-        free = dataset[flag_column].to_numpy()[finite] == self.test_set_value
-        keep = ~free
+        keep = dataset[flag_column].to_numpy()[finite] != self.test_set_value
 
         n_total, n_used = keep.size, int(keep.sum())
         composition = (
-            f"{n_total} Bragg reflections, {int(free.sum())} flagged free in "
+            f"{n_total} Bragg reflections, {n_total - n_used} flagged free in "
             f"{flag_column!r} (test_set_value={self.test_set_value})"
         )
         convention_hint = (
@@ -370,7 +372,7 @@ class DiffuseBraggRewardFunction:
         if reward_inputs.atom_array is None:
             raise ValueError(
                 "DiffuseBraggRewardFunction.prepare() needs reward_inputs.atom_array "
-                "for the topology the scattering kernels are built from."
+                "for the topology required to build the scattering kernels."
             )
         self.setup = lunus_sf.build_setup(
             reward_inputs.to_atom_array(),
@@ -399,10 +401,14 @@ class DiffuseBraggRewardFunction:
             self._bragg_t = torch.as_tensor(self._bragg_obs, dtype=torch.float32, device=device)
 
         if self._scores_diffuse:
+            # Inline for the same reason as SolventModel above: loads aniso_torch
+            # only when the diffuse term is scored.
+            from lunus.sf import IsotropicBackground
+
             # Shell thickness is d* of (1,1,1), the convention to_aniso uses.
             shell_thickness = float(np.sqrt(self.unit_cell.calculate_1_d2((1, 1, 1))))
             d_star = np.sqrt(self.unit_cell.calculate_1_d2_array(self._hkl))
-            aniso = self._isotropic_background(
+            isotropic_background = IsotropicBackground(
                 d_star, shell_thickness, device=device, dtype=torch.float32
             )
             # The spline basis is (n_refl, n_bins) and is built in float64 before
@@ -410,17 +416,17 @@ class DiffuseBraggRewardFunction:
             # finally occupies. A diffuse map of a few million reflections puts
             # that in the hundreds of MB -- worth reporting rather than
             # discovering as an allocation failure.
-            basis_mb = len(self._hkl) * aniso.n_bins * 4 / 1e6
+            basis_mb = len(self._hkl) * isotropic_background.n_bins * 4 / 1e6
             logger.info(
-                f"Anisotropic transform: {aniso.n_bins} shells of "
+                f"Anisotropic transform: {isotropic_background.n_bins} shells of "
                 f"{shell_thickness:.5f} 1/A, basis {basis_mb:.0f} MB on {device}"
             )
             # The target is constant, so transform it once. Done in torch rather
             # than through the numpy one-shot so both sides pass through exactly
             # the same operator, leaving no room for the two to disagree.
             target = torch.as_tensor(self._diffuse_obs, dtype=torch.float32, device=device)
-            self._diffuse_t = aniso(target)
-            self._aniso = aniso
+            self._diffuse_t = isotropic_background(target)
+            self._isotropic_background = isotropic_background
 
         logger.info(
             f"Prepared DiffuseBraggRewardFunction: {len(self._hkl)} reflections, "
@@ -456,9 +462,9 @@ class DiffuseBraggRewardFunction:
     ) -> Float[torch.Tensor, ""]:
         """Scaled, optionally normalized squared residual between calc and obs."""
         if self.fit_scale:
-            # Least squares in the scale alone, detached: it removes an overall
-            # factor the model has no reason to reproduce, without giving the
-            # gradient a way to lower the loss by rescaling the structure.
+            # Least squares in the scale alone. Detaching is exact: at the fitted
+            # scale d(residual)/d(scale) = 0, so the gradient through calc is the
+            # full gradient of the minimized residual (envelope theorem).
             scale = (torch.dot(calc, obs) / torch.dot(calc, calc).clamp_min(1e-30)).detach()
             calc = scale * calc
         residual = torch.sum((calc - obs) ** 2)
@@ -475,18 +481,19 @@ class DiffuseBraggRewardFunction:
         unique_combinations: torch.Tensor | None = None,
         inverse_indices: torch.Tensor | None = None,
     ) -> Float[torch.Tensor, ""]:
-        """Score one ensemble. Call ``.backward()`` for gradients w.r.t. coordinates.
+        """Score one ensemble.
 
         ``elements`` and ``b_factors`` are ignored: both are baked into the
         kernels built by :meth:`prepare`, which is also why B-factors cannot vary
         per configuration here.
 
-        ``occupancies`` arrive as ``1/N`` from ``RewardInputs``, a convention the
-        sum-based rewards rely on. Diffuse is a *variance*, so each configuration
-        must be evaluated on the grid at its own occupancy and the moments taken afterwards;
-        leaving the ``1/N`` in place would scale both moments by ``1/N²`` and
-        collapse the variance toward zero, which looks like guidance doing
-        nothing rather than like an error. The factor is divided out here.
+        ``occupancies`` arrive as ``1/N`` from ``RewardInputs`` because the sum-based
+        rewards add ``F`` over configurations and need the ``1/N`` to get the
+        ensemble mean. This reward takes the mean and variance itself in
+        ``mean_and_diffuse``, so it needs each configuration's ``F`` at full
+        occupancy and multiplies the ``1/N`` back out. Left in place it would scale
+        both moments by ``1/N²`` and shrink the diffuse term toward zero, which
+        looks like guidance doing nothing rather than like an error.
         """
         if self.setup is None:
             raise RuntimeError(
@@ -515,8 +522,10 @@ class DiffuseBraggRewardFunction:
         if weight > 0.0:
             total = total + weight * self._residual(torch.abs(mean_f), self._bragg_t)
         if weight < 1.0:
-            if self._aniso is None:
+            if self._isotropic_background is None:
                 raise RuntimeError("prepare() built no anisotropic transform for the diffuse term.")
-            total = total + (1.0 - weight) * self._residual(self._aniso(diffuse), self._diffuse_t)
+            total = total + (1.0 - weight) * self._residual(
+                self._isotropic_background(diffuse), self._diffuse_t
+            )
 
         return total
