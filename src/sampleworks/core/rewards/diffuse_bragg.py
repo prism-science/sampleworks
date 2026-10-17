@@ -5,12 +5,13 @@ One forward pass gives both observables: ``structure_factors_batch`` returns
 and ``<|F|²> − |<F>|²`` (diffuse). Scoring them in one reward rather than two
 avoids paying for the grid evaluation and FFT twice.
 
-Each term keeps its own reflection list. Bragg data live on the integer
-reciprocal lattice of the unit cell; diffuse data need not, since a diffuse map
-is sampled between the Bragg peaks too (fractional hkl of the unit cell, or
-integer hkl of a supercell). Today both lists are integer hkl of one cell and are
-gathered from one FFT grid; a supercell diffuse calculation would evaluate the
-diffuse list on its own grid, which is why nothing here assumes the lists match.
+Each term keeps its own reflection list, both indexed on the crystal unit cell:
+Bragg data on its integer reciprocal lattice, diffuse data on the lattice lunus
+samples a diffuse map on, integer hkl today. The lists need not coincide, so the
+union is evaluated once and each term gathers its own reflections. A supercell
+model is the forward model's business, not the data's: lunus folds a supercell
+density into the crystal cell before extracting F(hkl), which is exact at integer
+hkl. Fractional diffuse hkl would need unfolded supercell F and non-integer lists.
 
 The two terms are combined convexly, ``bragg_weight`` running from 1.0 (pure
 Bragg) to 0.0 (pure diffuse). Each term is ``||s·calc − obs||² / ||obs||²`` with
@@ -263,9 +264,8 @@ class DiffuseBraggRewardFunction:
             diffuse_hkl, diffuse_values = self._finite_column(ds, column)
             if cell is None:
                 cell, spacegroup = ds.cell, ds.spacegroup
-            # One grid serves both terms, so the diffuse indices must be integer
-            # hkl of the Bragg cell. A supercell diffuse target would relax this
-            # to an integer ratio of cells and get its own grid.
+            # Both targets are in the experiment's frame, the crystal unit cell.
+            # A supercell model folds onto this cell in the forward model.
             elif not ds.cell.approx(cell, 1e-3):
                 raise ValueError(
                     f"The diffuse target's cell {ds.cell} differs from the Bragg "
