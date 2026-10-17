@@ -235,7 +235,7 @@ class DiffuseBraggRewardFunction:
         self.setup: lunus_sf.LunusSetup | None = None
         # lunus.sf.IsotropicBackground instance, built in prepare(); calling it
         # returns the anisotropic component of a per-reflection intensity.
-        self._isotropic_background: IsotropicBackground | None = None
+        self._isotropic_background_subtractor: IsotropicBackground | None = None
 
     def _load_targets(self, bragg_path, diffuse_path, bragg_column, diffuse_column):
         """Read the targets, one (hkl, values) pair per term, on a common cell.
@@ -475,7 +475,7 @@ class DiffuseBraggRewardFunction:
             # the same operator, leaving no room for the two to disagree.
             target = torch.as_tensor(self._diffuse_obs, dtype=torch.float32, device=device)
             self._diffuse_t = isotropic_background(target)
-            self._isotropic_background = isotropic_background
+            self._isotropic_background_subtractor = isotropic_background
 
         logger.info(
             f"Prepared DiffuseBraggRewardFunction: {len(self._hkl)} reflections evaluated, "
@@ -581,10 +581,11 @@ class DiffuseBraggRewardFunction:
                 torch.abs(mean_f[self._bragg_index_t]), self._bragg_t
             )
         if weight < 1.0:
-            if self._isotropic_background is None:
+            if self._isotropic_background_subtractor is None:
                 raise RuntimeError("prepare() built no anisotropic transform for the diffuse term.")
             total = total + (1.0 - weight) * self._residual(
-                self._isotropic_background(diffuse[self._diffuse_index_t]), self._diffuse_t
+                self._isotropic_background_subtractor(diffuse[self._diffuse_index_t]),
+                self._diffuse_t,
             )
 
         return total
