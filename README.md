@@ -146,10 +146,11 @@ readiness table, and [docs/IT_OPT_TESTING.md](docs/IT_OPT_TESTING.md) for how to
 
 `--reward-type` chooses what the run is guided by, and each reward brings its own options:
 
-| Reward                         | Guided by                                      | Its options                                                                                    |
-| ------------------------------ | ---------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `real_space_density` (default) | Fit to a density map                           | `--density`, `--resolution`, `--loss-order`, `--em`, `--scattering-table`                      |
-| `structure_factor`             | Fit to structure-factor amplitudes from an MTZ | `--mtzfile`, `--expcolumns`, `--resolution`, `--bulk-solvent`, `--scattering-factor-mode`, ... |
+| Reward                         | Guided by                                                              | Its options                                                                                    |
+| ------------------------------ | ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `real_space_density` (default) | Fit to a density map                                                   | `--density`, `--resolution`, `--loss-order`, `--em`, `--scattering-table`                      |
+| `structure_factor`             | Fit to structure-factor amplitudes from an MTZ                         | `--mtzfile`, `--expcolumns`, `--resolution`, `--bulk-solvent`, `--scattering-factor-mode`, ... |
+| `diffuse_bragg`                | Fit to Bragg amplitudes and anisotropic diffuse intensities (lunus.sf) | `--bragg-target`, `--diffuse-target`, `--bragg-weight`, `--resolution`, ...                    |
 
 ```bash
 sampleworks-guidance --model boltz2 --guidance-type pure_guidance \
