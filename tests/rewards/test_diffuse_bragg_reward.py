@@ -21,6 +21,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import reciprocalspaceship as rs
 import torch
 from sampleworks.core.rewards.protocol import (
     PreparableRewardFunctionProtocol,
@@ -377,8 +378,8 @@ class TestFreeReflections:
             bragg_target=path, bragg_weight=1.0, exclude_free_reflections=True
         )
 
-        assert len(with_all._hkl) == n_total
-        assert len(working._hkl) == n_total - n_free
+        assert len(with_all._bragg_hkl) == n_total
+        assert len(working._bragg_hkl) == n_total - n_free
 
     def test_wrong_convention_warns(self, flagged_bragg, caplog):
         """test_set_value=0 on a Phenix-convention file keeps only the 10% test set."""
@@ -389,7 +390,7 @@ class TestFreeReflections:
             bragg_target=path, bragg_weight=1.0, exclude_free_reflections=True, test_set_value=0
         )
 
-        assert len(reward._hkl) == n_free
+        assert len(reward._bragg_hkl) == n_free
         assert "CCP4-convention" in caplog.text
 
     def test_missing_flag_column_is_a_clear_error(self, targets):
@@ -400,6 +401,73 @@ class TestFreeReflections:
             DiffuseBraggRewardFunction(
                 bragg_target=bragg_path, bragg_weight=1.0, exclude_free_reflections=True
             )
+
+
+@pytest.fixture(scope="module")
+def thinned_diffuse(targets, tmp_path_factory):
+    """The diffuse target with every other reflection removed."""
+    _, diffuse_path, _, _ = targets
+    ds = rs.read_mtz(str(diffuse_path))
+    thinned = ds.iloc[::2].copy()
+    path = tmp_path_factory.mktemp("thinned") / "diffuse_thinned.mtz"
+    thinned.write_mtz(str(path))
+    return path, len(ds), len(thinned)
+
+
+class TestSeparateReflectionLists:
+    """Bragg and diffuse targets need not be indexed on the same reflections."""
+
+    def test_each_term_keeps_its_own_reflections(self, ensemble, targets, thinned_diffuse):
+        from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
+
+        bragg_path, _, _, _ = targets
+        path, n_full, n_thinned = thinned_diffuse
+        reward = DiffuseBraggRewardFunction(
+            bragg_target=bragg_path, diffuse_target=path, bragg_weight=0.5
+        )
+
+        assert len(reward._bragg_hkl) == n_full
+        assert len(reward._diffuse_hkl) == n_thinned
+        assert len(reward._hkl) == n_full
+
+        atom_array, coords = ensemble
+        prepare(reward, atom_array)
+        loss, _ = score(reward, atom_array, coords)
+        assert torch.isfinite(loss)
+        assert loss.item() < 1e-3
+
+    def test_disjoint_lists_are_evaluated_together(self, ensemble, targets, thinned_diffuse):
+        """Bragg on the odd reflections, diffuse on the even: union is the full set."""
+        from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
+
+        bragg_path, _, _, _ = targets
+        diffuse_path, n_full, n_even = thinned_diffuse
+        odd_bragg = diffuse_path.parent / "bragg_odd.mtz"
+        rs.read_mtz(str(bragg_path)).iloc[1::2].copy().write_mtz(str(odd_bragg))
+
+        reward = DiffuseBraggRewardFunction(
+            bragg_target=odd_bragg, diffuse_target=diffuse_path, bragg_weight=0.5
+        )
+        assert len(reward._bragg_hkl) == n_full - n_even
+        assert len(reward._hkl) == n_full
+
+        atom_array, coords = ensemble
+        prepare(reward, atom_array)
+        loss, _ = score(reward, atom_array, coords)
+        assert loss.item() < 1e-3
+
+    def test_mismatched_cells_are_rejected(self, targets, tmp_path):
+        import gemmi
+        from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
+
+        bragg_path, diffuse_path, cell, _ = targets
+        ds = rs.read_mtz(str(diffuse_path))
+        ds.cell = gemmi.UnitCell(cell.a * 2, cell.b, cell.c, cell.alpha, cell.beta, cell.gamma)
+        other = tmp_path / "diffuse_other_cell.mtz"
+        ds.write_mtz(str(other))
+
+        with pytest.raises(ValueError, match="same unit cell"):
+            DiffuseBraggRewardFunction(bragg_target=bragg_path, diffuse_target=other)
 
 
 class TestBulkSolvent:

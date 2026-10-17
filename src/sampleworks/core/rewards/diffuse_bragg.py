@@ -5,6 +5,13 @@ One forward pass gives both observables: ``structure_factors_batch`` returns
 and ``<|F|²> − |<F>|²`` (diffuse). Scoring them in one reward rather than two
 avoids paying for the grid evaluation and FFT twice.
 
+Each term keeps its own reflection list. Bragg data live on the integer
+reciprocal lattice of the unit cell; diffuse data need not, since a diffuse map
+is sampled between the Bragg peaks too (fractional hkl of the unit cell, or
+integer hkl of a supercell). Today both lists are integer hkl of one cell and are
+gathered from one FFT grid; a supercell diffuse calculation would evaluate the
+diffuse list on its own grid, which is why nothing here assumes the lists match.
+
 The two terms are combined convexly, ``bragg_weight`` running from 1.0 (pure
 Bragg) to 0.0 (pure diffuse). Each term is ``||s·calc − obs||² / ||obs||²`` with
 ``s`` the least-squares scale (``fit_scale``) and the denominator the
@@ -208,13 +215,21 @@ class DiffuseBraggRewardFunction:
         self._scores_bragg = needs_bragg
         self._scores_diffuse = needs_diffuse
 
-        # The reflection list comes from the targets, so the model is evaluated
-        # exactly where there is data. lunus extracts F(hkl) by indexing the FFT
-        # grid modulo its shape, so any integer hkl works and no ASU convention
-        # has to be reconciled.
-        self._hkl, self._bragg_obs, self._diffuse_obs, self.unit_cell, self.space_group = (
-            self._load_targets(bragg_target, diffuse_target, bragg_column, diffuse_column)
-        )
+        # Each term's reflection list comes from its target, so the model is
+        # evaluated exactly where there is data. lunus extracts F(hkl) by indexing
+        # the FFT grid modulo its shape, so any integer hkl works and no ASU
+        # convention has to be reconciled.
+        (
+            self._bragg_hkl,
+            self._bragg_obs,
+            self._diffuse_hkl,
+            self._diffuse_obs,
+            self.unit_cell,
+            self.space_group,
+        ) = self._load_targets(bragg_target, diffuse_target, bragg_column, diffuse_column)
+        # Both lists are integer hkl of one cell today, so one grid evaluation
+        # serves both terms and each gathers its own reflections from it.
+        self._hkl, self._bragg_index, self._diffuse_index = self._union_hkl()
 
         self.setup: lunus_sf.LunusSetup | None = None
         # lunus.sf.IsotropicBackground instance, built in prepare(); calling it
@@ -222,7 +237,7 @@ class DiffuseBraggRewardFunction:
         self._isotropic_background: IsotropicBackground | None = None
 
     def _load_targets(self, bragg_path, diffuse_path, bragg_column, diffuse_column):
-        """Read the targets and reduce them to one shared reflection list.
+        """Read the targets, one (hkl, values) pair per term, on a common cell.
 
         Everything here is vectorized deliberately. A diffuse map from xtraj runs
         to millions of reflections -- 1.57M for the examples/xtraj cell at 1.8 A
@@ -248,46 +263,72 @@ class DiffuseBraggRewardFunction:
             diffuse_hkl, diffuse_values = self._finite_column(ds, column)
             if cell is None:
                 cell, spacegroup = ds.cell, ds.spacegroup
-
-        if bragg_hkl is None:
-            hkl, bragg, diffuse = diffuse_hkl, None, diffuse_values
-        elif diffuse_hkl is None:
-            hkl, bragg, diffuse = bragg_hkl, bragg_values, None
-        else:
-            # Both terms are scored on the reflections the two targets have in
-            # common; reflections present in only one are dropped. intersect1d
-            # returns one index into each target per shared reflection, so the
-            # Bragg hkl rows are the diffuse hkl rows and one copy is kept.
-            shared, i_bragg, i_diffuse = np.intersect1d(
-                self._pack(bragg_hkl), self._pack(diffuse_hkl), return_indices=True
-            )
-            if shared.size == 0:
+            # One grid serves both terms, so the diffuse indices must be integer
+            # hkl of the Bragg cell. A supercell diffuse target would relax this
+            # to an integer ratio of cells and get its own grid.
+            elif not ds.cell.approx(cell, 1e-3):
                 raise ValueError(
-                    "The Bragg and diffuse targets share no reflections. Check that "
-                    "they were generated on the same cell and resolution range."
+                    f"The diffuse target's cell {ds.cell} differs from the Bragg "
+                    f"target's {cell}; both must be indexed on the same unit cell."
                 )
-            hkl = bragg_hkl[i_bragg]
-            bragg = bragg_values[i_bragg]
-            diffuse = diffuse_values[i_diffuse]
 
         if self.resolution is not None:
-            d_spacing = cell.calculate_d_array(hkl)
-            keep = d_spacing >= self.resolution
-            if not keep.any():
-                raise ValueError(
-                    f"No reflections survive a {self.resolution} A cutoff; the "
-                    f"targets reach {d_spacing.min():.2f} A."
-                )
-            hkl = hkl[keep]
-            bragg = bragg[keep] if bragg is not None else None
-            diffuse = diffuse[keep] if diffuse is not None else None
+            bragg_hkl, bragg_values = self._within_resolution(
+                cell, "Bragg", bragg_hkl, bragg_values
+            )
+            diffuse_hkl, diffuse_values = self._within_resolution(
+                cell, "diffuse", diffuse_hkl, diffuse_values
+            )
 
         logger.info(
-            f"Targets: {len(hkl)} reflections"
-            + (f", Bragg |F| {bragg.min():.1f}-{bragg.max():.1f}" if bragg is not None else "")
-            + (f", diffuse {diffuse.min():.3g}-{diffuse.max():.3g}" if diffuse is not None else "")
+            "Targets:"
+            + (
+                f" {len(bragg_hkl)} Bragg reflections, |F| "
+                f"{bragg_values.min():.1f}-{bragg_values.max():.1f}"
+                if bragg_values is not None
+                else ""
+            )
+            + (
+                f" {len(diffuse_hkl)} diffuse reflections, I "
+                f"{diffuse_values.min():.3g}-{diffuse_values.max():.3g}"
+                if diffuse_values is not None
+                else ""
+            )
         )
-        return hkl, bragg, diffuse, cell, spacegroup
+        return bragg_hkl, bragg_values, diffuse_hkl, diffuse_values, cell, spacegroup
+
+    def _within_resolution(self, cell, name: str, hkl, values):
+        """Drop reflections of one target beyond ``self.resolution``; passes None through."""
+        if hkl is None:
+            return None, None
+        d_spacing = cell.calculate_d_array(hkl)
+        keep = d_spacing >= self.resolution
+        if not keep.any():
+            raise ValueError(
+                f"No {name} reflections survive a {self.resolution} A cutoff; the "
+                f"target reaches {d_spacing.min():.2f} A."
+            )
+        return hkl[keep], values[keep]
+
+    def _union_hkl(self) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None]:
+        """The reflections to evaluate once, and each term's gather indices into them.
+
+        Returns
+        -------
+        hkl : (n_union, 3) int64
+            Every reflection either target needs, each once.
+        bragg_index, diffuse_index : (n_term,) int64 or None
+            Positions of each term's reflections within ``hkl``, in the order of
+            that term's observed values.
+        """
+        lists = [h for h in (self._bragg_hkl, self._diffuse_hkl) if h is not None]
+        stacked = np.concatenate(lists)
+        _, first, inverse = np.unique(self._pack(stacked), return_index=True, return_inverse=True)
+        hkl = stacked[first]
+        n_bragg = 0 if self._bragg_hkl is None else len(self._bragg_hkl)
+        bragg_index = inverse[:n_bragg] if self._bragg_hkl is not None else None
+        diffuse_index = inverse[n_bragg:] if self._diffuse_hkl is not None else None
+        return hkl, bragg_index, diffuse_index
 
     @staticmethod
     def _pack(hkl: np.ndarray) -> np.ndarray:
@@ -382,6 +423,14 @@ class DiffuseBraggRewardFunction:
             device=device,
         )
         self._hkl_t = torch.as_tensor(self._hkl, dtype=torch.long, device=device)
+        self._bragg_index_t = (
+            None if self._bragg_index is None else torch.as_tensor(self._bragg_index, device=device)
+        )
+        self._diffuse_index_t = (
+            None
+            if self._diffuse_index is None
+            else torch.as_tensor(self._diffuse_index, device=device)
+        )
 
         # Recalibrated on every prepare(): the matched cutoff belongs to the topology
         # and grid prepared here, and prepare() may be re-run for different inputs.
@@ -407,7 +456,7 @@ class DiffuseBraggRewardFunction:
 
             # Shell thickness is d* of (1,1,1), the convention to_aniso uses.
             shell_thickness = float(np.sqrt(self.unit_cell.calculate_1_d2((1, 1, 1))))
-            d_star = np.sqrt(self.unit_cell.calculate_1_d2_array(self._hkl))
+            d_star = np.sqrt(self.unit_cell.calculate_1_d2_array(self._diffuse_hkl))
             isotropic_background = IsotropicBackground(
                 d_star, shell_thickness, device=device, dtype=torch.float32
             )
@@ -416,7 +465,7 @@ class DiffuseBraggRewardFunction:
             # finally occupies. A diffuse map of a few million reflections puts
             # that in the hundreds of MB -- worth reporting rather than
             # discovering as an allocation failure.
-            basis_mb = len(self._hkl) * isotropic_background.n_bins * 4 / 1e6
+            basis_mb = len(self._diffuse_hkl) * isotropic_background.n_bins * 4 / 1e6
             logger.info(
                 f"Anisotropic transform: {isotropic_background.n_bins} shells of "
                 f"{shell_thickness:.5f} 1/A, basis {basis_mb:.0f} MB on {device}"
@@ -429,13 +478,13 @@ class DiffuseBraggRewardFunction:
             self._isotropic_background = isotropic_background
 
         logger.info(
-            f"Prepared DiffuseBraggRewardFunction: {len(self._hkl)} reflections, "
+            f"Prepared DiffuseBraggRewardFunction: {len(self._hkl)} reflections evaluated, "
             f"bragg_weight={self.bragg_weight}, normalize={self.normalize}, "
             f"fit_scale={self.fit_scale}"
         )
 
     def _highest_resolution(self) -> float:
-        """d_min of the target reflection list, for sizing the density grid."""
+        """d_min over every evaluated reflection, for sizing the density grid."""
         return float(self.unit_cell.calculate_d_array(self._hkl).min())
 
     def _weight(self) -> float:
@@ -520,12 +569,14 @@ class DiffuseBraggRewardFunction:
         # is nan, and a term that cannot contribute should not be able to poison
         # the loss.
         if weight > 0.0:
-            total = total + weight * self._residual(torch.abs(mean_f), self._bragg_t)
+            total = total + weight * self._residual(
+                torch.abs(mean_f[self._bragg_index_t]), self._bragg_t
+            )
         if weight < 1.0:
             if self._isotropic_background is None:
                 raise RuntimeError("prepare() built no anisotropic transform for the diffuse term.")
             total = total + (1.0 - weight) * self._residual(
-                self._isotropic_background(diffuse), self._diffuse_t
+                self._isotropic_background(diffuse[self._diffuse_index_t]), self._diffuse_t
             )
 
         return total
