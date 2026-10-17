@@ -543,6 +543,10 @@ class DiffuseBraggRewardFunction:
         occupancy and multiplies the ``1/N`` back out. Left in place it would scale
         both moments by ``1/N²`` and shrink the diffuse term toward zero, which
         looks like guidance doing nothing rather than like an error.
+
+        TODO(#483): configuration weights are uniform. Once ``lunus.sf.mean_and_diffuse``
+        takes ``weights``, pass the occupancies through as given and the weights
+        explicitly, so non-uniform populations can be scored.
         """
         if self.setup is None:
             raise RuntimeError(
