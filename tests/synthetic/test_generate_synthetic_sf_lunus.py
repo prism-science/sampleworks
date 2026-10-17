@@ -332,9 +332,31 @@ class TestMTZWriters:
         flags = gemmi.read_mtz_file(str(with_flags)).column_with_label("R-free-flags")
         assert flags.type == "I"
         assert set(np.unique(flags.array)) <= {0.0, 1.0}
-        # The requested fraction (1 = test). The flagged count is round(0.25 * n), so
-        # the mean can differ from 0.25 by at most half a reflection.
-        assert flags.array.mean() == pytest.approx(0.25, abs=0.5 / len(hkl))
+        # The draw is reciprocalspaceship's, one random number per reflection, so the
+        # realized fraction is binomial about the requested 0.25; the exact set is
+        # pinned against rs in tests/synthetic/test_synthetic_utils.py.
+        assert 0.0 < flags.array.mean() < 1.0
+
+    def test_ccp4_convention_writes_the_rs_column_name(self, tmp_path):
+        """Under the CCP4 convention the flag column is ``FreeR_flag`` with 0 = test."""
+        hkl = self.reflections()
+        path = tmp_path / "ccp4.mtz"
+        save_mtz(
+            dataset_from_bragg_amplitudes(
+                hkl,
+                np.ones(len(hkl), dtype=np.complex64),
+                gemmi.UnitCell(30.0, 30.0, 30.0, 90.0, 90.0, 90.0),
+                gemmi.SpaceGroup("P 1"),
+                test_fraction=0.25,
+                seed=7,
+                ccp4_convention=True,
+            ),
+            path,
+            "structure factors",
+        )
+        flags = gemmi.read_mtz_file(str(path)).column_with_label("FreeR_flag")
+        assert flags.type == "I"
+        assert set(np.unique(flags.array)) <= {0.0, 1.0}
 
     def test_intensity_type_survives_an_unconventional_label(self, tmp_path):
         """The intensity type is J for any label; rs alone would infer R for this one."""

@@ -716,6 +716,69 @@ class BatchRowForMTZ:
         )
 
 
+def resolve_crystal_metadata(
+    row: BatchRowForMTZ, structure_path: Path
+) -> tuple[gemmi.UnitCell, str]:
+    """Cell and space group for a row: its own overrides, else the structure file's.
+
+    Parameters
+    ----------
+    row
+        Batch row, whose ``unit_cell`` and ``space_group`` take precedence when set.
+    structure_path
+        Structure file read for whichever of the two the row does not supply.
+
+    Returns
+    -------
+    tuple[gemmi.UnitCell, str]
+        Unit cell and Hermann-Mauguin space-group symbol.
+    """
+    unit_cell = row.unit_cell
+    space_group = row.space_group
+    if unit_cell is None or space_group is None:
+        meta = gemmi.read_structure(str(structure_path))
+        if unit_cell is None:
+            unit_cell = meta.cell
+        if space_group is None:
+            space_group = meta.spacegroup_hm
+    return unit_cell, space_group
+
+
+def rfree_flags(
+    n_reflections: int,
+    fraction: float,
+    seed: int | None = None,
+    ccp4_convention: bool = False,
+) -> tuple[str, np.ndarray]:
+    """R-free flags as ``reciprocalspaceship.utils.add_rfree`` would assign them.
+
+    Same draw (one ``default_rng(seed)`` number per reflection, flagged where it is
+    at or below ``fraction``) and same column names, so a seed selects the same test
+    set here as in a dataset flagged with ``add_rfree``, in the same reflection order.
+
+    Parameters
+    ----------
+    n_reflections
+        Number of reflections, in the order they will be written.
+    fraction
+        Fraction of reflections to place in the test set.
+    seed
+        Seed for the draw; ``None`` gives a different selection each call.
+    ccp4_convention
+        False (default): column ``R-free-flags``, 1 = test, 0 = work. True: column
+        ``FreeR_flag``, 0 = test, 1 = work.
+
+    Returns
+    -------
+    tuple[str, numpy.ndarray]
+        Column label and ``(n_reflections,)`` flag values.
+    """
+    test = np.random.default_rng(seed).random(n_reflections) <= fraction
+    if ccp4_convention:
+        return "FreeR_flag", np.where(test, 0.0, 1.0)
+    return "R-free-flags", np.where(test, 1.0, 0.0)
+
+
 def load_batch_csv(csv_path: Path) -> list[BatchRowForMTZ]:
     """Load and parse a CSV file for batch processing.
 
