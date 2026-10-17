@@ -565,6 +565,10 @@ class DiffuseBraggRewardFunction:
         f_configs = lunus_sf.structure_factors(
             self.setup, coordinates, occupancies, self._hkl_t, solvent=self._solvent
         )
+        # TODO(#483): one setup and one F serve both terms. A supercell model
+        # takes <F> on the folded, symmetry-expanded cell and the variance on
+        # the unfolded supercell in P1, so each term will need its own setup
+        # and a separate mean / diffuse call with explicit weights.
         mean_f, diffuse = mean_and_diffuse(f_configs)
 
         total = torch.zeros((), dtype=torch.float32, device=coordinates.device)
