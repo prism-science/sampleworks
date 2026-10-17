@@ -14,7 +14,10 @@ So the truth ensemble here is built from the **model's own atom array**: featuri
 once, take the topology the model actually produces, displace a chosen set of
 atoms into a two-state ensemble, and generate the targets from that. Model and
 target are then the same chemical object and the only difference left is the one
-deliberately introduced.
+deliberately introduced. The targets are on the model's absolute scale, so the
+printed guidance command passes ``--no-fit-scale``: a fitted scale would score
+only the pattern of the diffuse signal and discard its magnitude, which is the
+size of the displacement this harness is trying to recover.
 
 Two modes:
 
@@ -49,9 +52,6 @@ from sampleworks.utils.structure_utils import process_structure_to_trajectory_in
 from sampleworks.utils.torch_utils import try_gpu
 
 
-DEFAULT_B_FACTOR = 20.0
-
-
 def model_topology_and_coords(
     structure_path: Path, checkpoint: Path, device: torch.device, out_dir: Path
 ):
@@ -65,7 +65,10 @@ def model_topology_and_coords(
     Returns
     -------
     atom_array
-        The model's topology, with B-factors filled in where absent.
+        The model's topology with the reconciled coordinates and B-factors, as
+        ``RewardInputs.to_atom_array`` rebuilds it: the same array the reward's
+        ``prepare`` bakes into its scattering kernels during guidance, so the
+        target and the guided model share scattering factors.
     coords
         ``(n_atoms, 3)`` reference coordinates in model space -- the input
         structure, mapped through the reconciler.
@@ -88,17 +91,10 @@ def model_topology_and_coords(
         structure=structure, coords_from_prior=prior, features=features, ensemble_size=1
     )
 
-    atom_array = processed.model_atom_array or processed.atom_array
-    coords = processed.input_coords[0].detach().cpu().numpy().astype(np.float64)
-
-    # RewardInputs rejects NaN B-factors, and a model atom array may carry none.
-    b_factors = np.asarray(getattr(atom_array, "b_factor", None), dtype=np.float64)
-    if b_factors.size != len(atom_array) or not np.isfinite(b_factors).all():
-        atom_array.set_annotation(
-            "b_factor", np.full(len(atom_array), DEFAULT_B_FACTOR, dtype=np.float32)
-        )
-    if not hasattr(atom_array, "occupancy"):
-        atom_array.set_annotation("occupancy", np.ones(len(atom_array), dtype=np.float32))
+    # The same inputs a trajectory scaler hands to reward.prepare(): structure
+    # B-factors copied onto the matched model atoms, reconciled coordinates.
+    atom_array = processed.to_reward_inputs().to_atom_array()
+    coords = np.asarray(atom_array.coord, dtype=np.float64)
 
     logger.info(
         f"Model topology: {len(atom_array)} atoms, elements {sorted(set(atom_array.element))}"
@@ -234,7 +230,7 @@ def generate(args: argparse.Namespace) -> None:
         f"      --reward-type diffuse_bragg \\\n"
         f"      --bragg-target {bragg_path} \\\n"
         f"      --diffuse-target {diffuse_path} \\\n"
-        f"      --bragg-weight {args.bragg_weight} \\\n"
+        f"      --bragg-weight {args.bragg_weight} --no-fit-scale \\\n"
         f"      --resolution {args.resolution} --ensemble-size {args.ensemble_size} \\\n"
         f"      --augmentation --align-to-input \\\n"
         f"      --output-dir {args.output_dir / 'guided'}\n"
