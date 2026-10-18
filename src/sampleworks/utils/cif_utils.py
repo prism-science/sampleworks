@@ -2,7 +2,7 @@ import itertools
 import re
 import tempfile
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -356,7 +356,7 @@ def _first_disagreement(first: tuple[int, ...], second: tuple[int, ...]) -> int 
 
 
 def _unique_subsequence_indices(
-    reference: list[str], modeled: list[str]
+    reference: Sequence[str | list[str]], modeled: list[str]
 ) -> tuple[list[int] | None, int | None]:
     """Find a unique ordered embedding with the fewest deletion runs.
 
@@ -365,8 +365,10 @@ def _unique_subsequence_indices(
 
     Parameters
     ----------
-    reference : list[str]
-        Deposited monomer names.
+    reference : Sequence[str | list[str]]
+        Deposited monomer names, one entry per sequence position. A position with
+        microheterogeneity (``entity_poly_seq`` rows sharing a ``num``) is a list of the
+        alternatives, and a modeled residue matches it when it matches any of them.
     modeled : list[str]
         Modeled monomer names.
 
@@ -378,7 +380,10 @@ def _unique_subsequence_indices(
         the first reference index at which they disagree; ``(None, None)`` when there is no
         embedding at all.
     """
-    reference = [_canonical_monomer(name) for name in reference]
+    alternatives = [
+        {_canonical_monomer(name) for name in ([names] if isinstance(names, str) else names)}
+        for names in reference
+    ]
     modeled = [_canonical_monomer(name) for name in modeled]
     states: dict[_DPKey, _DPState] = {(0, False): (0, (), 1, None)}
 
@@ -422,13 +427,13 @@ def _unique_subsequence_indices(
     # new deletion run) or, when the names agree, matches it to the next modeled residue. A
     # state reached twice at the same cost loses its path and keeps a count, so a non-unique
     # optimum is reported as ambiguous instead of picked arbitrarily.
-    for reference_index, reference_name in enumerate(reference):
+    for reference_index, reference_names in enumerate(alternatives):
         next_states: dict[_DPKey, _DPState] = {}
         for (modeled_index, deleting), (cost, path, count, ambiguous_at) in states.items():
             update(
                 next_states, (modeled_index, True), cost + (not deleting), path, count, ambiguous_at
             )
-            if modeled_index < len(modeled) and reference_name == modeled[modeled_index]:
+            if modeled_index < len(modeled) and modeled[modeled_index] in reference_names:
                 matched_path = None if path is None else (*path, reference_index)
                 update(
                     next_states, (modeled_index + 1, False), cost, matched_path, count, ambiguous_at
@@ -482,17 +487,19 @@ def _matching_entity(reference_block: CIFBlock, residue_names: list[str]) -> tup
     ambiguous: list[str] = []  # "entity 1 around deposited residue 158 (ALA)"
     for entity_id in reference_block[_ENTITY_POLY]["entity_id"].as_array(str):
         rows = np.flatnonzero(sequence_ids == entity_id)
-        # Microheterogeneity lists several monomers at one num (e.g. CYS/CSO); keep the first.
-        rows = rows[np.unique(sequence_nums[rows], return_index=True)[1]]
-        rows = rows[np.argsort(sequence_nums[rows].astype(int), kind="stable")]
-        reference_names = list(sequence_names[rows])
+        # Microheterogeneity lists several monomers at one num (e.g. CYS/CSO, or a point
+        # mutation ASN/ASP): one alignment position, any of its monomers may match.
+        nums = sorted({str(num) for num in sequence_nums[rows]}, key=lambda num: int(num))
+        reference_names: list[str | list[str]] = [
+            [str(name) for name in sequence_names[rows][sequence_nums[rows] == num]] for num in nums
+        ]
         indices, ambiguous_at = _unique_subsequence_indices(reference_names, residue_names)
         if indices is not None:
-            matches.append((str(entity_id), list(sequence_nums[rows][indices])))
+            matches.append((str(entity_id), [nums[index] for index in indices]))
         elif ambiguous_at is not None:
             ambiguous.append(
-                f"entity {entity_id} around deposited residue "
-                f"{sequence_nums[rows][ambiguous_at]} ({reference_names[ambiguous_at]})"
+                f"entity {entity_id} around deposited residue {nums[ambiguous_at]} "
+                f"({'/'.join(reference_names[ambiguous_at])})"
             )
     if len(matches) == 1:
         return matches[0]
@@ -623,8 +630,38 @@ def _normalize_nulls(value: Any) -> Any:
     return "?" if value is None else value
 
 
+def _is_polymer_row(atom_site: CIFCategory, reference_block: CIFBlock) -> np.ndarray:
+    """Mark the ``atom_site`` rows that belong to a polymer chain.
+
+    ``ATOM`` rows always do. A ``HETATM`` row does only when the deposit's ``entity_poly_seq``
+    lists its monomer (a modified residue such as MSE or LYR), compared after canonicalizing
+    both sides. Ligands and waters are outside the polymer whatever their author number, which
+    can coincide with a deposited sequence position (6b8x numbers its glycerols 301-303,
+    inside chain A's 1-321).
+
+    Parameters
+    ----------
+    atom_site : CIFCategory
+        Output ``atom_site``.
+    reference_block : CIFBlock
+        Deposited block with ``entity_poly_seq``.
+
+    Returns
+    -------
+    np.ndarray
+        Boolean mask, one entry per row.
+    """
+    monomers = {
+        _canonical_monomer(str(name))
+        for name in reference_block[_ENTITY_POLY_SEQ]["mon_id"].as_array(str)
+    }
+    is_atom = atom_site["group_PDB"].as_array(str) == "ATOM"
+    names = atom_site["label_comp_id"].as_array(str)
+    return is_atom | np.array([_canonical_monomer(str(name)) in monomers for name in names])
+
+
 def _output_polymer_entities(
-    output_block: CIFBlock,
+    output_block: CIFBlock, reference_block: CIFBlock
 ) -> list[tuple[str, set[str], list[int], list[str]]]:
     """Extract each output entity's unique polymer residue sequence.
 
@@ -632,6 +669,8 @@ def _output_polymer_entities(
     ----------
     output_block : CIFBlock
         Output CIF block containing ``atom_site``.
+    reference_block : CIFBlock
+        Deposited block whose ``entity_poly_seq`` says which ``HETATM`` monomers are polymer.
 
     Returns
     -------
@@ -649,14 +688,15 @@ def _output_polymer_entities(
     chain_ids = atom_site["label_asym_id"].as_array(str)
     sequence_ids = atom_site["label_seq_id"].as_array(str)
     residue_names = atom_site["label_comp_id"].as_array(str)
+    polymer_rows = _is_polymer_row(atom_site, reference_block)
     entities: list[tuple[str, set[str], list[int], list[str]]] = []
     for entity_id in dict.fromkeys(entity_ids):
         residues: dict[int, str] = {}
         chains: set[str] = set()
-        for row_entity, chain_id, sequence_id, residue_name in zip(
-            entity_ids, chain_ids, sequence_ids, residue_names, strict=True
+        for row_entity, chain_id, sequence_id, residue_name, polymer in zip(
+            entity_ids, chain_ids, sequence_ids, residue_names, polymer_rows, strict=True
         ):
-            if row_entity != entity_id:
+            if row_entity != entity_id or not polymer:
                 continue
             chains.add(str(chain_id))
             if sequence_id in (".", "?", ""):
@@ -795,6 +835,7 @@ def _labels_from_author_numbering(
     )
     residue_names = atom_site["label_comp_id"].as_array(str)
     is_atom = atom_site["group_PDB"].as_array(str) == "ATOM"
+    polymer_rows = _is_polymer_row(atom_site, reference_block)
     unmatched = {key for key, atom in zip(residue_keys, is_atom) if atom and key not in lookup}
     if unmatched:
         raise ValueError(
@@ -803,12 +844,14 @@ def _labels_from_author_numbering(
         )
     renamed = {
         (key, name)
-        for key, name in zip(residue_keys, residue_names)
-        if key in lookup and _canonical_monomer(name) not in monomers[key]
+        for key, name, polymer in zip(residue_keys, residue_names, polymer_rows)
+        if polymer and key in lookup and _canonical_monomer(name) not in monomers[key]
     }
     if renamed:
         raise ValueError(f"Residue names disagree with the deposit, e.g. {sorted(renamed)[:3]}")
-    labels = [lookup.get(key) for key in residue_keys]
+    labels = [
+        lookup.get(key) if polymer else None for key, polymer in zip(residue_keys, polymer_rows)
+    ]
     polymer_labels = {label for label in labels if label is not None}
     if not polymer_labels:
         raise ValueError("Output has no polymer residues")
@@ -871,7 +914,9 @@ def _labels_from_sequence_alignment(
     """
     remap: dict[tuple[str, str], tuple[str, str]] = {}  # (entity, seq) -> (deposit entity, num)
     chain_entities: dict[str, str] = {}
-    for output_id, chains, numbers, names in _output_polymer_entities(output_block):
+    for output_id, chains, numbers, names in _output_polymer_entities(
+        output_block, reference_block
+    ):
         reference_id, reference_nums = _matching_entity(reference_block, names)
         for number, num in zip(numbers, reference_nums, strict=True):
             remap[(output_id, str(number))] = (reference_id, num)
@@ -1042,7 +1087,7 @@ def carry_polymer_entity_categories(
             for column in chem_comp
         }
 
-    # HETATM rows outside the scheme (ligands, waters) keep what set_structure wrote.
+    # Non-polymer rows (ligands, waters) keep what set_structure wrote.
     for column, index in (("label_asym_id", 0), ("label_seq_id", 1), ("label_entity_id", 2)):
         current = atom_site[column].as_array(str)
         atom_site[column] = np.array(

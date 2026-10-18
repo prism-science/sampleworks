@@ -20,10 +20,11 @@ from sampleworks.utils.guidance_script_utils import save_everything
 
 
 # Deposited entity 1 (author chain P, label chain A), author-numbered from -3. Position 10 is
-# microheterogeneous (CYS/CSO), and MSE/LYR/CSO are modified residues written as HETATM.
+# microheterogeneous (CYS/CSO), and MSE/LYR/CSO are modified residues written as HETATM, as
+# are the water and the glycerol ligand some tests add.
 _SEQUENCE = ["MET", "GLY", "HIS", "HIS", "HIS", "HIS", "MSE", "CYS", "LYR", "CYS"]
 _AUTHOR_OFFSET = -4  # pdb_seq_num = seq_id + _AUTHOR_OFFSET
-_HETERO = {"MSE", "LYR", "CSO", "HOH"}
+_HETERO = {"MSE", "LYR", "CSO", "HOH", "GOL"}
 
 
 def _reference(chem_comp_ids: list[str] | None = None) -> CIFFile:
@@ -254,17 +255,38 @@ def test_carry_copies_deposited_chem_comp_rows(caplog: pytest.LogCaptureFixture)
     assert _column(output, "atom_site", "label_seq_id") == ["2", "3", "9"] * 2
 
 
-def test_carry_keeps_polymer_beside_non_polymer():
-    """A water outside the scheme keeps its labels and does not enter the carried categories."""
-    output = _output([1, 2, 3], extra=(("P", 101, "HOH"),))
-    water = [
-        i for i, name in enumerate(_column(output, "atom_site", "label_comp_id")) if name == "HOH"
+@pytest.mark.parametrize(
+    ("positions", "ligand", "renumber"),
+    [
+        ([1, 2, 3], ("P", 101, "HOH"), False),  # a water numbered outside the scheme
+        ([1, 2, 3], ("P", 5, "GOL"), False),  # a ligand whose number is a sequence position
+        ([1, 2, 3, 4, 5, 6, 8, 9], ("P", 5, "GOL"), True),  # the same through the alignment path
+    ],
+)
+def test_carry_keeps_polymer_beside_non_polymer(positions, ligand, renumber):
+    """A ligand or water keeps its labels and stays out of the carried categories.
+
+    6b8x numbers its glycerols 301-303 inside chain A's 1-321, so a non-polymer row whose
+    author number is also a deposited sequence position must not be read as a renamed
+    residue, on either path.
+    """
+    output = _output(positions, extra=(ligand,), renumber=renumber)
+    ligand_rows = [
+        i
+        for i, name in enumerate(_column(output, "atom_site", "label_comp_id"))
+        if name == ligand[2]
     ]
-    water_labels = [_column(output, "atom_site", "label_asym_id")[i] for i in water]
+    ligand_labels = [_column(output, "atom_site", "label_asym_id")[i] for i in ligand_rows]
 
     carry_polymer_entity_categories(output, _reference())
 
-    assert [_column(output, "atom_site", "label_asym_id")[i] for i in water] == water_labels
+    assert [_column(output, "atom_site", "label_asym_id")[i] for i in ligand_rows] == ligand_labels
+    polymer_seq = [
+        seq
+        for i, seq in enumerate(_column(output, "atom_site", "label_seq_id"))
+        if i not in ligand_rows
+    ]
+    assert polymer_seq == [str(p + 1) for p in positions] * 2
     assert _column(output, "struct_asym", "id") == ["A"]
     assert _column(output, "entity", "id") == ["1"]
 
@@ -364,6 +386,29 @@ def test_matching_entity_reports_ambiguous_placement():
         _matching_entity(block, ["ALA", "ALA"])
     with pytest.raises(ValueError, match="No deposited entity contains"):
         _matching_entity(block, ["GLY"])
+
+
+def test_matching_entity_accepts_any_deposited_alternative_at_a_position():
+    """A point mutation deposited as two rows at one num matches either residue."""
+    block = CIFBlock(
+        {
+            "entity_poly": CIFCategory({"entity_id": ["1"]}),
+            "entity_poly_seq": CIFCategory(
+                {
+                    "entity_id": ["1"] * 4,
+                    "num": ["1", "2", "2", "3"],
+                    "mon_id": ["GLY", "ASN", "ASP", "HIS"],
+                }
+            ),
+        }
+    )
+
+    assert _matching_entity(block, ["GLY", "ASP", "HIS"]) == ("1", ["1", "2", "3"])
+    assert _matching_entity(block, ["GLY", "ASN", "HIS"]) == ("1", ["1", "2", "3"])
+    assert _unique_subsequence_indices(["GLY", ["ASN", "ASP"], "HIS"], ["ASP", "HIS"]) == (
+        [1, 2],
+        None,
+    )
 
 
 def test_save_everything_writes_cifs_when_entity_carry_fails(
