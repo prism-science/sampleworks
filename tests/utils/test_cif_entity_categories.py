@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import torch
 from atomworks.io.utils.io_utils import load_any
-from biotite.structure import AtomArray, AtomArrayStack, stack
+from biotite.structure import AtomArray, AtomArrayStack, BondList, BondType, stack
 from biotite.structure.io.pdbx import set_structure
 from biotite.structure.io.pdbx.cif import CIFBlock, CIFCategory, CIFFile
 from sampleworks.utils.cif_utils import (
@@ -81,6 +81,7 @@ def _output(
     positions: list[int],
     extra: tuple[tuple[str, int, str], ...] = (),
     renumber: bool = False,
+    bonds: tuple[tuple[int, int], ...] = (),
 ) -> CIFFile:
     """Write a two-model, one-CA-per-residue output in the deposit's author numbering.
 
@@ -92,6 +93,9 @@ def _output(
         Additional ``(chain, author number, name)`` residues, e.g. waters.
     renumber : bool
         Write chain ``A`` numbered 1..n instead, as a model wrapper does without #414.
+    bonds : tuple[tuple[int, int], ...]
+        Bonded pairs of output residues, by index; ``set_structure`` writes them to
+        ``struct_conn``.
 
     Returns
     -------
@@ -108,6 +112,8 @@ def _output(
     atom_array.hetero[:] = [name in _HETERO for _, _, name in residues]
     atom_array.atom_name[:] = "CA"
     atom_array.element[:] = "C"
+    bond_rows = [(i, j, BondType.SINGLE) for i, j in bonds]
+    atom_array.bonds = BondList(len(residues), np.array(bond_rows, dtype=int).reshape(-1, 3))
     output = CIFFile()
     set_structure(output, stack([atom_array, atom_array]))
     return output
@@ -264,7 +270,7 @@ def test_carry_copies_deposited_chem_comp_rows(caplog: pytest.LogCaptureFixture)
     ],
 )
 def test_carry_keeps_polymer_beside_non_polymer(positions, ligand, renumber):
-    """A ligand or water keeps its labels and stays out of the carried categories.
+    """A ligand or water keeps its chain, gets no sequence position, stays out of the carry.
 
     6b8x numbers its glycerols 301-303 inside chain A's 1-321, so a non-polymer row whose
     author number is also a deposited sequence position must not be read as a renamed
@@ -281,6 +287,8 @@ def test_carry_keeps_polymer_beside_non_polymer(positions, ligand, renumber):
     carry_polymer_entity_categories(output, _reference())
 
     assert [_column(output, "atom_site", "label_asym_id")[i] for i in ligand_rows] == ligand_labels
+    assert {_column(output, "atom_site", "label_seq_id")[i] for i in ligand_rows} == {"."}
+    assert {_column(output, "atom_site", "label_entity_id")[i] for i in ligand_rows} == {"1"}
     polymer_seq = [
         seq
         for i, seq in enumerate(_column(output, "atom_site", "label_seq_id"))
@@ -289,6 +297,50 @@ def test_carry_keeps_polymer_beside_non_polymer(positions, ligand, renumber):
     assert polymer_seq == [str(p + 1) for p in positions] * 2
     assert _column(output, "struct_asym", "id") == ["A"]
     assert _column(output, "entity", "id") == ["1"]
+
+
+@pytest.mark.parametrize("renumber", [False, True])
+def test_carry_relabels_struct_conn_partners(renumber):
+    """Bond partners in struct_conn follow their atoms to the deposit's labels, on both paths."""
+    positions = [1, 2, 3, 4, 5, 6, 8, 9]  # one unambiguous placement when renumbered
+    # MSE (author 3) to CYS (author 6), and HIS (author -1) to the glycerol.
+    output = _output(
+        positions, extra=(("P", 101, "GOL"),), renumber=renumber, bonds=((5, 7), (1, 8))
+    )
+
+    carry_polymer_entity_categories(output, _reference())
+
+    labels = [
+        zip(
+            _column(output, "struct_conn", f"ptnr{partner}_label_asym_id"),
+            _column(output, "struct_conn", f"ptnr{partner}_label_seq_id"),
+            strict=True,
+        )
+        for partner in (1, 2)
+    ]
+    ligand_chain = "A" if renumber else "P"
+    assert set(zip(*labels, strict=True)) == {
+        (("A", "7"), ("A", "10")),
+        (("A", "3"), (ligand_chain, ".")),
+    }
+    atom_rows = set(
+        zip(
+            *(
+                _column(output, "atom_site", f"label_{name}")
+                for name in ("asym_id", "comp_id", "seq_id", "atom_id")
+            ),
+            strict=True,
+        )
+    )
+    for partner in (1, 2):
+        keys = zip(
+            *(
+                _column(output, "struct_conn", f"ptnr{partner}_label_{name}")
+                for name in ("asym_id", "comp_id", "seq_id", "atom_id")
+            ),
+            strict=True,
+        )
+        assert all(key in atom_rows for key in keys)
 
 
 @pytest.fixture(scope="module")

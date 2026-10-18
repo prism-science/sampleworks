@@ -34,6 +34,9 @@ _ENTITY_POLY_SEQ = "entity_poly_seq"
 _STRUCT_ASYM = "struct_asym"
 _PDBX_POLY_SEQ_SCHEME = "pdbx_poly_seq_scheme"
 _CHEM_COMP = "chem_comp"
+_STRUCT_CONN = "struct_conn"
+# The dictionary's value for an item that does not apply, e.g. label_seq_id of a ligand atom.
+_INAPPLICABLE = "."
 # entity_poly_seq.hetero marks positions with more than one monomer; absent, it defaults to no.
 _HETERO = "hetero"
 _HETERO_YES = "y"
@@ -1032,7 +1035,8 @@ def carry_polymer_entity_categories(
     ----------
     output : CIFFile
         Single-block output CIF containing ``atom_site``. Side effect: its polymer rows'
-        label ids are rewritten and the carried categories are added or replaced.
+        label ids are rewritten, its non-polymer rows' ``label_seq_id`` becomes ``.``,
+        ``struct_conn`` partners follow both, and the carried categories are added or replaced.
     reference : str | Path | CIFFile
         Deposited reference CIF or its path.
 
@@ -1087,12 +1091,50 @@ def carry_polymer_entity_categories(
             for column in chem_comp
         }
 
-    # Non-polymer rows (ligands, waters) keep what set_structure wrote.
-    for column, index in (("label_asym_id", 0), ("label_seq_id", 1), ("label_entity_id", 2)):
-        current = atom_site[column].as_array(str)
-        atom_site[column] = np.array(
-            [value if label is None else label[index] for value, label in zip(current, labels)]
+    # Non-polymer rows (ligands, waters) keep their chain and entity but have no sequence position.
+    new_labels = [
+        (asym_id, _INAPPLICABLE, entity_id) if label is None else label
+        for asym_id, entity_id, label in zip(
+            atom_site["label_asym_id"].as_array(str),
+            atom_site["label_entity_id"].as_array(str),
+            labels,
+            strict=True,
         )
+    ]
+    # set_structure names struct_conn partners by the atom_site labels it wrote; map them over.
+    relabel = {
+        key: label[:2]
+        for key, label in zip(
+            zip(
+                atom_site["label_asym_id"].as_array(str),
+                atom_site["label_seq_id"].as_array(str),
+                _blank_to_empty(atom_site["pdbx_PDB_ins_code"].as_array(str)),
+                atom_site["label_comp_id"].as_array(str),
+                strict=True,
+            ),
+            new_labels,
+            strict=True,
+        )
+    }
+    partner_labels: dict[str, np.ndarray] = {}
+    if _STRUCT_CONN in output_block:
+        struct_conn = output_block[_STRUCT_CONN]
+        for partner in (1, 2):
+            partners = zip(
+                struct_conn[f"ptnr{partner}_label_asym_id"].as_array(str),
+                struct_conn[f"ptnr{partner}_label_seq_id"].as_array(str),
+                _blank_to_empty(struct_conn[f"pdbx_ptnr{partner}_PDB_ins_code"].as_array(str)),
+                struct_conn[f"ptnr{partner}_label_comp_id"].as_array(str),
+                strict=True,
+            )
+            asym_ids, seq_ids = zip(*(relabel[key] for key in partners), strict=True)
+            partner_labels[f"ptnr{partner}_label_asym_id"] = np.array(asym_ids)
+            partner_labels[f"ptnr{partner}_label_seq_id"] = np.array(seq_ids)
+
+    for index, column in enumerate(("label_asym_id", "label_seq_id", "label_entity_id")):
+        atom_site[column] = np.array([label[index] for label in new_labels])
+    for column, values in partner_labels.items():
+        output_block[_STRUCT_CONN][column] = values
     for name, data in categories.items():
         add_category_to_cif(output, data, name, overwrite=True)
     return tuple(categories)
