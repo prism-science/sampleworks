@@ -10,6 +10,7 @@ import numpy as np
 from atomworks.io.utils.io_utils import load_any
 from biotite.sequence import ProteinSequence
 from biotite.structure import AtomArrayStack
+from biotite.structure.info import get_from_ccd
 from biotite.structure.io.pdbx.cif import CIFBlock, CIFCategory, CIFFile
 from loguru import logger
 
@@ -1028,7 +1029,9 @@ def carry_polymer_entity_categories(
     ``entity_poly_seq`` numbering. Where the model writes the canonical parent of a deposited
     modified residue (MET for MSE), the modeled monomer is added to ``entity_poly_seq`` as a
     heterogeneity row beside the deposit's, and ``chem_comp`` rows are carried for every
-    monomer either names (a row the deposit lacks is warned about, not fatal). The output is
+    monomer either names. A monomer the deposit does not list gets its row from biotite's
+    bundled Chemical Component Dictionary, in the deposit's columns (a column the dictionary
+    lacks is ``?``); one the dictionary lacks too is warned about, not fatal. The output is
     modified only after every residue has been matched and validated.
 
     Parameters
@@ -1078,18 +1081,29 @@ def carry_polymer_entity_categories(
         chem_comp = reference_block[_CHEM_COMP]
         reference_components = np.asarray(chem_comp["id"].as_array(str))
         component_mask = np.isin(reference_components, list(components))
-        missing_components = sorted(
-            map(str, components - set(reference_components[component_mask]))
-        )
-        if missing_components:
-            logger.warning(
-                f"Reference CIF lacks chem_comp rows for {missing_components}; "
-                "carrying the rows it has"
-            )
-        categories[_CHEM_COMP] = {
+        chem_comp_rows = {
             column: list(np.asarray(chem_comp[column].as_array(str))[component_mask])
             for column in chem_comp
         }
+        # A monomer the deposit does not list (MET beside a deposited MSE) takes its row from
+        # biotite's bundled CCD, in the deposit's columns; a column the CCD lacks is unknown.
+        unlisted_components = sorted(
+            map(str, components - set(reference_components[component_mask]))
+        )
+        unknown_components = []
+        for component in unlisted_components:
+            ccd_row = get_from_ccd(_CHEM_COMP, component)
+            if ccd_row is None:
+                unknown_components.append(component)
+                continue
+            for column, values in chem_comp_rows.items():
+                values.append(ccd_row[column].as_array(str)[0] if column in ccd_row else "?")
+        if unknown_components:
+            logger.warning(
+                f"Reference CIF lacks chem_comp rows for {unknown_components}, and so does the "
+                "CCD; carrying the rows found"
+            )
+        categories[_CHEM_COMP] = chem_comp_rows
 
     # Non-polymer rows (ligands, waters) keep their chain and entity but have no sequence position.
     new_labels = [

@@ -21,10 +21,10 @@ from sampleworks.utils.guidance_script_utils import save_everything
 
 # Deposited entity 1 (author chain P, label chain A), author-numbered from -3. Position 10 is
 # microheterogeneous (CYS/CSO), and MSE/LYR/CSO are modified residues written as HETATM, as
-# are the water and the glycerol ligand some tests add.
+# are the water, the glycerol ligand and the made-up ligand XYZ1 some tests add.
 _SEQUENCE = ["MET", "GLY", "HIS", "HIS", "HIS", "HIS", "MSE", "CYS", "LYR", "CYS"]
 _AUTHOR_OFFSET = -4  # pdb_seq_num = seq_id + _AUTHOR_OFFSET
-_HETERO = {"MSE", "LYR", "CSO", "HOH", "GOL"}
+_HETERO = {"MSE", "LYR", "CSO", "HOH", "GOL", "XYZ1"}
 
 
 def _reference(chem_comp_ids: list[str] | None = None) -> CIFFile:
@@ -69,6 +69,7 @@ def _reference(chem_comp_ids: list[str] | None = None) -> CIFFile:
         categories["chem_comp"] = {
             "id": chem_comp_ids,
             "name": [f"DEPOSITED {component_id}" for component_id in chem_comp_ids],
+            "mon_nstd_flag": ["y"] * len(chem_comp_ids),  # a column the CCD does not have
         }
     reference = CIFFile()
     reference["deposit"] = CIFBlock(
@@ -242,23 +243,61 @@ def test_carry_accepts_met_for_deposited_selenomethionine():
     assert rows[5:9] == [("6", "HIS", "n"), ("7", "MSE", "y"), ("7", "MET", "y"), ("8", "CYS", "n")]
     assert len(rows) == len(_SEQUENCE) + 2  # the deposit's CSO hetero row plus the new MET row
     assert _column(output, "atom_site", "label_seq_id") == ["6", "7", "8"] * 2
-    assert sorted(_column(output, "chem_comp", "id")) == ["CYS", "HIS", "LYR", "MET", "MSE"]
+    assert {"MET", "MSE"} <= set(_column(output, "chem_comp", "id"))
+
+
+def test_carry_fills_chem_comp_row_the_deposit_lacks_from_the_ccd(
+    caplog: pytest.LogCaptureFixture,
+):
+    """A modeled MET the deposit does not list gets its chem_comp row from the CCD."""
+    output = _output([5, 6, 7])
+    atom_site = output.block["atom_site"]
+    names = atom_site["label_comp_id"].as_array(str)
+    atom_site["label_comp_id"] = np.where(names == "MSE", "MET", names)
+
+    carry_polymer_entity_categories(
+        output, _reference(chem_comp_ids=["CSO", "CYS", "GLY", "HIS", "LYR", "MSE"])
+    )
+
+    rows = {
+        component: (name, flag)
+        for component, name, flag in zip(
+            _column(output, "chem_comp", "id"),
+            _column(output, "chem_comp", "name"),
+            _column(output, "chem_comp", "mon_nstd_flag"),
+            strict=True,
+        )
+    }
+    assert sorted(rows) == ["CSO", "CYS", "GLY", "HIS", "LYR", "MET", "MSE"]
+    assert rows["MET"] == ("METHIONINE", "?")  # the CCD has no mon_nstd_flag
+    assert rows["MSE"] == ("DEPOSITED MSE", "y")  # the deposit's row is kept as it is
+    assert "lacks chem_comp rows" not in caplog.text
 
 
 def test_carry_copies_deposited_chem_comp_rows(caplog: pytest.LogCaptureFixture):
-    """Carry the deposited chem_comp rows the output names; warn about the ones it lacks."""
-    output = _output([1, 2, 8])
+    """Carry the deposited chem_comp rows, fill the rest from the CCD, warn about unknown ids."""
+    output = _output([1, 2, 8], extra=(("P", 101, "XYZ1"),))
 
     categories = carry_polymer_entity_categories(
         output, _reference(chem_comp_ids=["GLY", "HIS", "TRP"])
     )
 
     assert categories[-1] == "chem_comp"
-    assert sorted(_column(output, "chem_comp", "id")) == ["GLY", "HIS"]
-    assert all(name.startswith("DEPOSITED ") for name in _column(output, "chem_comp", "name"))
-    assert "Reference CIF lacks chem_comp rows for" in caplog.text
-    assert "'LYR'" in caplog.text
-    assert _column(output, "atom_site", "label_seq_id") == ["2", "3", "9"] * 2
+    assert sorted(_column(output, "chem_comp", "id")) == [
+        "CSO",
+        "CYS",
+        "GLY",
+        "HIS",
+        "LYR",
+        "MET",
+        "MSE",
+    ]  # the carried sequence names these; TRP, which nothing names, is not carried
+    deposited_names = [
+        name for name in _column(output, "chem_comp", "name") if name.startswith("DEPOSITED ")
+    ]
+    assert deposited_names == ["DEPOSITED GLY", "DEPOSITED HIS"]
+    assert "Reference CIF lacks chem_comp rows for ['XYZ1']" in caplog.text
+    assert _column(output, "atom_site", "label_seq_id") == ["2", "3", "9", "."] * 2
 
 
 @pytest.mark.parametrize(
