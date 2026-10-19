@@ -63,7 +63,8 @@ class AtomReconciler:
     ----------
     has_mismatch : bool
         Whether reconciliation is required (count mismatch, order mismatch,
-        or subset mismatch).
+        subset mismatch, or label mismatch where chain_id, res_id, res_name,
+        atom_name or element differ).
     model_indices : Tensor, shape ``(n_common,)``
         Indices into the model array for the common atom subset.
     struct_indices : Tensor, shape ``(n_common,)``
@@ -74,8 +75,6 @@ class AtomReconciler:
         Total atoms in the structure representation.
     n_common : int
         Atoms shared between both representations.
-    mapped_struct_mask : Tensor, shape ``(n_struct,)``
-        Boolean mask selecting structure atoms backed by model coordinates.
     """
 
     has_mismatch: bool
@@ -84,19 +83,6 @@ class AtomReconciler:
     n_model: int
     n_struct: int
     n_common: int
-
-    @property
-    def mapped_struct_mask(self) -> torch.Tensor:
-        """Return the structure atoms backed by mapped model coordinates.
-
-        Returns
-        -------
-        Tensor
-            Boolean mask with shape ``(n_struct,)`` on the index tensor device.
-        """
-        mask = torch.zeros(self.n_struct, dtype=torch.bool, device=self.struct_indices.device)
-        mask[self.struct_indices] = True
-        return mask
 
     @classmethod
     def from_arrays(
@@ -314,41 +300,4 @@ class AtomReconciler:
 
         result = model_template.clone()
         result[..., self.model_indices, :] = struct_coords[..., self.struct_indices, :]
-        return result
-
-    def model_to_struct(
-        self,
-        model_coords: Float[torch.Tensor, "*batch n_model 3"],
-        struct_template: Float[torch.Tensor, "*batch n_struct 3"],
-    ) -> torch.Tensor:
-        """Map model atom coordinates to structure space.
-
-        Copies mapped atoms from ``model_coords`` into a clone of
-        ``struct_template``. Differentiable through ``model_coords``. Use
-        :attr:`mapped_struct_mask` to exclude unmapped template coordinates.
-
-        Parameters
-        ----------
-        model_coords
-            Coordinates in model space, shape ``(*batch, n_model, 3)``.
-        struct_template
-            Template in structure space, shape ``(*batch, n_struct, 3)``.
-
-        Returns
-        -------
-        Tensor
-            Structure-space coordinates, shape ``(*batch, n_struct, 3)``.
-        """
-        if model_coords.shape[-2] != self.n_model:
-            raise ValueError(
-                f"Expected model_coords with {self.n_model} atoms, got {model_coords.shape[-2]}"
-            )
-        if struct_template.shape[-2] != self.n_struct:
-            raise ValueError(
-                f"Expected struct_template with {self.n_struct} atoms, "
-                f"got {struct_template.shape[-2]}"
-            )
-
-        result = struct_template.clone()
-        result[..., self.struct_indices, :] = model_coords[..., self.model_indices, :]
         return result

@@ -210,7 +210,7 @@ def process_structure_to_trajectory_input(
         reconciler = AtomReconciler.from_arrays(model_atom_array, atom_array)
         if reconciler.has_mismatch:
             logger.info(
-                f"Atom count mismatch: model={reconciler.n_model}, "
+                f"Model/structure atoms need reconciliation: model={reconciler.n_model}, "
                 f"structure={reconciler.n_struct}, common={reconciler.n_common}"
             )
     else:

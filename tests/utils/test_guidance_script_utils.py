@@ -10,7 +10,6 @@ import torch
 from atomworks.io.utils.io_utils import load_any
 from biotite.structure import AtomArrayStack
 from biotite.structure.io.pdbx.cif import CIFFile
-from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.guidance_script_arguments import GuidanceConfig, JobResult
 from sampleworks.utils.guidance_script_utils import (
     _three_state_resolver,
@@ -75,8 +74,6 @@ def test_save_everything_uses_model_atom_array_for_mismatch(
     """Mismatch output saves while a failed reference load emits a warning."""
     refined_structure = {"asym_unit": build_test_atom_array(n_atoms=3, with_occupancy=True)}
     model_atom_array = build_test_atom_array(n_atoms=5, with_occupancy=False)
-    struct_atom_array = refined_structure["asym_unit"]
-    reconciler = AtomReconciler.from_arrays(model_atom_array, struct_atom_array)
 
     final_state = torch.zeros((1, 5, 3), dtype=torch.float32)
 
@@ -100,8 +97,6 @@ def test_save_everything_uses_model_atom_array_for_mismatch(
         scaler_type="pure_guidance",
         final_state=final_state,
         model_atom_array=model_atom_array,
-        struct_atom_array=struct_atom_array,
-        reconciler=reconciler,
     )
 
     assert (tmp_path / "refined.cif").exists()
