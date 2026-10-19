@@ -86,12 +86,19 @@ def test_resolve_crystal_metadata_prefers_the_row_over_the_file(resources_dir: P
     cell, hm = resolve_crystal_metadata(BatchRowForMTZ(filename=source.name), source)
     assert cell.parameters == file_cell.parameters and hm == file_hm
 
+    # Overrides derived from the file's own values, so they differ by construction.
+    other_cell = tuple(x + 1.0 for x in file_cell.parameters[:3]) + file_cell.parameters[3:]
+    other_hm = "P 1" if file_hm != "P 1" else "P 2 2 2"
     row = BatchRowForMTZ.from_dict(
-        {"filename": source.name, "unit_cell": "10:20:30:90:90:90", "space_group": "P 1"}
+        {
+            "filename": source.name,
+            "unit_cell": ":".join(f"{x:g}" for x in other_cell),
+            "space_group": other_hm,
+        }
     )
     cell, hm = resolve_crystal_metadata(row, source)
-    assert cell.parameters == pytest.approx((10.0, 20.0, 30.0, 90.0, 90.0, 90.0))
-    assert hm == "P 1"
+    assert cell.parameters == pytest.approx(other_cell)
+    assert hm == other_hm
 
 
 @pytest.mark.parametrize("ccp4_convention", [False, True], ids=["phenix", "ccp4"])
