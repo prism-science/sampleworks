@@ -6,13 +6,14 @@ author = "Prism Science"
 # MyST renders the Markdown; autoapi and napoleon turn the NumPy-style docstrings in
 # src/sampleworks into API pages. autoapi parses the source instead of importing it, so
 # the model wrappers document fine even though each one's dependencies live in a
-# separate pixi environment.
+# separate pixi environment. viewcode has to come before autoapi: autoapi only wires up
+# its [source] links if the viewcode events already exist when it loads.
 extensions = [
+    "sphinx.ext.viewcode",
     "autoapi.extension",
     "myst_parser",
     "sphinx.ext.intersphinx",
     "sphinx.ext.napoleon",
-    "sphinx.ext.viewcode",
 ]
 
 autoapi_dirs = ["../src/sampleworks"]

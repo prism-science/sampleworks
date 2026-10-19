@@ -2,16 +2,15 @@ name: Docs
 
 on:
   push:
-    branches: [main]
+    # fy/docs-sphinx is a temporary entry so the build can be checked from the PR; it comes
+    # out before the PR leaves draft. Only main publishes, see the deploy job below.
+    branches: [main, fy/docs-sphinx]
   workflow_dispatch:
 
 permissions:
   contents: read
   id-token: write
   pages: write
-
-env:
-  CONDA_OVERRIDE_CUDA: "12"
 
 concurrency:
   group: docs-${{ github.ref }}
@@ -26,14 +25,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install pixi
-        uses: prefix-dev/setup-pixi@v0.8.8
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          pixi-version: v0.82.0
-          environments: docs
+          python-version: '3.13'
+
+      # autoapi reads the source files instead of importing them, so the build needs Sphinx
+      # and nothing else: sampleworks, torch and the model packages are not installed.
+      - name: Install Sphinx
+        run: pip install sphinx==9.1.0 sphinx-autoapi==3.8.1 myst-parser==5.1.0 furo==2025.12.19
 
       - name: Build the site
-        run: pixi run -e docs docs
+        run: sphinx-build -b html docs docs/_build/html
 
       - name: Upload the site
         uses: actions/upload-pages-artifact@v3
@@ -42,6 +45,9 @@ jobs:
 
   deploy:
     needs: build
+    # Only main publishes. Every other ref stops after the build, so a branch can be checked
+    # without touching the live site.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
 
     environment:
