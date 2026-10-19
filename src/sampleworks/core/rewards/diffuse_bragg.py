@@ -40,8 +40,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import cast, TYPE_CHECKING
 
+import gemmi
 import numpy as np
 import reciprocalspaceship as rs
 import torch
@@ -241,13 +242,49 @@ class DiffuseBraggRewardFunction:
         # returns the anisotropic component of a per-reflection intensity.
         self._isotropic_background_subtractor: IsotropicBackground | None = None
 
-    def _load_targets(self, bragg_path, diffuse_path, bragg_column, diffuse_column):
+    def _load_targets(
+        self,
+        bragg_path: str | Path | None,
+        diffuse_path: str | Path | None,
+        bragg_column: str | None,
+        diffuse_column: str | None,
+    ) -> tuple[
+        np.ndarray | None,
+        np.ndarray | None,
+        np.ndarray | None,
+        np.ndarray | None,
+        gemmi.UnitCell,
+        gemmi.SpaceGroup,
+    ]:
         """Read the targets, one (hkl, values) pair per term, on a common cell.
 
         Everything here is vectorized deliberately. A diffuse map from xtraj runs
         to millions of reflections -- 1.57M for the examples/xtraj cell at 1.8 A
         -- and per-reflection Python (dict keys, ``calculate_d`` per index) turns
         this into minutes.
+
+        Parameters
+        ----------
+        bragg_path, diffuse_path
+            MTZ paths; a term that is not scored passes ``None`` and is skipped.
+        bragg_column, diffuse_column
+            Column names, or ``None`` to take the sole column of the right dtype.
+
+        Returns
+        -------
+        bragg_hkl, bragg_values
+            ``(n_bragg, 3)`` int64 Miller indices and ``(n_bragg,)`` float64
+            amplitudes, both ``None`` when the Bragg term is not scored.
+        diffuse_hkl, diffuse_values
+            Likewise, ``(n_diffuse, 3)`` int64 and ``(n_diffuse,)`` float64 intensities.
+        cell, spacegroup
+            From the Bragg target, or the diffuse target when there is no Bragg one.
+
+        Raises
+        ------
+        ValueError
+            If both targets are given on different cells, or a resolution cutoff
+            leaves a term with no reflections.
         """
         bragg_hkl = bragg_values = None
         diffuse_hkl = diffuse_values = None
@@ -276,12 +313,15 @@ class DiffuseBraggRewardFunction:
                     f"target's {cell}; both must be indexed on the same unit cell."
                 )
 
+        if cell is None or spacegroup is None:
+            raise RuntimeError("No target was read; __init__ requires at least one.")
+
         if self.resolution is not None:
             bragg_hkl, bragg_values = self._within_resolution(
-                cell, "Bragg", bragg_hkl, bragg_values
+                cell, self.resolution, "Bragg", bragg_hkl, bragg_values
             )
             diffuse_hkl, diffuse_values = self._within_resolution(
-                cell, "diffuse", diffuse_hkl, diffuse_values
+                cell, self.resolution, "diffuse", diffuse_hkl, diffuse_values
             )
 
         logger.info(
@@ -301,15 +341,40 @@ class DiffuseBraggRewardFunction:
         )
         return bragg_hkl, bragg_values, diffuse_hkl, diffuse_values, cell, spacegroup
 
-    def _within_resolution(self, cell, name: str, hkl, values):
-        """Drop reflections of one target beyond ``self.resolution``; passes None through."""
-        if hkl is None:
+    @staticmethod
+    def _within_resolution(
+        cell: gemmi.UnitCell,
+        resolution: float,
+        name: str,
+        hkl: np.ndarray | None,
+        values: np.ndarray | None,
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
+        """Drop one target's reflections beyond ``resolution``.
+
+        Parameters
+        ----------
+        cell
+            Cell the d-spacings are computed in.
+        resolution
+            High-resolution cutoff in Å.
+        name
+            ``"Bragg"`` or ``"diffuse"``, for the error message.
+        hkl, values
+            ``(n, 3)`` int64 indices and ``(n,)`` values, or both ``None`` for a
+            term that is not scored, which passes through unchanged.
+
+        Returns
+        -------
+        tuple[np.ndarray | None, np.ndarray | None]
+            The rows with ``d >= self.resolution``, same dtypes as the inputs.
+        """
+        if hkl is None or values is None:
             return None, None
-        d_spacing = cell.calculate_d_array(hkl)
-        keep = d_spacing >= self.resolution
+        d_spacing = np.asarray(cell.calculate_d_array(hkl), dtype=np.float64)
+        keep = d_spacing >= resolution
         if not keep.any():
             raise ValueError(
-                f"No {name} reflections survive a {self.resolution} A cutoff; the "
+                f"No {name} reflections survive a {resolution} A cutoff; the "
                 f"target reaches {d_spacing.min():.2f} A."
             )
         return hkl[keep], values[keep]
@@ -320,33 +385,37 @@ class DiffuseBraggRewardFunction:
         Returns
         -------
         hkl : (n_union, 3) int64
-            Every reflection either target needs, each once.
+            Every reflection either target needs, each once, in lexicographic order.
         bragg_index, diffuse_index : (n_term,) int64 or None
             Positions of each term's reflections within ``hkl``, in the order of
-            that term's observed values.
+            that term's observed values; ``None`` for a term that is not scored.
         """
         lists = [h for h in (self._bragg_hkl, self._diffuse_hkl) if h is not None]
         stacked = np.concatenate(lists)
-        _, first, inverse = np.unique(self._pack(stacked), return_index=True, return_inverse=True)
-        hkl = stacked[first]
+        hkl, inverse = np.unique(stacked, axis=0, return_inverse=True)
+        inverse = inverse.reshape(-1)  # NumPy 2.0.x returns (n, 1) for axis=0
         n_bragg = 0 if self._bragg_hkl is None else len(self._bragg_hkl)
         bragg_index = inverse[:n_bragg] if self._bragg_hkl is not None else None
         diffuse_index = inverse[n_bragg:] if self._diffuse_hkl is not None else None
         return hkl, bragg_index, diffuse_index
 
     @staticmethod
-    def _pack(hkl: np.ndarray) -> np.ndarray:
-        """View (n, 3) integer Miller indices as one comparable key per row.
-
-        A structured view rather than arithmetic packing, so it cannot overflow
-        or collide however large the indices get.
-        """
-        contiguous = np.ascontiguousarray(hkl, dtype=np.int64)
-        return contiguous.view([("h", "i8"), ("k", "i8"), ("l", "i8")]).ravel()
-
-    @staticmethod
     def _finite_column(dataset: rs.DataSet, column: str) -> tuple[np.ndarray, np.ndarray]:
-        """The (hkl, value) pairs of one column, dropping unmeasured entries."""
+        """The (hkl, value) pairs of one column, dropping unmeasured entries.
+
+        Parameters
+        ----------
+        dataset
+            MTZ contents as read by reciprocalspaceship, indexed by H, K, L.
+        column
+            Column to read.
+
+        Returns
+        -------
+        hkl, values
+            ``(n, 3)`` int64 Miller indices and ``(n,)`` float64 values of the rows
+            where ``column`` is finite.
+        """
         values = dataset[column].to_numpy(dtype=np.float64)
         hkl = np.column_stack(
             [dataset.index.get_level_values(i).to_numpy() for i in ("H", "K", "L")]
@@ -360,6 +429,23 @@ class DiffuseBraggRewardFunction:
         Mirrors ``StructureFactorRewardFunction._build_reflection_mask``: raise if
         nothing remains, warn if the retained fraction or count is suspiciously low,
         since a low fraction usually means ``test_set_value`` has the wrong convention.
+
+        Parameters
+        ----------
+        dataset
+            The Bragg MTZ contents.
+        column
+            Amplitude column whose finite rows define the mask's length.
+
+        Returns
+        -------
+        np.ndarray
+            ``(n_finite,)`` bool, True where the reflection is in the working set.
+
+        Raises
+        ------
+        ValueError
+            If no reflection remains.
         """
         flag_column = resolve_mtz_column(dataset, rs.MTZIntDtype(), column=self.free_flag_column)
         finite = np.isfinite(dataset[column].to_numpy(dtype=np.float64))
@@ -488,20 +574,31 @@ class DiffuseBraggRewardFunction:
         )
 
     def _highest_resolution(self) -> float:
-        """d_min over every evaluated reflection, for sizing the density grid."""
-        return float(self.unit_cell.calculate_d_array(self._hkl).min())
+        """d_min in Å over every evaluated reflection, for sizing the density grid."""
+        return float(np.asarray(self.unit_cell.calculate_d_array(self._hkl)).min())
 
     def _weight(self) -> float:
-        """The Bragg weight for this evaluation."""
-        if isinstance(self.bragg_weight, (int, float)):
+        """The Bragg weight for this evaluation, in [0, 1].
+
+        Raises
+        ------
+        RuntimeError
+            If ``bragg_weight`` is callable and :attr:`current_time` is unset.
+        ValueError
+            If the callable returns a weight outside [0, 1].
+        """
+        if not callable(self.bragg_weight):
             return float(self.bragg_weight)
+        # callable() narrows to an unknown signature for ty; __init__ only accepts floats
+        # or a callable of t, so this is the latter.
+        weight_of_time = cast(Callable[[float], float], self.bragg_weight)
         if self.current_time is None:
             raise RuntimeError(
                 "bragg_weight is a callable of the diffusion time, but current_time "
                 "was never set. RewardFunctionProtocol carries no t, so a caller "
                 "must set reward.current_time before each evaluation."
             )
-        weight = float(self.bragg_weight(self.current_time))
+        weight = float(weight_of_time(self.current_time))
         if not 0.0 <= weight <= 1.0:
             raise ValueError(
                 f"bragg_weight({self.current_time}) returned {weight}, outside [0, 1]."
@@ -513,13 +610,28 @@ class DiffuseBraggRewardFunction:
         calc: Float[torch.Tensor, " n_refl"],
         obs: Float[torch.Tensor, " n_refl"],
     ) -> Float[torch.Tensor, ""]:
-        """Scaled, optionally normalized squared residual between calc and obs."""
+        """Scaled, optionally normalized squared residual between calc and obs.
+
+        Parameters
+        ----------
+        calc, obs
+            Calculated and observed values on one term's reflection list: Bragg
+            amplitudes, or the signed anisotropic component of diffuse intensities.
+
+        Returns
+        -------
+        Float[torch.Tensor, ""]
+            ``||s·calc − obs||²``, divided by ``||obs||²`` when ``normalize`` is on.
+        """
         if self.fit_scale:
-            # Least squares in the scale alone. Detaching is exact: at the fitted
-            # scale d(residual)/d(scale) = 0, so the gradient through calc is the
-            # full gradient of the minimized residual (envelope theorem).
-            scale = (torch.dot(calc, obs) / torch.dot(calc, calc).clamp_min(1e-30)).detach()
-            calc = scale * calc
+            # Least squares in the scale alone, floored at zero: the anisotropic
+            # diffuse component is signed, and an unconstrained fit would flip an
+            # anticorrelated calc onto the target and score it as a match. Detaching
+            # is exact: at the fitted scale d(residual)/d(scale) = 0, so the gradient
+            # through calc is the full gradient of the minimized residual (envelope
+            # theorem).
+            scale = torch.dot(calc, obs) / torch.dot(calc, calc).clamp_min(1e-30)
+            calc = scale.clamp_min(0.0).detach() * calc
         residual = torch.sum((calc - obs) ** 2)
         if self.normalize:
             residual = residual / torch.sum(obs**2).clamp_min(1e-30)
