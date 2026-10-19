@@ -130,8 +130,12 @@ class DiffuseBraggRewardFunction:
         not a constant across systems or B-factor conventions. An explicit cutoff
         uses ``solvent_taper_width``.
     exclude_free_reflections
-        If True, drop the R-free test set from the Bragg target before the
-        reflection list is formed, so both terms score the working set only.
+        If True, drop the R-free test set from the Bragg target, so the Bragg term
+        scores the working set only. The diffuse list is not filtered: diffuse
+        intensity is continuous in reciprocal space and correlated between
+        neighbouring points, so removing the Bragg test-set hkl would not remove
+        the test set's influence, and a cross-validation scheme for diffuse data is
+        an open question. The option therefore protects R-free, nothing more.
     free_flag_column, test_set_value
         The Bragg MTZ's flag column (``None`` takes its sole integer column) and the
         flag value marking the test set. The default 1 is the Phenix convention the
