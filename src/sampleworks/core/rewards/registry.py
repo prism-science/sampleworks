@@ -28,6 +28,7 @@ from sampleworks.utils.guidance_constants import Rewards
 
 if TYPE_CHECKING:
     import torch
+
     from sampleworks.core.rewards.protocol import RewardFunctionProtocol
 
 

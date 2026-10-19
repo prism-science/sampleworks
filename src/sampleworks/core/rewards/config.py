@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from loguru import logger
+
 from sampleworks.core.rewards.options import path_option_names
 from sampleworks.core.rewards.registry import (
     build_single_reward,

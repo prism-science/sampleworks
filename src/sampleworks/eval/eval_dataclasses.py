@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 from loguru import logger
+
 from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.volume import XMap
 from sampleworks.eval.occupancy_utils import occupancy_to_str
 

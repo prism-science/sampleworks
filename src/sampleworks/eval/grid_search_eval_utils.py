@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 from biotite.structure import AtomArray, AtomArrayStack
 from loguru import logger
+
 from sampleworks.eval.constants import OCCUPANCY_LEVELS
 from sampleworks.eval.eval_dataclasses import ProteinConfig, Trial, TrialList
 from sampleworks.eval.occupancy_utils import (
