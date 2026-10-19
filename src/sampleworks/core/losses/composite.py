@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from jaxtyping import Float, Int
+
 from sampleworks.core.losses.protocol import LossFunctionProtocol, prepare_loss_if_needed
 
 
