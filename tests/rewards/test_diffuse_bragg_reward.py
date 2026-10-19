@@ -1,137 +1,51 @@
-"""Behavioural tests for the combined Bragg + diffuse reward.
+"""Tests specific to the combined Bragg + diffuse reward.
 
-Three properties, in increasing order of what they actually establish:
+The generic reward tests (output shape, determinism, recovery and gradient flow for
+a single conformer, batch handling) live in ``test_reward_function_contract.py``,
+where this reward is registered as the ``diffuse_bragg`` bundle. That bundle scores
+the Bragg term alone, because the contract tests use one conformer and the diffuse
+term, ``<|F|²> − |<F>|²`` over the ensemble, is identically zero for one conformer.
 
-**Recovery.** The loss is ~0 when the model is the structure the targets were
-generated from. Necessary but weak — a reward that returned a constant would
-also pass in isolation.
-
-**Discrimination.** The loss rises monotonically as the model is displaced from
-the truth. This is what a reward has to do to be worth anything, and it is where
-a term dominated by its own numerical noise fails.
-
-**Gradients.** ``backward()`` reaches the coordinates with finite, non-zero
-values, and points downhill. Guidance uses nothing but this.
+This file tests what needs a real ensemble, using the two-configuration fixtures in
+``conftest.py``: the loss is ~0 for the true ensemble, rises as the ensemble is
+displaced, and puts a gradient on every configuration, each at every mixture of
+the two terms; the diffuse gradient points downhill; and a sign-flipped diffuse
+pattern is not mistaken for a match. It also covers the options this reward alone
+has: the convex weight, separate Bragg and diffuse reflection lists, R-free
+handling and bulk solvent.
 
 The targets are generated in-process rather than read from a checked-in file, so
 the fixtures cannot drift from the generator that made them.
 """
 
-from pathlib import Path
-
+import gemmi
 import numpy as np
 import pytest
 import reciprocalspaceship as rs
 import torch
-from sampleworks.core.rewards.protocol import (
-    PreparableRewardFunctionProtocol,
-    prepare_reward_if_needed,
-    RewardFunctionProtocol,
-    RewardInputs,
-)
+from sampleworks.core.rewards.protocol import RewardInputs
+
+from tests.rewards.conftest import DiffuseBraggTargets
 
 
 pytest.importorskip("lunus.sf", reason="lunus[sf] not installed")
 
-# Deliberately unmarked. These need neither a GPU nor model weights, and the
-# whole module runs in ~12 s on CPU -- measured 12.1 s for all 18 tests on
-# 2026-09-23 (4-core aarch64), against the "~3 min, dominated by ~30 forward
-# passes" this comment used to claim, which does not reproduce.
-#
-# Marking it hid the only coverage this reward has from `pixi run -e <env>
-# tests`, which is the loop where a regression in it most wants to fire. CI is
-# unaffected either way -- `cpu-tests` deselects `gpu`, not `slow`. Same
-# treatment as tests/synthetic/test_generate_synthetic_sf_lunus.py, whose
-# equivalent claim was also measured and dropped.
-
-RESOLUTION = 1.8
-SOURCE_CIF = "1vme_final.cif"
+# Deliberately unmarked: these need neither a GPU nor model weights, and the module
+# runs in well under a minute on CPU. Marking it would hide the only coverage of the
+# ensemble terms from `pixi run -e <env> tests`.
 
 
-@pytest.fixture(scope="module")
-def ensemble(resources_dir: Path):
-    """1VME expanded into one configuration per altloc, with its topology."""
-    from sampleworks.synthetic.generate_synthetic_sf import BatchRowForMTZ
-    from sampleworks.synthetic.generate_synthetic_sf_lunus import load_configurations
-
-    source = resources_dir / "1vme" / SOURCE_CIF
-    if not source.exists():
-        pytest.skip(f"Source structure not found at {source}")
-
-    # Waters are stripped as guidance strips them; the model topology a reward is
-    # prepared with carries none.
-    configurations = load_configurations(
-        source,
-        BatchRowForMTZ(filename=SOURCE_CIF),
-        "default",
-        altlocs_as_models=True,
-        strip_waters=True,
-    )
-    assert configurations.stack_depth() >= 2, "1VME should expand to at least two conformations"
-    return configurations[0], np.asarray(configurations.coord, dtype=np.float64)
-
-
-@pytest.fixture(scope="module")
-def targets(ensemble, resources_dir: Path, tmp_path_factory):
-    """Bragg and diffuse MTZs generated from the ensemble itself.
-
-    Generating rather than checking in means the target and the thing being
-    scored cannot drift apart, and the recovery test below is then a genuine
-    round trip through both writers and the reader.
-    """
-    import gemmi
-    from sampleworks.synthetic.generate_synthetic_sf_lunus import (
-        compute_ensemble_amplitudes,
-        dataset_from_bragg_amplitudes,
-        dataset_from_diffuse_intensities,
-        save_mtz,
-    )
-
-    atom_array, coords = ensemble
-    meta = gemmi.read_structure(str(resources_dir / "1vme" / SOURCE_CIF))
-    cell, spacegroup = meta.cell, gemmi.SpaceGroup(meta.spacegroup_hm)
-
-    from biotite.structure import stack
-
-    configurations = stack([atom_array] * coords.shape[0])
-    configurations.coord = coords.astype(np.float32)
-    hkl, mean_f, diffuse = compute_ensemble_amplitudes(
-        configurations, cell, spacegroup, RESOLUTION, torch.device("cpu")
-    )
-
-    out = tmp_path_factory.mktemp("diffuse_bragg_targets")
-    bragg_path, diffuse_path = out / "bragg.mtz", out / "diffuse.mtz"
-    save_mtz(
-        dataset_from_bragg_amplitudes(hkl, mean_f, cell, spacegroup, test_fraction=0.0),
-        bragg_path,
-        "structure factors",
-    )
-    save_mtz(
-        dataset_from_diffuse_intensities(hkl, diffuse, cell, spacegroup),
-        diffuse_path,
-        "diffuse intensities",
-    )
-
-    assert diffuse.max() > 0, "a two-state ensemble must have nonzero diffuse"
-    return bragg_path, diffuse_path, cell, spacegroup
-
-
-def build_reward(targets, weight, **kwargs):
+def build_reward(targets: DiffuseBraggTargets, weight, **kwargs):
+    """A reward on both ensemble targets with ``bragg_weight=weight``, unprepared."""
     from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
 
-    bragg_path, diffuse_path, _, _ = targets
     return DiffuseBraggRewardFunction(
-        bragg_target=bragg_path, diffuse_target=diffuse_path, bragg_weight=weight, **kwargs
+        bragg_target=targets.bragg, diffuse_target=targets.diffuse, bragg_weight=weight, **kwargs
     )
 
 
 def prepare(reward, atom_array, device="cpu"):
-    """Prepare the way the sampling loop does, through RewardInputs.
-
-    ``prepare()`` takes reward inputs rather than an atom array, so the topology
-    is wrapped as single-conformer inputs -- the same shape
-    ``StructureFactorRewardFunction``'s tests use.
-    """
+    """Prepare the way the sampling loop does, through single-conformer ``RewardInputs``."""
     reward.prepare(
         RewardInputs.from_atom_array(atom_array, ensemble_size=1, device=device), device=device
     )
@@ -139,11 +53,11 @@ def prepare(reward, atom_array, device="cpu"):
 
 
 def score(reward, atom_array, coords, requires_grad=False):
-    """Evaluate the reward the way the sampling loop would.
+    """Evaluate the reward on ``(n_configs, n_atoms, 3)`` coordinates as the loop would.
 
     Occupancies are divided by the configuration count because the reward undoes
-    the ``1/N`` convention ``RewardInputs`` imposes; passing them straight
-    through would double-weight every atom.
+    the ``1/N`` convention ``RewardInputs`` imposes. Returns the loss and the
+    coordinate tensor, which carries ``.grad`` after ``backward()``.
     """
     n = coords.shape[0]
     x = torch.as_tensor(coords, dtype=torch.float32)
@@ -154,28 +68,48 @@ def score(reward, atom_array, coords, requires_grad=False):
     return reward(x, dummy.long(), dummy, occ), x
 
 
-@pytest.mark.parametrize("weight", [1.0, 0.0, 0.5])
-def test_recovers_the_structure_it_was_generated_from(ensemble, targets, weight):
-    """~0 loss when the model is the truth, at every mixture.
+@pytest.fixture(scope="module")
+def ensemble(diffuse_bragg_ensemble):
+    """``(atom_array, coords)`` of the two-configuration 1vme ensemble."""
+    return diffuse_bragg_ensemble
 
-    Measured on 1VME (2 conformations, 86499 reflections): 2e-14 pure Bragg,
+
+@pytest.fixture(scope="module")
+def targets(diffuse_bragg_targets) -> DiffuseBraggTargets:
+    """The MTZ targets generated from ``ensemble``."""
+    return diffuse_bragg_targets
+
+
+@pytest.fixture(scope="module")
+def rewards(diffuse_bragg_rewards):
+    """Prepared rewards keyed by weight: 1.0 (Bragg only), 0.5, 0.0 (diffuse only)."""
+    return diffuse_bragg_rewards
+
+
+# ---------------------------------------------------------------------------
+# Ensemble terms, at each mixture
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("weight", [1.0, 0.0, 0.5])
+def test_recovers_the_ensemble_it_was_generated_from(ensemble, rewards, weight):
+    """~0 loss when the model is the two-configuration truth, at every mixture.
+
+    Measured on 1vme (2 configurations, 86499 reflections): 2e-14 pure Bragg,
     6e-10 pure diffuse. Bragg reaches float32 epsilon because that is what the
     MTZ stores; diffuse is looser because the anisotropic component is what
     survives subtracting a large radial background, which amplifies the relative
     error of the intensities it came from.
     """
     atom_array, coords = ensemble
-    reward = build_reward(targets, weight)
-    prepare(reward, atom_array)
-
-    loss, _ = score(reward, atom_array, coords)
+    loss, _ = score(rewards[weight], atom_array, coords)
     assert torch.isfinite(loss)
     assert loss.item() < 1e-6
 
 
 @pytest.mark.parametrize("weight", [1.0, 0.0, 0.5])
-def test_loss_increases_with_displacement(ensemble, targets, weight):
-    """Monotonic in how far the model has been moved from the truth.
+def test_loss_increases_with_ensemble_displacement(ensemble, rewards, weight):
+    """Monotonic in how far the ensemble has been moved from the truth.
 
     The displacement is a fixed random direction scaled up, so the sequence
     probes one path away from the minimum rather than several unrelated points.
@@ -183,13 +117,9 @@ def test_loss_increases_with_displacement(ensemble, targets, weight):
     passing the recovery test above.
     """
     atom_array, coords = ensemble
-    reward = build_reward(targets, weight)
-    prepare(reward, atom_array)
-
-    rng = np.random.default_rng(0)
-    direction = rng.normal(size=coords.shape)
+    direction = np.random.default_rng(0).normal(size=coords.shape)
     losses = [
-        score(reward, atom_array, coords + amplitude * direction)[0].item()
+        score(rewards[weight], atom_array, coords + amplitude * direction)[0].item()
         for amplitude in (0.0, 0.02, 0.05, 0.1, 0.2)
     ]
 
@@ -201,21 +131,16 @@ def test_loss_increases_with_displacement(ensemble, targets, weight):
 
 
 @pytest.mark.parametrize("weight", [1.0, 0.0, 0.5])
-def test_gradients_reach_the_coordinates(ensemble, targets, weight):
+def test_every_configuration_receives_a_gradient(ensemble, rewards, weight):
     """backward() puts finite, non-zero gradients on every configuration.
 
-    Guidance consumes nothing but this. Gradients are checked per configuration
-    because an ensemble axis that collapsed -- all members receiving the same
-    gradient, or only the first receiving any -- would still produce a plausible
-    scalar loss.
+    Checked per configuration because an ensemble axis that collapsed -- all
+    members receiving the same gradient, or only the first receiving any --
+    would still produce a plausible scalar loss.
     """
     atom_array, coords = ensemble
-    reward = build_reward(targets, weight)
-    prepare(reward, atom_array)
-
-    rng = np.random.default_rng(1)
-    displaced = coords + 0.1 * rng.normal(size=coords.shape)
-    loss, x = score(reward, atom_array, displaced, requires_grad=True)
+    displaced = coords + 0.1 * np.random.default_rng(1).normal(size=coords.shape)
+    loss, x = score(rewards[weight], atom_array, displaced, requires_grad=True)
     loss.backward()
 
     assert x.grad is not None
@@ -224,50 +149,63 @@ def test_gradients_reach_the_coordinates(ensemble, targets, weight):
         assert x.grad[i].abs().max() > 0, f"configuration {i} received no gradient"
 
 
-def test_gradient_points_downhill(ensemble, targets):
-    """A small step along -grad lowers the loss.
+def test_diffuse_gradient_points_downhill(ensemble, rewards):
+    """A small step along -grad of the pure-diffuse loss lowers it.
 
-    The sign convention matters and is invisible in the magnitude checks above:
-    a reward whose gradient pointed uphill would look healthy in every other test
-    here and drive guidance away from the data.
+    The contract checks the sign for Bragg at one conformer; the diffuse term's
+    gradient only exists for an ensemble, and a wrong sign there would drive
+    guidance away from the data while every magnitude check passed.
     """
     atom_array, coords = ensemble
-    reward = build_reward(targets, 0.5)
-    prepare(reward, atom_array)
-
-    rng = np.random.default_rng(2)
-    displaced = coords + 0.1 * rng.normal(size=coords.shape)
-    loss, x = score(reward, atom_array, displaced, requires_grad=True)
+    displaced = coords + 0.1 * np.random.default_rng(2).normal(size=coords.shape)
+    loss, x = score(rewards[0.0], atom_array, displaced, requires_grad=True)
     loss.backward()
 
     step = 1e-3 / x.grad.abs().max().item()
-    stepped = displaced - step * x.grad.detach().numpy()
-    lowered, _ = score(reward, atom_array, stepped)
+    lowered, _ = score(rewards[0.0], atom_array, displaced - step * x.grad.detach().numpy())
 
     assert lowered.item() < loss.item(), (
         f"stepping along -grad raised the loss: {loss.item():.6e} -> {lowered.item():.6e}"
     )
 
 
+def test_anticorrelated_diffuse_is_not_a_match(ensemble, targets, tmp_path):
+    """The fitted scale is floored at zero, so a sign-flipped pattern scores ~1, not ~0.
+
+    The anisotropic diffuse component is signed on both sides. An unconstrained
+    least-squares scale would go negative for an anticorrelated calc, flip it onto
+    the target and report a perfect fit.
+    """
+    from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
+
+    negated = rs.read_mtz(str(targets.diffuse))
+    negated["ID"] = -negated["ID"]
+    path = tmp_path / "diffuse_negated.mtz"
+    negated.write_mtz(str(path))
+
+    atom_array, coords = ensemble
+    reward = prepare(DiffuseBraggRewardFunction(diffuse_target=path, bragg_weight=0.0), atom_array)
+    loss, _ = score(reward, atom_array, coords)
+
+    assert loss.item() == pytest.approx(1.0, abs=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# The convex weight
+# ---------------------------------------------------------------------------
+
+
 class TestWeightHandling:
-    """The convex weight, and what a zero weight is allowed to require."""
-
-    def test_zero_weight_does_not_require_its_target(self, targets):
-        from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
-
-        bragg_path, diffuse_path, _, _ = targets
-        # Pure diffuse needs no Bragg target, and vice versa.
-        DiffuseBraggRewardFunction(diffuse_target=diffuse_path, bragg_weight=0.0)
-        DiffuseBraggRewardFunction(bragg_target=bragg_path, bragg_weight=1.0)
+    """The convex weight: what it requires, what it rejects, how a callable is read."""
 
     def test_nonzero_weight_requires_its_target(self, targets):
+        """A mixture needs both targets; the error names the missing one."""
         from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
 
-        bragg_path, diffuse_path, _, _ = targets
         with pytest.raises(ValueError, match="bragg_target is required"):
-            DiffuseBraggRewardFunction(diffuse_target=diffuse_path, bragg_weight=0.5)
+            DiffuseBraggRewardFunction(diffuse_target=targets.diffuse, bragg_weight=0.5)
         with pytest.raises(ValueError, match="diffuse_target is required"):
-            DiffuseBraggRewardFunction(bragg_target=bragg_path, bragg_weight=0.5)
+            DiffuseBraggRewardFunction(bragg_target=targets.bragg, bragg_weight=0.5)
 
     def test_numpy_scalar_weight_is_a_constant(self, ensemble, targets):
         """A np.float32 weight is stored as a float, not mistaken for a callable."""
@@ -279,135 +217,89 @@ class TestWeightHandling:
         assert torch.isfinite(loss)
 
     def test_weight_outside_the_unit_interval_is_rejected(self, targets):
-        from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
-
-        bragg_path, diffuse_path, _, _ = targets
+        """The mixture is convex, so a weight outside [0, 1] is refused at construction."""
         with pytest.raises(ValueError, match="convex"):
-            DiffuseBraggRewardFunction(
-                bragg_target=bragg_path, diffuse_target=diffuse_path, bragg_weight=1.5
-            )
+            build_reward(targets, 1.5)
 
     def test_callable_weight_without_a_time_is_a_clear_error(self, ensemble, targets):
         """RewardFunctionProtocol carries no t, so nothing sets current_time yet."""
         atom_array, coords = ensemble
-        reward = build_reward(targets, lambda t: t)
-        prepare(reward, atom_array)
+        reward = prepare(build_reward(targets, lambda t: t), atom_array)
 
         with pytest.raises(RuntimeError, match="current_time"):
             score(reward, atom_array, coords)
 
-    def test_callable_weight_uses_current_time(self, ensemble, targets):
+    def test_callable_weight_is_evaluated_at_current_time(self, ensemble, targets, rewards):
+        """A step-function weight reproduces the pure-Bragg and pure-diffuse rewards exactly."""
         atom_array, coords = ensemble
-        reward = build_reward(targets, lambda t: 1.0 if t > 0.5 else 0.0)
-        prepare(reward, atom_array)
+        reward = prepare(build_reward(targets, lambda t: 1.0 if t > 0.5 else 0.0), atom_array)
+        displaced = coords + 0.05 * np.random.default_rng(3).normal(size=coords.shape)
 
         reward.current_time = 0.9
-        pure_bragg, _ = score(reward, atom_array, coords)
+        at_high_t, _ = score(reward, atom_array, displaced)
         reward.current_time = 0.1
-        pure_diffuse, _ = score(reward, atom_array, coords)
+        at_low_t, _ = score(reward, atom_array, displaced)
 
-        # Both are recovery losses, but of different terms, so they differ by
-        # the several orders of magnitude the recovery test documents.
-        assert pure_bragg.item() != pure_diffuse.item()
-
-
-class TestProtocolConformance:
-    """The two-phase hook, exercised the way the sampling loop reaches it.
-
-    ``isinstance`` is structural and checks method *names*, so it cannot catch a
-    ``prepare`` whose first parameter is the wrong type: before #402's signature
-    change was followed here, this class satisfied the protocol while
-    ``prepare_reward_if_needed`` handed it a ``RewardInputs`` where an
-    ``AtomArray`` was expected, and the failure surfaced deep inside
-    ``build_setup``. Going through the hook is what pins it.
-    """
-
-    def test_satisfies_both_reward_protocols(self, targets):
-        reward = build_reward(targets, 0.5)
-
-        assert isinstance(reward, RewardFunctionProtocol)
-        assert isinstance(reward, PreparableRewardFunctionProtocol)
-
-    def test_prepare_hook_binds_the_reward(self, ensemble, targets):
-        """``prepare_reward_if_needed`` is how scalers prepare a reward, so the
-        reward has to be usable after being prepared that way and no other."""
-        atom_array, coords = ensemble
-        reward = build_reward(targets, 0.5)
-
-        prepare_reward_if_needed(
-            reward, RewardInputs.from_atom_array(atom_array, ensemble_size=1), device="cpu"
-        )
-
-        assert reward.setup is not None
-        loss, _ = score(reward, atom_array, coords)
-        assert torch.isfinite(loss)
-
-    def test_prepare_without_an_atom_array_is_a_clear_error(self, ensemble, targets):
-        """The topology cannot be recovered from the tensors alone."""
-        atom_array, _ = ensemble
-        reward = build_reward(targets, 0.5)
-        inputs = RewardInputs.from_atom_array(atom_array, ensemble_size=1)
-        inputs.atom_array = None
-
-        with pytest.raises(ValueError, match="atom_array"):
-            reward.prepare(inputs)
+        bragg_only, _ = score(rewards[1.0], atom_array, displaced)
+        diffuse_only, _ = score(rewards[0.0], atom_array, displaced)
+        assert at_high_t.item() == pytest.approx(bragg_only.item(), rel=1e-5)
+        assert at_low_t.item() == pytest.approx(diffuse_only.item(), rel=1e-5)
+        assert bragg_only.item() != pytest.approx(diffuse_only.item())
 
 
-@pytest.fixture(scope="module")
-def flagged_bragg(targets, tmp_path_factory):
-    """The Bragg target with a Phenix-convention R-free column (1 = test), 10% flagged."""
-    import reciprocalspaceship as rs
+def test_prepare_without_an_atom_array_is_a_clear_error(ensemble, targets):
+    """The topology cannot be recovered from the tensors alone."""
+    atom_array, _ = ensemble
+    inputs = RewardInputs.from_atom_array(atom_array, ensemble_size=1)
+    inputs.atom_array = None
 
-    bragg_path, _, _, _ = targets
-    ds = rs.utils.add_rfree(rs.read_mtz(str(bragg_path)), fraction=0.1, seed=0)
-    path = tmp_path_factory.mktemp("flagged") / "bragg_flagged.mtz"
-    ds.write_mtz(str(path))
-    n_free = int((ds["R-free-flags"] == 1).sum())
-    return path, len(ds), n_free
+    with pytest.raises(ValueError, match="atom_array"):
+        build_reward(targets, 0.5).prepare(inputs)
+
+
+# ---------------------------------------------------------------------------
+# R-free handling
+# ---------------------------------------------------------------------------
 
 
 class TestFreeReflections:
-    """exclude_free_reflections drops the test set from the Bragg target."""
+    """exclude_free_reflections drops the test set from the Bragg term."""
 
-    def test_test_set_is_dropped_from_the_reflection_list(self, flagged_bragg):
-        from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
+    def test_test_set_is_dropped_from_the_bragg_list(self, targets):
+        """The Bragg list shrinks by the flagged count; the diffuse list is untouched."""
+        with_all = build_reward(targets, 0.5)
+        working = build_reward(targets, 0.5, exclude_free_reflections=True)
 
-        path, n_total, n_free = flagged_bragg
-        with_all = DiffuseBraggRewardFunction(bragg_target=path, bragg_weight=1.0)
-        working = DiffuseBraggRewardFunction(
-            bragg_target=path, bragg_weight=1.0, exclude_free_reflections=True
-        )
+        assert len(with_all._bragg_hkl) == targets.n_reflections
+        assert len(working._bragg_hkl) == targets.n_reflections - targets.n_free
+        assert len(working._diffuse_hkl) == targets.n_reflections
 
-        assert len(with_all._bragg_hkl) == n_total
-        assert len(working._bragg_hkl) == n_total - n_free
-
-    def test_wrong_convention_warns(self, flagged_bragg, caplog):
+    def test_wrong_convention_warns(self, targets, caplog):
         """test_set_value=0 on a Phenix-convention file keeps only the 10% test set."""
-        from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
+        reward = build_reward(targets, 1.0, exclude_free_reflections=True, test_set_value=0)
 
-        path, n_total, n_free = flagged_bragg
-        reward = DiffuseBraggRewardFunction(
-            bragg_target=path, bragg_weight=1.0, exclude_free_reflections=True, test_set_value=0
-        )
-
-        assert len(reward._bragg_hkl) == n_free
+        assert len(reward._bragg_hkl) == targets.n_free
         assert "CCP4-convention" in caplog.text
 
     def test_missing_flag_column_is_a_clear_error(self, targets):
+        """A Bragg MTZ without an integer column cannot have its test set excluded."""
         from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
 
-        bragg_path, _, _, _ = targets  # written with test_fraction=0.0, so no flag column
         with pytest.raises(ValueError, match="No MTZInt column"):
             DiffuseBraggRewardFunction(
-                bragg_target=bragg_path, bragg_weight=1.0, exclude_free_reflections=True
+                bragg_target=targets.bragg_single, bragg_weight=1.0, exclude_free_reflections=True
             )
+
+
+# ---------------------------------------------------------------------------
+# Separate reflection lists
+# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
 def thinned_diffuse(targets, tmp_path_factory):
-    """The diffuse target with every other reflection removed."""
-    _, diffuse_path, _, _ = targets
-    ds = rs.read_mtz(str(diffuse_path))
+    """The diffuse target with every other reflection removed: ``(path, n_full, n_kept)``."""
+    ds = rs.read_mtz(str(targets.diffuse))
     thinned = ds.iloc[::2].copy()
     path = tmp_path_factory.mktemp("thinned") / "diffuse_thinned.mtz"
     thinned.write_mtz(str(path))
@@ -418,12 +310,12 @@ class TestSeparateReflectionLists:
     """Bragg and diffuse targets need not be indexed on the same reflections."""
 
     def test_each_term_keeps_its_own_reflections(self, ensemble, targets, thinned_diffuse):
+        """A thinned diffuse list leaves the Bragg list whole and the truth recoverable."""
         from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
 
-        bragg_path, _, _, _ = targets
         path, n_full, n_thinned = thinned_diffuse
         reward = DiffuseBraggRewardFunction(
-            bragg_target=bragg_path, diffuse_target=path, bragg_weight=0.5
+            bragg_target=targets.bragg, diffuse_target=path, bragg_weight=0.5
         )
 
         assert len(reward._bragg_hkl) == n_full
@@ -433,17 +325,15 @@ class TestSeparateReflectionLists:
         atom_array, coords = ensemble
         prepare(reward, atom_array)
         loss, _ = score(reward, atom_array, coords)
-        assert torch.isfinite(loss)
-        assert loss.item() < 1e-3
+        assert loss.item() < 1e-6
 
     def test_disjoint_lists_are_evaluated_together(self, ensemble, targets, thinned_diffuse):
-        """Bragg on the odd reflections, diffuse on the even: union is the full set."""
+        """Bragg on the odd reflections, diffuse on the even: the union is the full set."""
         from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
 
-        bragg_path, _, _, _ = targets
         diffuse_path, n_full, n_even = thinned_diffuse
         odd_bragg = diffuse_path.parent / "bragg_odd.mtz"
-        rs.read_mtz(str(bragg_path)).iloc[1::2].copy().write_mtz(str(odd_bragg))
+        rs.read_mtz(str(targets.bragg)).iloc[1::2].copy().write_mtz(str(odd_bragg))
 
         reward = DiffuseBraggRewardFunction(
             bragg_target=odd_bragg, diffuse_target=diffuse_path, bragg_weight=0.5
@@ -454,28 +344,37 @@ class TestSeparateReflectionLists:
         atom_array, coords = ensemble
         prepare(reward, atom_array)
         loss, _ = score(reward, atom_array, coords)
-        assert loss.item() < 1e-3
+        assert loss.item() < 1e-6
 
     def test_mismatched_cells_are_rejected(self, targets, tmp_path):
-        import gemmi
+        """Both targets must be indexed on the crystal cell; a different cell is refused."""
         from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
 
-        bragg_path, diffuse_path, cell, _ = targets
-        ds = rs.read_mtz(str(diffuse_path))
-        ds.cell = gemmi.UnitCell(cell.a * 2, cell.b, cell.c, cell.alpha, cell.beta, cell.gamma)
+        ds = rs.read_mtz(str(targets.diffuse))
+        c = targets.cell
+        ds.cell = gemmi.UnitCell(c.a * 2, c.b, c.c, c.alpha, c.beta, c.gamma)
         other = tmp_path / "diffuse_other_cell.mtz"
         ds.write_mtz(str(other))
 
         with pytest.raises(ValueError, match="same unit cell"):
-            DiffuseBraggRewardFunction(bragg_target=bragg_path, diffuse_target=other)
+            DiffuseBraggRewardFunction(bragg_target=targets.bragg, diffuse_target=other)
+
+
+# ---------------------------------------------------------------------------
+# Bulk solvent
+# ---------------------------------------------------------------------------
 
 
 class TestBulkSolvent:
+    """The per-conformer solvent mask and how its cutoff is set."""
+
     def test_unknown_mode_is_rejected(self, targets):
+        """lunus has no single-mask mode, so ``"combined"`` is refused at construction."""
         with pytest.raises(ValueError, match="bulk_solvent must be one of"):
             build_reward(targets, 0.5, bulk_solvent="combined")
 
     def test_default_cutoff_is_calibrated_in_prepare(self, ensemble, targets, caplog):
+        """With no explicit cutoff, prepare() calibrates one and sets the taper to half of it."""
         atom_array, _ = ensemble
         reward = build_reward(targets, 1.0, bulk_solvent="per_conformer")
         assert reward._solvent is None  # nothing to calibrate against until prepare()
@@ -486,32 +385,40 @@ class TestBulkSolvent:
         assert reward._solvent.taper_width == pytest.approx(0.5 * reward._solvent.cutoff)
         assert "Solvent cutoff calibrated" in caplog.text
 
-    def test_recalibrates_when_prepared_again_for_another_topology(self, ensemble, targets):
-        """prepare() may be re-run for different inputs; the cutoff follows the new topology."""
+    @pytest.mark.parametrize("chain", ["A", "B"])
+    def test_recalibration_matches_a_fresh_prepare(self, ensemble, targets, chain):
+        """Re-preparing on a new topology gives the cutoff a fresh reward would, not a stale one."""
         atom_array, _ = ensemble
+        subset = atom_array[np.asarray(atom_array.chain_id) == chain]
+
         reward = prepare(build_reward(targets, 1.0, bulk_solvent="per_conformer"), atom_array)
-        first = reward._solvent.cutoff
+        full_cutoff = reward._solvent.cutoff
+        prepare(reward, subset)
+        fresh = prepare(build_reward(targets, 1.0, bulk_solvent="per_conformer"), subset)
 
-        prepare(reward, atom_array[np.asarray(atom_array.chain_id) == "A"])
+        assert reward._solvent.cutoff == pytest.approx(fresh._solvent.cutoff, rel=1e-6)
+        assert reward._solvent.cutoff != pytest.approx(full_cutoff, rel=1e-3)
 
-        assert reward._solvent.cutoff != first
+    @pytest.mark.parametrize("cutoff", [0.2, 0.35])
+    def test_explicit_cutoff_is_used_as_given(self, ensemble, targets, cutoff):
+        """An explicit cutoff bypasses calibration and takes ``solvent_taper_width``."""
+        from sampleworks.core.rewards.diffuse_bragg import DEFAULT_SOLVENT_TAPER_WIDTH
 
-    def test_explicit_cutoff_is_used_as_given(self, ensemble, targets):
         atom_array, _ = ensemble
         reward = prepare(
-            build_reward(targets, 1.0, bulk_solvent="per_conformer", solvent_cutoff=0.2), atom_array
+            build_reward(targets, 1.0, bulk_solvent="per_conformer", solvent_cutoff=cutoff),
+            atom_array,
         )
 
-        assert reward._solvent.cutoff == 0.2
+        assert reward._solvent.cutoff == cutoff
+        assert reward._solvent.taper_width == DEFAULT_SOLVENT_TAPER_WIDTH
 
-    def test_per_conformer_solvent_changes_the_bragg_term(self, ensemble, targets):
-        """A solvent contribution changes |Ftotal| relative to |Fprotein|; the model
-        runs under gradient and leaves the loss finite."""
+    def test_per_conformer_solvent_changes_the_bragg_term(self, ensemble, targets, rewards):
+        """A solvent contribution changes |Ftotal| relative to |Fprotein| under gradient."""
         atom_array, coords = ensemble
-        without = prepare(build_reward(targets, 1.0), atom_array)
         with_solvent = prepare(build_reward(targets, 1.0, bulk_solvent="per_conformer"), atom_array)
 
-        loss_off, _ = score(without, atom_array, coords)
+        loss_off, _ = score(rewards[1.0], atom_array, coords)
         loss_on, x = score(with_solvent, atom_array, coords, requires_grad=True)
         loss_on.backward()
 

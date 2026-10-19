@@ -22,7 +22,9 @@ Only *reward-agnostic* checks live here:
   is independent of topology information or implements those methods.
 
 Each reward runs against its own self-consistent data bundle (see `reward_case`): the
-real_space case uses the recentered carved 1vme cif + `.ccp4` map.
+real_space case uses the recentered carved 1vme cif + `.ccp4` map; diffuse_bragg scores
+Bragg alone here, since its diffuse term is an ensemble property that is identically
+zero for the single conformer the contract scores.
 """
 
 from dataclasses import dataclass
@@ -34,13 +36,13 @@ from sampleworks.core.rewards.protocol import RewardFunctionProtocol
 from tests.rewards.reward_input_helpers import build_reward_input_tensors_without_coords
 
 
-# Every test exercises CUDA-targeted reward code on the `device` fixture (try_gpu), so the
-# whole module is gpu-marked. Deliberately NOT `slow`: measured warm per-test time is ~1s
-# at most (the SFC gradient-descent loop; the rest are sub-0.5s). The fixed cost is a one-time
-# import, the session-scoped synthetic SF generation, and session-scoped reward construction
-# (real_space + SFC), paid once per pytest invocation and not skippable by `slow`-marking
-# these tests.
-pytestmark = pytest.mark.gpu
+# real_space and structure_factor exercise CUDA-targeted code on the `device` fixture
+# (try_gpu), so those params are gpu-marked; diffuse_bragg runs on CPU in ~15 s for the
+# whole module and is left unmarked so `tests` covers it. Deliberately NOT `slow`: measured
+# warm per-test time is ~1s at most (the SFC gradient-descent loop; the rest are sub-0.5s).
+# The fixed cost is a one-time import, the session-scoped synthetic target generation, and
+# session-scoped reward construction, paid once per pytest invocation and not skippable by
+# `slow`-marking these tests.
 
 
 @dataclass(frozen=True)
@@ -73,7 +75,9 @@ class RewardCase:
 _REWARD_BUNDLES = {
     "real_space": ("test_coordinates_1vme", "reward_function_1vme"),
     "structure_factor": ("test_coordinates_1vme_sf", "reward_function_1vme_sf"),
+    "diffuse_bragg": ("test_coordinates_1vme_diffuse_bragg", "reward_function_1vme_diffuse_bragg"),
 }
+_GPU_BUNDLES = {"real_space", "structure_factor"}
 
 # Absolute loss bar for the TRUE structure, per reward. RealSpace's loss is MSE on
 # normalized density (sigma units): for our 1VME case the true structure scores ~0.0018,
@@ -82,14 +86,22 @@ _REWARD_BUNDLES = {
 # loss, so it comfortably passes the truth while meaningfully failing a wrong structure.
 # SFC (normalize_amplitude=True -> normalized E-values) measured on the synthetic MTZ:
 # true ~2e-14, a 0.5 A perturbation ~0.34, and random ~0.44, so the 0.1 bar sits well
-# above numerical zero and ~3x below the smallest perturbation signal.
+# above numerical zero and ~3x below the smallest perturbation signal. diffuse_bragg
+# (normalize=True, fit_scale=True -> 1 - cos^2 on |F|) measured on the single-configuration
+# target: true ~1e-14, a 0.5 A perturbation ~0.3, so 1e-3 sits far from both.
 _LOSS_THRESHOLDS = {
     "real_space": 0.01,
     "structure_factor": 0.1,
+    "diffuse_bragg": 1e-3,
 }
 
 
-@pytest.fixture(params=list(_REWARD_BUNDLES))
+@pytest.fixture(
+    params=[
+        pytest.param(name, marks=[pytest.mark.gpu] if name in _GPU_BUNDLES else [])
+        for name in _REWARD_BUNDLES
+    ]
+)
 def reward_case(request, device: torch.device) -> RewardCase:
     """Resolve one reward's self-consistent (reward, coords, per-atom inputs) bundle."""
     coords_fixture, reward_fixture = _REWARD_BUNDLES[request.param]
@@ -250,8 +262,8 @@ class TestRewardGradientFlow:
         assert loss_final < loss_initial
 
 
-# Batch sizes span a single conformer up to a 20-member ensemble. All run under the
-# module-level gpu mark; even batch=20 is sub-second (measured ~0.5s), so none is `slow`.
+# Batch sizes span a single conformer up to a 20-member ensemble. Even batch=20 is
+# sub-second on the GPU rewards (measured ~0.5s), so none is `slow`.
 @pytest.mark.parametrize(
     "batch_size",
     [
