@@ -155,11 +155,11 @@ def _invocation_path() -> str:
 def _identity_mismatches(truth, guided) -> list[str]:
     """Positions where the two structures disagree about which atom sits there.
 
-    Compares chain, residue number, atom name and element: the annotations that
-    identify an atom independently of its coordinates and survive a round trip
-    through a CIF.
+    Compares chain, residue number and insertion code, residue name, atom name and
+    element: the annotations that identify an atom independently of its coordinates
+    and survive a round trip through a CIF.
     """
-    fields = ("chain_id", "res_id", "atom_name", "element")
+    fields = ("chain_id", "res_id", "ins_code", "res_name", "atom_name", "element")
     truth_keys = list(zip(*(np.asarray(getattr(truth, f)) for f in fields), strict=True))
     guided_keys = list(zip(*(np.asarray(getattr(guided, f)) for f in fields), strict=True))
 
@@ -285,11 +285,16 @@ def evaluate(args: argparse.Namespace) -> None:
         )
 
     truth_rmsf, guided_rmsf = rmsf(truth_coords), rmsf(guided_coords)
-    correlation = float(np.corrcoef(truth_rmsf, guided_rmsf)[0, 1])
 
     print(f"\n  truth RMSF   mean {truth_rmsf.mean():.3f} A, max {truth_rmsf.max():.3f} A")
     print(f"  guided RMSF  mean {guided_rmsf.mean():.3f} A, max {guided_rmsf.max():.3f} A")
-    print(f"  RMSF correlation  {correlation:.4f}")
+    # A constant profile has no correlation with anything (np.corrcoef gives nan);
+    # an ensemble with no spread is a distinct failure and is reported as such.
+    if np.ptp(guided_rmsf) == 0.0:
+        print("  RMSF correlation  undefined: the guided ensemble has no spread")
+    else:
+        correlation = float(np.corrcoef(truth_rmsf, guided_rmsf)[0, 1])
+        print(f"  RMSF correlation  {correlation:.4f}")
     print(
         "\n  Correlation near 1 means guidance put the motion where the data says.\n"
         "  Near 0 means the ensemble spread is unrelated to the target, whatever\n"
