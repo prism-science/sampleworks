@@ -258,11 +258,13 @@ def evaluate(args: argparse.Namespace) -> None:
     guided = load_any(args.guided, extra_fields=["occupancy", "b_factor"])
     logger.info(f"Loaded truth {args.truth} and guided {args.guided}")
 
-    truth_coords = np.asarray(truth.coord, dtype=np.float64)
-    guided_coords = np.asarray(guided.coord, dtype=np.float64)
-    if truth_coords.ndim != 3 or guided_coords.ndim != 3:
+    # load_any returns a stack even for a one-model file, so count models, not axes.
+    truth_coords = np.asarray(truth.coord, dtype=np.float64).reshape(-1, len(truth), 3)
+    guided_coords = np.asarray(guided.coord, dtype=np.float64).reshape(-1, len(guided), 3)
+    if truth_coords.shape[0] < 2 or guided_coords.shape[0] < 2:
         raise ValueError(
-            "Both inputs must be multi-model. A single-model file has no spread to "
+            f"Both inputs must have at least two models (truth {truth_coords.shape[0]}, "
+            f"guided {guided_coords.shape[0]}). A single model has no spread to "
             "compare, which is the whole measurement."
         )
     if truth_coords.shape[1] != guided_coords.shape[1]:
