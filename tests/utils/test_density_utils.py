@@ -2,6 +2,7 @@
 
 from typing import cast
 
+import gemmi
 import numpy as np
 import pytest
 import torch
@@ -33,6 +34,62 @@ def synthetic_grid(request, simple_atom_array: AtomArray):
     resolution = params["resolution"]
     padding = params["padding"]
     return xmap, resolution, padding
+
+
+def _atom_array(element: str, coords: list[list[float]], occupancy: list[float]) -> AtomArray:
+    """Build an AtomArray of one element with B-factor 20.
+
+    Parameters
+    ----------
+    element
+        Element symbol shared by every atom.
+    coords
+        Atom positions in Angstroms, shape (n_atoms, 3).
+    occupancy
+        Per-atom occupancies, shape (n_atoms,).
+
+    Returns
+    -------
+    AtomArray
+        The atoms, ready for density calculation.
+    """
+    atom_array = AtomArray(len(coords))
+    atom_array.coord = np.array(coords, dtype=np.float64)
+    atom_array.set_annotation("element", np.array([element] * len(coords)))
+    atom_array.set_annotation("b_factor", np.full(len(coords), 20.0))
+    atom_array.set_annotation("occupancy", np.array(occupancy, dtype=np.float64))
+    return atom_array
+
+
+def _integrated_lone_atom_density(element: str, em_mode: bool, device: torch.device) -> float:
+    """Integrate the density of one fully occupied atom over its synthetic grid.
+
+    The integral equals the atom's scattering factor at zero angle. The grid is
+    built at 1 Angstrom, where the B=20 Debye-Waller factor at the resolution
+    limit is exp(-5), so resolution truncation leaves that integral intact.
+
+    Parameters
+    ----------
+    element
+        Element symbol of the atom.
+    em_mode
+        Whether to use electron rather than X-ray scattering factors.
+    device
+        Device to compute the density on.
+
+    Returns
+    -------
+    float
+        Sum of the density times the voxel volume: electrons for X-ray,
+        Angstroms for electron scattering.
+    """
+    atom_array = _atom_array(element, [[0.0, 0.0, 0.0]], [1.0])
+    xmap = create_synthetic_grid(atom_array, resolution=1.0)
+    density, _ = compute_density_from_atomarray(
+        atom_array, xmap=xmap, em_mode=em_mode, device=device
+    )
+    voxel_volume = float(np.prod(np.broadcast_to(xmap.voxelspacing, 3)))
+    return float(density.sum()) * voxel_volume
 
 
 class TestCreateSyntheticGrid:
@@ -218,21 +275,18 @@ class TestComputeDensityFromAtomarray:
         with pytest.raises(ValueError, match="Either xmap or resolution must be provided"):
             compute_density_from_atomarray(simple_atom_array, em_mode=False, device=device)
 
-    def test_xray_mode(self, simple_atom_array: AtomArray, device: torch.device):
-        """Test that X-ray mode (em_mode=False) works."""
-        density, _ = compute_density_from_atomarray(
-            simple_atom_array, resolution=2.0, em_mode=False, device=device
-        )
-        assert isinstance(density, torch.Tensor)
-        assert density.sum() > 0
+    @pytest.mark.parametrize("element", ["C", "N", "O"])
+    def test_xray_mode(self, element: str, device: torch.device):
+        """X-ray density of a lone neutral atom integrates to its atomic number."""
+        integral = _integrated_lone_atom_density(element, em_mode=False, device=device)
+        assert integral == pytest.approx(gemmi.Element(element).atomic_number, rel=0.01)
 
-    def test_electron_mode(self, simple_atom_array: AtomArray, device: torch.device):
-        """Test that electron mode (em_mode=True) works."""
-        density, _ = compute_density_from_atomarray(
-            simple_atom_array, resolution=2.0, em_mode=True, device=device
-        )
-        assert isinstance(density, torch.Tensor)
-        assert density.sum() > 0
+    @pytest.mark.parametrize("element", ["C", "N", "O"])
+    def test_electron_mode(self, element: str, device: torch.device):
+        """Electron-mode density integrates to gemmi's Peng (1996) f_e(0), not to Z."""
+        integral = _integrated_lone_atom_density(element, em_mode=True, device=device)
+        peng_f0 = sum(gemmi.Element(element).c4322.a)
+        assert integral == pytest.approx(peng_f0, rel=0.01)
 
     def test_it1992_table(self, simple_atom_array: AtomArray, device: torch.device):
         """The IT1992 table gives nearly the same X-ray density as the WK1995 default."""
@@ -311,17 +365,28 @@ class TestComputeDensityFromAtomarray:
             assert vs_high < vs_low
 
     def test_zero_occupancy_atoms_filtered(self, device: torch.device):
-        """Test that atoms with zero occupancy contribute no density."""
-        atom_array = AtomArray(3)
-        atom_array.coord = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
-        atom_array.set_annotation("element", np.array(["C", "C", "C"]))
-        atom_array.set_annotation("b_factor", np.array([20.0, 20.0, 20.0]))
-        atom_array.set_annotation("occupancy", np.array([1.0, 0.0, 1.0]))
+        """Density is the occupancy-weighted sum of each atom's own density.
+
+        The zero-occupancy atom contributes nothing and the half-occupied atom
+        contributes half of its density at full occupancy.
+        """
+        atom_array = _atom_array(
+            "C", [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]], [1.0, 0.0, 0.5]
+        )
+        xmap = create_synthetic_grid(atom_array, resolution=2.0)
 
         density, _ = compute_density_from_atomarray(
-            atom_array, resolution=2.0, em_mode=False, device=device
+            atom_array, xmap=xmap, em_mode=False, device=device
         )
-        assert density.sum() > 0
+        first_atom_density, _ = compute_density_from_atomarray(
+            _atom_array("C", [[0.0, 0.0, 0.0]], [1.0]), xmap=xmap, em_mode=False, device=device
+        )
+        third_atom_density, _ = compute_density_from_atomarray(
+            _atom_array("C", [[2.0, 0.0, 0.0]], [1.0]), xmap=xmap, em_mode=False, device=device
+        )
+
+        expected = first_atom_density + 0.5 * third_atom_density
+        torch.testing.assert_close(density, expected, rtol=1e-5, atol=1e-6)
 
     def test_with_real_structure(
         self, structure_1vme: dict, density_map_1vme: XMap, device: torch.device
@@ -399,14 +464,17 @@ class TestExtractDensityInputsFromAtomArrayStack:
     def test_stack_non_uniform_occupancy_preserved(
         self, simple_atom_array_stack: AtomArrayStack, device: torch.device
     ):
-        """Occupancy values are preserved as provided for stack inputs."""
-        n_models = simple_atom_array_stack.stack_depth()
-        n_atoms = simple_atom_array_stack.array_length()
+        """Each model gets the stack's per-atom occupancies, unchanged and in atom order."""
+        atom_occupancies = np.array([0.2, 0.5, 0.8])
+        atom_array_stack = simple_atom_array_stack.copy()
+        atom_array_stack.set_annotation("occupancy", atom_occupancies)
 
-        _, _, _, occupancies = extract_density_inputs_from_atomarray(
-            simple_atom_array_stack, device
+        _, _, _, occupancies = extract_density_inputs_from_atomarray(atom_array_stack, device)
+        expected = torch.tensor(
+            np.tile(atom_occupancies, (atom_array_stack.stack_depth(), 1)),
+            device=device,
+            dtype=torch.float32,
         )
-        expected = torch.full((n_models, n_atoms), 1.0, device=device, dtype=torch.float32)
         torch.testing.assert_close(occupancies, expected)
 
     def test_stack_filters_invalid_coords_across_models(
