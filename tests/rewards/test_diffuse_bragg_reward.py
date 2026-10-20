@@ -346,18 +346,31 @@ class TestSeparateReflectionLists:
         loss, _ = score(reward, atom_array, coords)
         assert loss.item() < 1e-6
 
-    def test_mismatched_cells_are_rejected(self, targets, tmp_path):
-        """Both targets must be indexed on the crystal cell; a different cell is refused."""
-        from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
-
+    @staticmethod
+    def diffuse_on_cell(targets, tmp_path, scale_a: float):
+        """The diffuse target rewritten with its ``a`` axis scaled by ``scale_a``."""
         ds = rs.read_mtz(str(targets.diffuse))
         c = targets.cell
-        ds.cell = gemmi.UnitCell(c.a * 2, c.b, c.c, c.alpha, c.beta, c.gamma)
-        other = tmp_path / "diffuse_other_cell.mtz"
-        ds.write_mtz(str(other))
+        ds.cell = gemmi.UnitCell(c.a * scale_a, c.b, c.c, c.alpha, c.beta, c.gamma)
+        path = tmp_path / f"diffuse_a_x{scale_a}.mtz"
+        ds.write_mtz(str(path))
+        return path
 
-        with pytest.raises(ValueError, match="same unit cell"):
+    def test_diffuse_cell_must_be_a_supercell_of_the_bragg_cell(self, targets, tmp_path):
+        """A diffuse cell that is not an integer multiple of the Bragg cell is refused."""
+        from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
+
+        other = self.diffuse_on_cell(targets, tmp_path, 1.3)
+        with pytest.raises(ValueError, match="integer supercell"):
             DiffuseBraggRewardFunction(bragg_target=targets.bragg, diffuse_target=other)
+
+    def test_supercell_indexed_diffuse_is_not_yet_supported(self, targets, tmp_path):
+        """A diffuse target at fractional hkl is a valid input the reward cannot evaluate yet."""
+        from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
+
+        doubled = self.diffuse_on_cell(targets, tmp_path, 2.0)
+        with pytest.raises(NotImplementedError, match=r"\(2, 1, 1\) supercell"):
+            DiffuseBraggRewardFunction(bragg_target=targets.bragg, diffuse_target=doubled)
 
 
 # ---------------------------------------------------------------------------

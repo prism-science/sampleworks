@@ -5,13 +5,17 @@ One forward pass gives both observables: ``structure_factors_batch`` returns
 and ``<|F|²> − |<F>|²`` (diffuse). Scoring them in one reward rather than two
 avoids paying for the grid evaluation and FFT twice.
 
-Each term keeps its own reflection list, both indexed on the crystal unit cell:
-Bragg data on its integer reciprocal lattice, diffuse data on the lattice lunus
-samples a diffuse map on, integer hkl today. The lists need not coincide, so the
-union is evaluated once and each term gathers its own reflections. A supercell
-model is the forward model's business, not the data's: lunus folds a supercell
-density into the crystal cell before extracting F(hkl), which is exact at integer
-hkl. Fractional diffuse hkl would need unfolded supercell F and non-integer lists.
+Each term keeps its own reflection list. Bragg data are indexed on the crystal
+cell's integer reciprocal lattice. A diffuse map may be too, or may be sampled
+between the Bragg peaks, in which case it is indexed on an integer supercell of
+the crystal cell (index ``h`` on a cell with a doubled ``a`` axis is ``h/2`` of the
+crystal cell, so its odd indices are the crystal cell's half-integer points).
+Both are valid diffuse targets; today only the first is evaluated, since one FFT
+grid on the crystal cell serves both terms and each gathers its own reflections
+from it. A supercell-indexed target needs the model's transform on a supercell
+grid without folding, a second setup for the diffuse term (#483). A supercell
+*model* is a different matter and already handled by lunus, which folds its
+density into the crystal cell before extracting F(hkl), exact at integer hkl.
 
 The two terms are combined convexly, ``bragg_weight`` running from 1.0 (pure
 Bragg) to 0.0 (pure diffuse). Each term is ``||s·calc − obs||² / ||obs||²`` with
@@ -49,6 +53,7 @@ import torch
 from jaxtyping import Float, Int
 from loguru import logger
 from lunus.sf import mean_and_diffuse
+from lunus.sf.symmetry_torch import supercell_factors
 from sampleworks.core.forward_models.xray import lunus_sf
 from sampleworks.core.rewards.protocol import RewardInputs
 from sampleworks.synthetic.synthetic_utils import resolve_mtz_column
@@ -283,8 +288,10 @@ class DiffuseBraggRewardFunction:
         Raises
         ------
         ValueError
-            If both targets are given on different cells, or a resolution cutoff
-            leaves a term with no reflections.
+            If the diffuse target's cell is not an integer supercell of the Bragg
+            target's, or a resolution cutoff leaves a term with no reflections.
+        NotImplementedError
+            If the diffuse target is indexed on a supercell of the Bragg cell.
         """
         bragg_hkl = bragg_values = None
         diffuse_hkl = diffuse_values = None
@@ -305,13 +312,17 @@ class DiffuseBraggRewardFunction:
             diffuse_hkl, diffuse_values = self._finite_column(ds, column)
             if cell is None:
                 cell, spacegroup = ds.cell, ds.spacegroup
-            # Both targets are in the experiment's frame, the crystal unit cell.
-            # A supercell model folds onto this cell in the forward model.
-            elif not ds.cell.approx(cell, 1e-3):
-                raise ValueError(
-                    f"The diffuse target's cell {ds.cell} differs from the Bragg "
-                    f"target's {cell}; both must be indexed on the same unit cell."
-                )
+            else:
+                # Raises ValueError unless the diffuse cell is an integer supercell of
+                # the Bragg cell (same angles, each edge an integer multiple).
+                factors = supercell_factors(ds.cell.parameters, cell.parameters)
+                if factors != (1, 1, 1):
+                    raise NotImplementedError(
+                        f"The diffuse target is indexed on a {factors} supercell of the "
+                        f"Bragg cell, i.e. at fractional hkl. Evaluating the model there "
+                        "needs its own supercell grid, which this reward does not build "
+                        "yet (#483); supply a diffuse target indexed on the Bragg cell."
+                    )
 
         if cell is None or spacegroup is None:
             raise RuntimeError("No target was read; __init__ requires at least one.")
