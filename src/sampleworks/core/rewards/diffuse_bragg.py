@@ -13,7 +13,7 @@ crystal cell, so its odd indices are the crystal cell's half-integer points).
 Both are valid diffuse targets; today only the first is evaluated, since one FFT
 grid on the crystal cell serves both terms and each gathers its own reflections
 from it. A supercell-indexed target needs the model's transform on a supercell
-grid without folding, a second setup for the diffuse term (#483). A supercell
+grid without folding, a second setup for the diffuse term (#493). A supercell
 *model* is a different matter and already handled by lunus, which folds its
 density into the crystal cell before extracting F(hkl), exact at integer hkl.
 
@@ -321,7 +321,7 @@ class DiffuseBraggRewardFunction:
                         f"The diffuse target is indexed on a {factors} supercell of the "
                         f"Bragg cell, i.e. at fractional hkl. Evaluating the model there "
                         "needs its own supercell grid, which this reward does not build "
-                        "yet (#483); supply a diffuse target indexed on the Bragg cell."
+                        "yet (#493); supply a diffuse target indexed on the Bragg cell."
                     )
 
         if cell is None or spacegroup is None:
@@ -692,10 +692,9 @@ class DiffuseBraggRewardFunction:
         f_configs = lunus_sf.structure_factors(
             self.setup, coordinates, occupancies, self._hkl_t, solvent=self._solvent
         )
-        # TODO(#483): one setup and one F serve both terms. A supercell model
-        # takes <F> on the folded, symmetry-expanded cell and the variance on
-        # the unfolded supercell in P1, so each term will need its own setup
-        # and a separate mean / diffuse call with explicit weights.
+        # TODO(#493): one setup and one F serve both terms. A diffuse target at
+        # fractional hkl, or a supercell model, needs a setup per term and a
+        # separate mean / diffuse call; the weights those calls take are #483.
         mean_f, diffuse = mean_and_diffuse(f_configs)
 
         total = torch.zeros((), dtype=torch.float32, device=coordinates.device)
