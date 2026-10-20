@@ -170,6 +170,12 @@ def _identity_mismatches(truth, guided) -> list[str]:
     ]
 
 
+def _model_coords(structure) -> np.ndarray:
+    """Coordinates as ``(n_models, n_atoms, 3)`` float64, one model promoted to a stack of one."""
+    coords = np.asarray(structure.coord, dtype=np.float64)
+    return coords if coords.ndim == 3 else coords[np.newaxis]
+
+
 def rmsf(coords: np.ndarray) -> np.ndarray:
     """Per-atom root-mean-square fluctuation about the ensemble mean."""
     return np.sqrt(((coords - coords.mean(axis=0)) ** 2).sum(axis=-1).mean(axis=0))
@@ -259,8 +265,7 @@ def evaluate(args: argparse.Namespace) -> None:
     logger.info(f"Loaded truth {args.truth} and guided {args.guided}")
 
     # load_any returns a stack even for a one-model file, so count models, not axes.
-    truth_coords = np.asarray(truth.coord, dtype=np.float64).reshape(-1, len(truth), 3)
-    guided_coords = np.asarray(guided.coord, dtype=np.float64).reshape(-1, len(guided), 3)
+    truth_coords, guided_coords = _model_coords(truth), _model_coords(guided)
     if truth_coords.shape[0] < 2 or guided_coords.shape[0] < 2:
         raise ValueError(
             f"Both inputs must have at least two models (truth {truth_coords.shape[0]}, "
