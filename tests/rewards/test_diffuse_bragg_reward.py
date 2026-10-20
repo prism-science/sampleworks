@@ -6,13 +6,14 @@ where this reward is registered as the ``diffuse_bragg`` bundle. That bundle sco
 the Bragg term alone, because the contract tests use one conformer and the diffuse
 term, ``<|F|²> − |<F>|²`` over the ensemble, is identically zero for one conformer.
 
-This file tests what needs a real ensemble, using the two-configuration fixtures in
-``conftest.py``: the loss is ~0 for the true ensemble, rises as the ensemble is
-displaced, and puts a gradient on every configuration, each at every mixture of
-the two terms; the diffuse gradient points downhill; and a sign-flipped diffuse
-pattern is not mistaken for a match. It also covers the options this reward alone
-has: the convex weight, separate Bragg and diffuse reflection lists, R-free
-handling and bulk solvent.
+This file tests what needs a real ensemble, using the two-configuration fixtures
+in ``conftest.py`` (#495 tracks moving these checks into the contract): the loss
+is ~0 for the true ensemble, rises as the ensemble is displaced, and puts a
+gradient on every configuration, each at every mixture of the two terms; the
+diffuse gradient points downhill; and a sign-flipped diffuse pattern is not
+mistaken for a match. It also covers the options this reward alone has: the
+convex weight, separate Bragg and diffuse reflection lists, R-free handling and
+bulk solvent.
 
 The targets are written by the lunus generator in-process rather than read from a
 checked-in file, so the fixtures cannot drift from the generator that made them.
