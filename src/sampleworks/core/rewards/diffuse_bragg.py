@@ -277,13 +277,15 @@ class DiffuseBraggRewardFunction:
 
         Returns
         -------
-        bragg_hkl, bragg_values
-            ``(n_bragg, 3)`` int64 Miller indices and ``(n_bragg,)`` float64
-            amplitudes, both ``None`` when the Bragg term is not scored.
-        diffuse_hkl, diffuse_values
-            Likewise, ``(n_diffuse, 3)`` int64 and ``(n_diffuse,)`` float64 intensities.
-        cell, spacegroup
-            From the Bragg target, or the diffuse target when there is no Bragg one.
+        tuple
+            bragg_hkl: int64 Miller indices ``[n_bragg, 3]``, ``None`` when the Bragg
+            term is not scored.
+            bragg_values: float64 amplitudes ``[n_bragg]``, likewise.
+            diffuse_hkl: int64 Miller indices ``[n_diffuse, 3]``, ``None`` when the
+            diffuse term is not scored.
+            diffuse_values: float64 intensities ``[n_diffuse]``, likewise.
+            cell, spacegroup: from the Bragg target, or the diffuse target when there
+            is no Bragg one.
 
         Raises
         ------
@@ -371,13 +373,13 @@ class DiffuseBraggRewardFunction:
         name
             ``"Bragg"`` or ``"diffuse"``, for the error message.
         hkl, values
-            ``(n, 3)`` int64 indices and ``(n,)`` values, or both ``None`` for a
-            term that is not scored, which passes through unchanged.
+            int64 indices ``[n, 3]`` and values ``[n]``, or both ``None`` for a term
+            that is not scored, which passes through unchanged.
 
         Returns
         -------
         tuple[np.ndarray | None, np.ndarray | None]
-            The rows with ``d >= self.resolution``, same dtypes as the inputs.
+            The rows of ``hkl`` and ``values`` with ``d >= resolution``, same dtypes.
         """
         if hkl is None or values is None:
             return None, None
@@ -395,11 +397,12 @@ class DiffuseBraggRewardFunction:
 
         Returns
         -------
-        hkl : (n_union, 3) int64
-            Every reflection either target needs, each once, in lexicographic order.
-        bragg_index, diffuse_index : (n_term,) int64 or None
-            Positions of each term's reflections within ``hkl``, in the order of
-            that term's observed values; ``None`` for a term that is not scored.
+        tuple[np.ndarray, np.ndarray | None, np.ndarray | None]
+            hkl: int64 ``[n_union, 3]``, every reflection either target needs, each
+            once, in lexicographic order.
+            bragg_index, diffuse_index: int64 ``[n_term]``, positions of that term's
+            reflections within ``hkl`` in the order of its observed values; ``None``
+            for a term that is not scored.
         """
         lists = [h for h in (self._bragg_hkl, self._diffuse_hkl) if h is not None]
         stacked = np.concatenate(lists)
@@ -423,9 +426,9 @@ class DiffuseBraggRewardFunction:
 
         Returns
         -------
-        hkl, values
-            ``(n, 3)`` int64 Miller indices and ``(n,)`` float64 values of the rows
-            where ``column`` is finite.
+        tuple[np.ndarray, np.ndarray]
+            hkl: int64 Miller indices ``[n, 3]`` of the rows where ``column`` is finite.
+            values: float64 values ``[n]`` of those rows.
         """
         values = dataset[column].to_numpy(dtype=np.float64)
         hkl = np.column_stack(
@@ -451,7 +454,8 @@ class DiffuseBraggRewardFunction:
         Returns
         -------
         np.ndarray
-            ``(n_finite,)`` bool, True where the reflection is in the working set.
+            Boolean mask over the finite rows ``[n_finite]``, True where the
+            reflection is in the working set.
 
         Raises
         ------
