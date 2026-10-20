@@ -464,7 +464,10 @@ class DiffuseBraggRewardFunction:
         """
         flag_column = resolve_mtz_column(dataset, rs.MTZIntDtype(), column=self.free_flag_column)
         finite = np.isfinite(dataset[column].to_numpy(dtype=np.float64))
-        keep = dataset[flag_column].to_numpy()[finite] != self.test_set_value
+        # MTZInt is a nullable integer dtype; as float, a missing flag is NaN and
+        # compares unequal to every value, so an unflagged reflection is kept.
+        flags = dataset[flag_column].to_numpy(dtype=np.float64, na_value=np.nan)[finite]
+        keep = flags != self.test_set_value
 
         n_total, n_used = keep.size, int(keep.sum())
         composition = (

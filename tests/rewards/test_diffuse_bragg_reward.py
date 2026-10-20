@@ -20,6 +20,7 @@ the fixtures cannot drift from the generator that made them.
 
 import gemmi
 import numpy as np
+import pandas as pd
 import pytest
 import reciprocalspaceship as rs
 import torch
@@ -280,6 +281,22 @@ class TestFreeReflections:
 
         assert len(reward._bragg_hkl) == targets.n_free
         assert "CCP4-convention" in caplog.text
+
+    def test_reflection_with_a_missing_flag_stays_in_the_working_set(self, targets, tmp_path):
+        """A null flag is neither test nor work by convention; the reflection is kept."""
+        from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
+
+        ds = rs.read_mtz(str(targets.bragg))
+        first_free = int(np.flatnonzero(ds["R-free-flags"].to_numpy() == 1)[0])
+        ds.iloc[first_free, ds.columns.get_loc("R-free-flags")] = pd.NA
+        path = tmp_path / "bragg_null_flag.mtz"
+        ds.write_mtz(str(path))
+
+        reward = DiffuseBraggRewardFunction(
+            bragg_target=path, bragg_weight=1.0, exclude_free_reflections=True
+        )
+
+        assert len(reward._bragg_hkl) == targets.n_reflections - targets.n_free + 1
 
     def test_missing_flag_column_is_a_clear_error(self, targets):
         """A Bragg MTZ without an integer column cannot have its test set excluded."""
