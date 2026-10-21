@@ -12,7 +12,7 @@ from atomworks.io.utils.io_utils import load_any
 from biotite.structure import AtomArray, AtomArrayStack, from_template
 from loguru import logger
 
-from sampleworks.core.rewards.protocol import RewardInputs
+from sampleworks.core.losses.protocol import LossInputs
 from sampleworks.eval.eval_dataclasses import ProteinConfig
 from sampleworks.models.protocol import GenerativeModelInput
 from sampleworks.utils import atom_array_utils
@@ -56,8 +56,8 @@ class SampleworksProcessedStructure:
     model_atom_array: AtomArray | None = None
 
     @property
-    def reward_atom_array(self) -> AtomArray:
-        """Atom array the reward tensors and reward topology follow.
+    def loss_atom_array(self) -> AtomArray:
+        """Atom array the loss tensors and loss topology follow.
 
         ``model_atom_array`` is None when the model conditioning/features don't
         expose a separate atom array, i.e. the model operates on the same atom set
@@ -70,18 +70,18 @@ class SampleworksProcessedStructure:
         """
         return self.model_atom_array if self.model_atom_array is not None else self.atom_array
 
-    def to_reward_inputs(self, device: torch.device | str = "cpu") -> RewardInputs:
-        """Build RewardInputs with model atom count when model atom arrays are available.
+    def to_loss_inputs(self, device: torch.device | str = "cpu") -> LossInputs:
+        """Build LossInputs with model atom count when model atom arrays are available.
 
-        Delegates to :meth:`RewardInputs.from_atom_array` so that element
+        Delegates to :meth:`LossInputs.from_atom_array` so that element
         lookup, masking, and batching logic lives in one place.
 
-        Reward tensors are generated from the model atom array whenever possible.
+        Loss tensors are generated from the model atom array whenever possible.
         Structure-derived B-factors are copied onto common atoms, and the
         reference coordinates come from ``self.input_coords`` (model-space).
-        The result keeps :attr:`reward_atom_array` as its topology
-        (``RewardInputs.atom_array``), untouched. A two-phase reward's ``prepare``
-        receives these same inputs; see ``prepare_reward_if_needed``.
+        The result keeps :attr:`loss_atom_array` as its topology
+        (``LossInputs.atom_array``), untouched. A two-phase loss's ``prepare``
+        receives these same inputs; see ``prepare_loss_if_needed``.
 
         Parameters
         ----------
@@ -90,34 +90,34 @@ class SampleworksProcessedStructure:
 
         Returns
         -------
-        RewardInputs
+        LossInputs
         """
-        atom_array_for_rewards = self.reward_atom_array
+        atom_array_for_losses = self.loss_atom_array
 
-        reward_inputs = RewardInputs.from_atom_array(
-            atom_array=atom_array_for_rewards,
+        loss_inputs = LossInputs.from_atom_array(
+            atom_array=atom_array_for_losses,
             ensemble_size=self.ensemble_size,
             device=device,
         )
 
-        updated_b_factors = reward_inputs.b_factors.clone()
+        updated_b_factors = loss_inputs.b_factors.clone()
         if self.model_atom_array is not None and self.atom_array.b_factor is not None:
             struct_b_factors = torch.as_tensor(
                 cast(np.ndarray, self.atom_array.b_factor)[
                     self.reconciler.struct_indices.detach().cpu().numpy()
                 ],
-                device=reward_inputs.b_factors.device,
-                dtype=reward_inputs.b_factors.dtype,
+                device=loss_inputs.b_factors.device,
+                dtype=loss_inputs.b_factors.dtype,
             )
-            model_indices = self.reconciler.model_indices.to(device=reward_inputs.b_factors.device)
+            model_indices = self.reconciler.model_indices.to(device=loss_inputs.b_factors.device)
             updated_b_factors[..., model_indices] = struct_b_factors
 
         return replace(
-            reward_inputs,
+            loss_inputs,
             b_factors=updated_b_factors,
             input_coords=self.input_coords.to(
-                device=reward_inputs.input_coords.device,
-                dtype=reward_inputs.input_coords.dtype,
+                device=loss_inputs.input_coords.device,
+                dtype=loss_inputs.input_coords.dtype,
             ),
         )
 

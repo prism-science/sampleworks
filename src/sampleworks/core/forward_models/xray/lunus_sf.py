@@ -9,7 +9,7 @@ form.
 
 :func:`build_setup` does the coordinate-independent work once (kernels, grid,
 symmetry operations) and :func:`structure_factors` reuses it for every
-configuration, the two-phase split ``StructureFactorRewardFunction`` uses for
+configuration, the two-phase split ``StructureFactorLossFunction`` uses for
 SFcalculator. :func:`space_group_operations` reads the operations from gemmi;
 lunus's own ``build_grid_ops_from_cctbx`` needs cctbx, which is not in the
 sampleworks environments.
@@ -497,7 +497,7 @@ def geometric_solvent_fraction(
     ----------
     atom_array
         Topology, converted with ``atomarray_to_gemmi`` as the structure-factor
-        reward does; its own coordinates are replaced by ``coords``.
+        loss does; its own coordinates are replaced by ``coords``.
     coords
         ``(n_atoms, 3)`` Cartesian coordinates in Å for one configuration.
     unit_cell, space_group

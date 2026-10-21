@@ -8,7 +8,7 @@ import torch
 from biotite.structure import AtomArray, AtomArrayStack
 from sampleworks.core.forward_models.xray.real_space_density import XMap_torch
 from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.volume import XMap
-from sampleworks.core.rewards.real_space_density import extract_density_inputs_from_atomarray
+from sampleworks.core.losses.real_space_density import extract_density_inputs_from_atomarray
 from sampleworks.utils.density_utils import (
     build_density_transformer,
     compute_density_from_atomarray,

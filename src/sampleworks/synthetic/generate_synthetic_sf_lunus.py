@@ -3,7 +3,7 @@
 The lunus counterpart of ``generate_synthetic_sf.py``, which uses SFcalculator.
 Both write the same MTZ layout (``F{label}`` / ``SIGF{label}`` / ``PHIF{label}``
 plus an optional R-free flag), so either output can feed the structure-factor
-reward. On 6B8X at 2.2 Å the two engines agree to correlation 1.000000 and
+loss. On 6B8X at 2.2 Å the two engines agree to correlation 1.000000 and
 R 0.0001 (``tests/synthetic/test_generate_synthetic_sf_lunus.py``).
 
 Two differences from the SFcalculator script. Input may be a multi-model
@@ -42,7 +42,7 @@ from sampleworks.core.forward_models.xray import lunus_sf
 from sampleworks.synthetic.synthetic_utils import (
     BatchRowForMTZ,
     load_batch_csv,
-    load_structure_for_synthetic_reward,
+    load_structure_for_synthetic_loss,
     resolve_crystal_metadata,
     resolve_parallel_jobs,
     rfree_flags,
@@ -116,7 +116,7 @@ def load_configurations(
 ) -> AtomArrayStack:
     """Load a structure as a stack of configurations.
 
-    Single-model files go through :func:`load_structure_for_synthetic_reward`, so
+    Single-model files go through :func:`load_structure_for_synthetic_loss`, so
     selection, stripping and the occupancy modes behave as in the SFcalculator
     script, and come back as a one-model stack. Multi-model files are loaded as a
     stack; selection and stripping apply to every model, and occupancies are taken
@@ -250,7 +250,7 @@ def load_configurations(
         )
         return configurations
 
-    atom_array = load_structure_for_synthetic_reward(
+    atom_array = load_structure_for_synthetic_loss(
         structure_path,
         occupancy_mode=occupancy_mode,
         occupancy_values=row.occupancy_values,

@@ -1,4 +1,4 @@
-"""Reciprocal-space reward function for structure-factor amplitudes."""
+"""Reciprocal-space loss function for structure-factor amplitudes."""
 
 from __future__ import annotations
 
@@ -11,15 +11,15 @@ import reciprocalspaceship as rs
 import torch
 from jaxtyping import Bool, Complex, Float, Int
 from loguru import logger
-from sampleworks.core.rewards.options import StructureFactorOptions
-from sampleworks.core.rewards.registry import RewardBuildContext
+from sampleworks.core.losses.options import StructureFactorOptions
+from sampleworks.core.losses.registry import LossBuildContext
 from sampleworks.synthetic.synthetic_utils import atomarray_to_gemmi, resolve_mtz_column
 from SFC_Torch import SFcalculator
 from SFC_Torch.io import PDBParser
 
 
 if TYPE_CHECKING:
-    from sampleworks.core.rewards.protocol import RewardInputs
+    from sampleworks.core.losses.protocol import LossInputs
 
 
 # Loss callable: maps (|Fcalc|, |Fobs|) over the masked reflections to a scalar.
@@ -94,7 +94,7 @@ def _resolve_expcolumns(expcolumns: list[str] | None, ds: rs.DataSet) -> tuple[s
     return amplitude, sigma
 
 
-class StructureFactorRewardFunction:
+class StructureFactorLossFunction:
     def __init__(
         self,
         mtzfile: str | Path,
@@ -109,14 +109,14 @@ class StructureFactorRewardFunction:
         batch_partition: int = 10,
         sfcalculator_kwargs: dict | None = None,
     ):
-        """Reward for fitting structure-factor amplitudes via SFcalculator.
+        """Loss for fitting structure-factor amplitudes via SFcalculator.
 
         Scores structures against experimental (or synthetic) structure-factor
         amplitudes ``|Fobs|`` using ``SFcalculator`` from ``SFC_Torch``. This is the
-        reciprocal-space counterpart to :class:`RealSpaceRewardFunction` in
+        reciprocal-space counterpart to :class:`RealSpaceLossFunction` in
         ``real_space_density.py``.
 
-        The reward compares the model amplitudes ``|Fcalc|`` against a target
+        The loss compares the model amplitudes ``|Fcalc|`` against a target
         ``|Fobs|`` loaded from an MTZ. For an ensemble (batch dimension) of
         conformers indexed by ``b``, the per-conformer *protein* structure
         factors are combined by a *complex* sum in the reciprocal space
@@ -147,7 +147,7 @@ class StructureFactorRewardFunction:
         and/or the space group of MTZ can be dangerous because the reflections' indexing
         could become wrong, so there are no arguments here to override them.
 
-        Unlike the real-space reward function, ``SFcalculator`` needs the full topology
+        Unlike the real-space loss function, ``SFcalculator`` needs the full topology
         (``PDBParser`` -> ``gemmi.Structure``: atom names/elements, unit cell, space group,
         ``resolution`` -> the HKL set) at construction. That information is only available
         with the model atom array, i.e. after ``process_structure_to_trajectory_input``
@@ -296,8 +296,8 @@ class StructureFactorRewardFunction:
         # `List[str]` and swallows any failure into a misleading "columns not in the mtz" error.
         self.expcolumns = list(_resolve_expcolumns(expcolumns, self._mtz_dataset))
 
-    def prepare(self, reward_inputs: RewardInputs, *, device: torch.device | str = "cpu") -> None:
-        """Build the SFcalculator from the reward inputs, on ``device``.
+    def prepare(self, loss_inputs: LossInputs, *, device: torch.device | str = "cpu") -> None:
+        """Build the SFcalculator from the loss inputs, on ``device``.
 
         Constructing the ``SFcalculator`` consumes the MTZ dataset parsed at
         ``__init__`` (no second file read) and populates the observed structure
@@ -307,9 +307,9 @@ class StructureFactorRewardFunction:
 
         Must be called once before the first ``__call__``, with the inputs built
         for the sampled coordinates (model atom space); they are the same inputs
-        ``__call__`` is fed. The atom ordering of ``reward_inputs.atom_array``
+        ``__call__`` is fed. The atom ordering of ``loss_inputs.atom_array``
         defines the column order of the coordinate tensor passed to ``__call__``.
-        The gemmi structure comes from :meth:`RewardInputs.to_atom_array`: the
+        The gemmi structure comes from :meth:`LossInputs.to_atom_array`: the
         model topology with the reconciled reference coordinates and B-factors,
         not the model template's placeholders. That matters here because
         ``inspect_data`` estimates the solvent fraction from the atom positions.
@@ -318,7 +318,7 @@ class StructureFactorRewardFunction:
         coordinates will live on: every tensor built here (the SFcalculator internals and
         the reflection mask) is allocated on it, and SFcalculator bakes it in at
         construction with no way to migrate afterwards. Re-running ``prepare`` on a new
-        device is therefore the way to move a built reward — safe to do, since the parsed
+        device is therefore the way to move a built loss — safe to do, since the parsed
         MTZ dataset on ``self._mtz_dataset`` is kept pristine for exactly that reason.
 
         Per-atom B-factors / occupancy are set per ``__call__`` (not here), leaving
@@ -326,16 +326,16 @@ class StructureFactorRewardFunction:
 
         Parameters
         ----------
-        reward_inputs
+        loss_inputs
             Inputs for the atoms the model operates on, as returned by
-            ``SampleworksProcessedStructure.to_reward_inputs``. Their ``atom_array``
+            ``SampleworksProcessedStructure.to_loss_inputs``. Their ``atom_array``
             needs ``chain_id``, ``res_id``, ``res_name``, ``atom_name``, ``element``
             annotations; the B-factors and occupancies are baked as defaults but
             overridden each ``__call__``. A missing ``altloc_id`` is defaulted to
             blank inside ``atomarray_to_gemmi``.
         device
             Torch device to build on. Defaults to CPU rather than auto-selecting a GPU:
-            the same behavior as how the RewardInputs' device is resolved.
+            the same behavior as how the LossInputs' device is resolved.
 
         Raises
         ------
@@ -345,12 +345,12 @@ class StructureFactorRewardFunction:
             ``normalize_amplitude`` is False the same condition only logs a warning,
             since it also implies no reflection was flagged as an outlier.
         ValueError
-            If ``reward_inputs`` carry no atom array to take the topology from, or
+            If ``loss_inputs`` carry no atom array to take the topology from, or
             if no reflection survives the mask; see :meth:`_build_reflection_mask`.
         """
         self.device = torch.device(device)
 
-        atom_array = reward_inputs.to_atom_array()
+        atom_array = loss_inputs.to_atom_array()
         gemmi_structure = atomarray_to_gemmi(
             atom_array,
             unit_cell=self.unit_cell,
@@ -392,7 +392,7 @@ class StructureFactorRewardFunction:
                 "will only flag non-positive amplitudes as outliers instead of also using Eo."
             )
 
-        # True where a reflection contributes to the reward (non-outlier, and not in the
+        # True where a reflection contributes to the loss (non-outlier, and not in the
         # R-free test set if exclude_free_reflections is True). Shape is [n_hkl].
         mask_np = self._build_reflection_mask(
             outlier=self.sfc.Outlier, free_flag=self.sfc.free_flag
@@ -400,7 +400,7 @@ class StructureFactorRewardFunction:
         self._reflection_mask = torch.from_numpy(mask_np).to(self.device)
 
         logger.info(
-            f"Prepared StructureFactorRewardFunction: n_atoms={len(self.sfc.atom_pos_orth)}, "
+            f"Prepared StructureFactorLossFunction: n_atoms={len(self.sfc.atom_pos_orth)}, "
             f"n_reflections={len(self.sfc.Fo)}, n_used={int(mask_np.sum())}, "
             f"cell={self.sfc.unit_cell}, space_group={self.sfc.space_group.hm}, "
             f"solventpct={self.sfc.solventpct}, gridsize={self.sfc.gridsize}"
@@ -412,7 +412,7 @@ class StructureFactorRewardFunction:
         outlier: Bool[np.ndarray, "n_hkl"],  # noqa: F821, UP037
         free_flag: Bool[np.ndarray, "n_hkl"],  # noqa: F821, UP037
     ) -> Bool[np.ndarray, "n_hkl"]:  # noqa: F821, UP037
-        """Build a mask of valid training set reflections for reward computation and
+        """Build a mask of valid training set reflections for loss computation and
         sanity check the mask size.
 
         Outliers are always dropped; the R-free test set is also dropped when user sets
@@ -485,7 +485,7 @@ class StructureFactorRewardFunction:
 
         ``elements`` is ignored (topology is fixed in the SFcalculator built by
         :meth:`prepare`). ``b_factors`` and ``occupancies`` are reset onto the
-        SFcalculator each call (mirroring ``RealSpaceRewardFunction``), and must be
+        SFcalculator each call (mirroring ``RealSpaceLossFunction``), and must be
         broadcast-identical across the batch dim (enforced; SFcalculator has no
         per-conformer occupancy/B axis, so non-broadcast input raises ``ValueError``).
 
@@ -497,7 +497,7 @@ class StructureFactorRewardFunction:
         elements
             Per-atom element codes ``[batch, n_atoms]``. Ignored: the topology
             (including elements) is fixed in the SFcalculator built by
-            :meth:`prepare`. Present only to satisfy the reward-function signature.
+            :meth:`prepare`. Present only to satisfy the loss-function signature.
         b_factors
             Per-atom isotropic B-factors ``[batch, n_atoms]``, written to
             ``sfc.atom_b_iso`` (reconciled: real deposited where shared with the
@@ -515,7 +515,7 @@ class StructureFactorRewardFunction:
         Returns
         -------
         torch.Tensor
-            Scalar reward (loss).
+            Scalar loss.
 
         Raises
         ------
@@ -527,8 +527,8 @@ class StructureFactorRewardFunction:
         """
         if self.sfc is None or self._reflection_mask is None:
             raise RuntimeError(
-                "StructureFactorRewardFunction.prepare() must be called with the reward "
-                "inputs before the reward is evaluated."
+                "StructureFactorLossFunction.prepare() must be called with the loss "
+                "inputs before the loss is evaluated."
             )
 
         # The topology (atom count included) is fixed by prepare(); a mismatch would otherwise
@@ -542,7 +542,7 @@ class StructureFactorRewardFunction:
             if n_atoms != n_topology_atoms:
                 raise ValueError(
                     f"{name} has {n_atoms} atoms but the SFcalculator topology built by "
-                    f"prepare() has {n_topology_atoms}. Call prepare() with the reward inputs "
+                    f"prepare() has {n_topology_atoms}. Call prepare() with the loss inputs "
                     "built for the sampled coordinates (model atom space)."
                 )
 
@@ -551,7 +551,7 @@ class StructureFactorRewardFunction:
         for name, tensor in (("occupancy", occupancies), ("B-factor", b_factors)):
             if not torch.equal(tensor, tensor[:1].expand_as(tensor)):
                 raise ValueError(
-                    f"StructureFactorRewardFunction requires {name} identical across the "
+                    f"StructureFactorLossFunction requires {name} identical across the "
                     "batch dim (SFcalculator has no per-conformer occupancy/B axis); got "
                     "per-conformer values."
                 )
@@ -636,13 +636,13 @@ class StructureFactorRewardFunction:
         return self.sfc.calc_ftotal()  # default scales set in prepare()
 
 
-def build_structure_factor_reward(
-    options: StructureFactorOptions, context: RewardBuildContext
-) -> StructureFactorRewardFunction:
-    """Build the structure-factor reward from its configured options.
+def build_structure_factor_loss(
+    options: StructureFactorOptions, context: LossBuildContext
+) -> StructureFactorLossFunction:
+    """Build the structure-factor loss from its configured options.
 
-    The returned reward is not yet usable: like every two-phase reward it binds to
-    the model topology in :meth:`StructureFactorRewardFunction.prepare`, which the
+    The returned loss is not yet usable: like every two-phase loss it binds to
+    the model topology in :meth:`StructureFactorLossFunction.prepare`, which the
     trajectory scaler calls once sampling knows the model atom array. ``context``
     is therefore unused -- neither the input structure nor the device is settled at
     build time.
@@ -650,15 +650,15 @@ def build_structure_factor_reward(
     Parameters
     ----------
     options
-        Structure-factor reward options; see
-        :class:`~sampleworks.core.rewards.options.StructureFactorOptions`.
+        Structure-factor loss options; see
+        :class:`~sampleworks.core.losses.options.StructureFactorOptions`.
     context
         Run-level inputs. Unused here, kept for a uniform builder signature.
 
     Returns
     -------
-    StructureFactorRewardFunction
-        Reward scoring the model amplitudes against the MTZ target.
+    StructureFactorLossFunction
+        Loss scoring the model amplitudes against the MTZ target.
 
     Raises
     ------
@@ -669,11 +669,11 @@ def build_structure_factor_reward(
 
     if options.mtzfile is None:
         raise ValueError(
-            "The structure_factor reward needs a target MTZ. Pass --mtzfile, or set "
-            "reward_options.mtzfile in a --reward-config file."
+            "The structure_factor loss needs a target MTZ. Pass --mtzfile, or set "
+            "loss_options.mtzfile in a --loss-config file."
         )
 
-    return StructureFactorRewardFunction(
+    return StructureFactorLossFunction(
         options.mtzfile,
         expcolumns=options.expcolumns,
         resolution=options.resolution,

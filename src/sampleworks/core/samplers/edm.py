@@ -380,9 +380,9 @@ class AF3EDMSampler:
         model_wrapper
             Model wrapper for :math:`\hat{x}_\theta` prediction.
         context
-            Step context with t, dt, noise_scale, and optionally reward info.
+            Step context with t, dt, noise_scale, and optionally loss info.
         scaler
-            Optional step scaler for computing guidance from rewards.
+            Optional step scaler for computing guidance from losses.
         features
             Additional model features/inputs.
 

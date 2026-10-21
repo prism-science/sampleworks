@@ -1,4 +1,4 @@
-"""Shared input builders for reward tests."""
+"""Shared input builders for loss tests."""
 
 import torch
 from sampleworks.utils.elements import elements_to_scattering_indices
@@ -7,8 +7,8 @@ from sampleworks.utils.elements import elements_to_scattering_indices
 def build_scattering_indices(atom_array, device: torch.device) -> torch.Tensor:
     """Map biotite element symbols to scattering-tensor indices (production path).
 
-    Mirrors ``RewardInputs.from_atom_array``: uses ``elements_to_scattering_indices``
-    (so ionic forms resolve correctly) and ``dtype=torch.long``. Shared by the reward
+    Mirrors ``LossInputs.from_atom_array``: uses ``elements_to_scattering_indices``
+    (so ionic forms resolve correctly) and ``dtype=torch.long``. Shared by the loss
     tests so they build ``elements`` identically.
 
     Parameters
@@ -30,20 +30,20 @@ def build_scattering_indices(atom_array, device: torch.device) -> torch.Tensor:
     )
 
 
-def build_reward_input_tensors_without_coords(
+def build_loss_input_tensors_without_coords(
     atom_array, device: torch.device
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Build ``(elements, b_factors, occupancies)`` reward inputs from an atom array.
+    """Build ``(elements, b_factors, occupancies)`` loss inputs from an atom array.
 
     Uses the atom array's **actual** per-atom occupancy and B-factor — unlike
-    ``RewardInputs.from_atom_array``, which overrides occupancy to a uniform
-    ``1/ensemble_size``. Reward unit tests score against ground truth (e.g. the 1vme
+    ``LossInputs.from_atom_array``, which overrides occupancy to a uniform
+    ``1/ensemble_size``. Loss unit tests score against ground truth (e.g. the 1vme
     0.5/0.5 altloc occupancies), so they need the real values. Elements use
     :func:`build_scattering_indices` (scattering-tensor indices, ``torch.long``).
 
     Coordinates are intentionally left out: callers already hold them from their
     coordinate fixture (and often perturb them), so only the element/B/occupancy trio is
-    genuinely shared across the reward test files.
+    genuinely shared across the loss test files.
 
     Parameters
     ----------

@@ -10,20 +10,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from sampleworks.core.rewards.config import REWARD_OPTIONS_KEY, RewardConfig
-from sampleworks.core.rewards.options import option_type
-from sampleworks.core.rewards.registry import get_reward_spec, reward_type_names
-from sampleworks.utils.guidance_constants import GuidanceType, Rewards, StructurePredictor
+from sampleworks.core.losses.config import LOSS_OPTIONS_KEY, LossConfig
+from sampleworks.core.losses.options import option_type
+from sampleworks.core.losses.registry import get_loss_spec, loss_type_names
+from sampleworks.utils.guidance_constants import GuidanceType, Losses, StructurePredictor
 from sampleworks.utils.sequence import resolve_sequence_arg
 
 
-# Reward used when a run does not say which one it wants. Keeps every command
-# line written before rewards were selectable working unchanged.
-DEFAULT_REWARD_TYPE = Rewards.REAL_SPACE_DENSITY
+# Loss used when a run does not say which one it wants. Keeps every command
+# line written before losses were selectable working unchanged.
+DEFAULT_LOSS_TYPE = Losses.REAL_SPACE_DENSITY
 
-# Namespace prefix for generated reward-option flags, so they cannot collide with
+# Namespace prefix for generated loss-option flags, so they cannot collide with
 # a model or guidance argument of the same name.
-_REWARD_OPTION_PREFIX = "reward_option_"
+_LOSS_OPTION_PREFIX = "loss_option_"
 
 # Baked-in checkpoint paths (Docker image), ACTL shared-storage paths, and
 # legacy fallbacks. Environment variables win when present.
@@ -263,13 +263,13 @@ class GuidanceConfig:
     alignment_reverse_diffusion: bool | None = None
     recycling_steps: int | None = None
     num_diffusion_steps: int = 200
-    # Rewards this run scores against, as the {reward: {weight, reward_options}}
-    # mapping of issue #358. Kept as plain primitives, not a RewardConfig: these
+    # Losses this run scores against, as the {loss: {weight, loss_options}}
+    # mapping of issue #358. Kept as plain primitives, not a LossConfig: these
     # configs are pickled into job queues and read back by workers that may be
     # running a different sampleworks build. Left empty, __post_init__ fills it
     # in from the density fields below, which is how grid search and older
     # pickles keep working.
-    reward_config: dict[str, Any] = field(default_factory=dict)
+    loss_config: dict[str, Any] = field(default_factory=dict)
     sequence: str | None = None
 
     # DO NOT remove the **kwargs, it is for compatibility with argparse.
@@ -301,8 +301,8 @@ class GuidanceConfig:
         if guidance_preset and guidance_type not in guidance_choices:
             raise ValueError(f"Unknown guidance type: {guidance_type}")
 
-        # -- first pass: resolve model, guidance_type, and the reward selection --
-        # The reward decides which option flags exist, so it has to be known before
+        # -- first pass: resolve model, guidance_type, and the loss selection --
+        # The loss decides which option flags exist, so it has to be known before
         # the real parser is built, exactly like the model and the guidance type.
         pre = argparse.ArgumentParser(add_help=False)
         if not model_preset:
@@ -322,7 +322,7 @@ class GuidanceConfig:
                 choices=guidance_choices,
                 help="Guidance method",
             )
-        add_reward_selection_args(pre)
+        add_loss_selection_args(pre)
         pre_args, _ = pre.parse_known_args(argv)
         model_name = model_name or pre_args.model_name
         guidance_type = guidance_type or pre_args.guidance_type
@@ -356,29 +356,29 @@ class GuidanceConfig:
             help="Protein identifier (must match naming used in grid search / evaluation)",
         )
         add_generic_args(parser)
-        add_reward_selection_args(parser)
-        # A configuration file names its own rewards, so the per-option flags of a
-        # single reward would be ambiguous next to it: registering none of them
+        add_loss_selection_args(parser)
+        # A configuration file names its own losses, so the per-option flags of a
+        # single loss would be ambiguous next to it: registering none of them
         # keeps --help honest about what this invocation accepts.
-        if pre_args.reward_config is None:
-            add_reward_args(parser, pre_args.reward_type)
+        if pre_args.loss_config is None:
+            add_loss_args(parser, pre_args.loss_type)
         _MODEL_ARG_ADDERS[model_name](parser)
         _GUIDANCE_ARG_ADDERS[guidance_type](parser)
 
         args = parser.parse_args(argv)
 
-        # The file names its own rewards; taking a --reward-type alongside it would
-        # mean silently ignoring one of the two. --reward-type always has a default,
+        # The file names its own losses; taking a --loss-type alongside it would
+        # mean silently ignoring one of the two. --loss-type always has a default,
         # so "was it passed" has to be answered from the command line itself.
         given = argv if argv is not None else sys.argv[1:]
-        if args.reward_config is not None and any(
-            token.split("=", 1)[0] == "--reward-type" for token in given
+        if args.loss_config is not None and any(
+            token.split("=", 1)[0] == "--loss-type" for token in given
         ):
             parser.error(
-                "--reward-type and --reward-config are alternatives: the configuration "
-                "file already names the rewards it configures."
+                "--loss-type and --loss-config are alternatives: the configuration "
+                "file already names the losses it configures."
             )
-        reward_config = cls._reward_config_from_args(parser, args)
+        loss_config = cls._loss_config_from_args(parser, args)
 
         if model_preset and args.model_name != model_name:
             parser.error(
@@ -394,7 +394,7 @@ class GuidanceConfig:
         config = cls(
             protein=args.protein,
             structure=args.structure,
-            density=None,  # mirrored from the reward configuration in __post_init__
+            density=None,  # mirrored from the loss configuration in __post_init__
             model_name=model_name,
             guidance_type=guidance_type,
             log_path=getattr(args, "log_path", None) or "",
@@ -406,7 +406,7 @@ class GuidanceConfig:
             augmentation=args.augmentation,
             align_to_input=args.align_to_input,
             alignment_reverse_diffusion=args.alignment_reverse_diffusion,
-            reward_config=reward_config.to_mapping(),
+            loss_config=loss_config.to_mapping(),
             sequence=resolve_sequence_arg(args.sequence),
         )
 
@@ -420,10 +420,10 @@ class GuidanceConfig:
         return config
 
     @staticmethod
-    def _reward_config_from_args(
+    def _loss_config_from_args(
         parser: argparse.ArgumentParser, args: argparse.Namespace
-    ) -> RewardConfig:
-        """Resolve the run's rewards from either CLI surface.
+    ) -> LossConfig:
+        """Resolve the run's losses from either CLI surface.
 
         Parameters
         ----------
@@ -434,28 +434,28 @@ class GuidanceConfig:
 
         Returns
         -------
-        RewardConfig
-            The rewards this run scores against.
+        LossConfig
+            The losses this run scores against.
         """
-        if args.reward_config is None:
-            config = RewardConfig.single(
-                args.reward_type, **reward_options_from_args(args)
+        if args.loss_config is None:
+            config = LossConfig.single(
+                args.loss_type, **loss_options_from_args(args)
             ).with_effective_options()
         else:
             try:
-                config = RewardConfig.from_file(args.reward_config).with_effective_options()
+                config = LossConfig.from_file(args.loss_config).with_effective_options()
             except (OSError, ValueError) as error:
-                parser.error(f"--reward-config {args.reward_config}: {error}")
+                parser.error(f"--loss-config {args.loss_config}: {error}")
 
         # Report a missing input as a usage error now, rather than after a model
-        # has been loaded. The reward builders check this too.
+        # has been loaded. The loss builders check this too.
         missing = config.missing_required_options()
         if missing:
             parser.error(
                 "; ".join(
-                    f"the {reward} reward requires "
+                    f"the {loss} loss requires "
                     + ", ".join("--" + option.replace("_", "-") for option in options)
-                    for reward, options in missing.items()
+                    for loss, options in missing.items()
                 )
             )
 
@@ -473,49 +473,49 @@ class GuidanceConfig:
         except KeyError:
             raise ValueError(f"Unknown model type: {self.model_name}")
 
-        self._reconcile_reward_config()
+        self._reconcile_loss_config()
 
-    def _reconcile_reward_config(self):
-        """Keep ``reward_config`` and the flat density fields agreeing with each other.
+    def _reconcile_loss_config(self):
+        """Keep ``loss_config`` and the flat density fields agreeing with each other.
 
-        The density reward's options predate the reward configuration and are still
+        The density loss's options predate the loss configuration and are still
         the shape grid search builds configs in, ``job_metadata.json`` records, and
         the evaluation scripts read back. So the two representations are kept in
         sync in one place, in whichever direction has the information: a config
-        built without ``reward_config`` (grid search, an older pickle) derives it
+        built without ``loss_config`` (grid search, an older pickle) derives it
         from the flat fields, and one built with it mirrors the density options
         back out.
         """
-        if not self.reward_config:
+        if not self.loss_config:
             options = {
                 "density": None if self.density is None else str(self.density),
                 "resolution": self.resolution,
                 "loss_order": self.loss_order,
                 "em": self.em,
             }
-            self.reward_config = RewardConfig.single(
-                DEFAULT_REWARD_TYPE,
+            self.loss_config = LossConfig.single(
+                DEFAULT_LOSS_TYPE,
                 **{name: value for name, value in options.items() if value is not None},
             ).to_mapping()
             return
 
-        density_options = self.reward_config.get(DEFAULT_REWARD_TYPE.value, {}).get(
-            REWARD_OPTIONS_KEY, {}
+        density_options = self.loss_config.get(DEFAULT_LOSS_TYPE.value, {}).get(
+            LOSS_OPTIONS_KEY, {}
         )
         self.density = density_options.get("density")
         self.resolution = density_options.get("resolution")
         self.loss_order = density_options.get("loss_order", 2)
         self.em = density_options.get("em", False)
 
-    def resolved_reward_config(self) -> RewardConfig:
-        """Return this run's rewards as a validated :class:`RewardConfig`.
+    def resolved_loss_config(self) -> LossConfig:
+        """Return this run's losses as a validated :class:`LossConfig`.
 
         Returns
         -------
-        RewardConfig
+        LossConfig
             Parsed from the stored mapping.
         """
-        return RewardConfig.from_mapping(self.reward_config)
+        return LossConfig.from_mapping(self.loss_config)
 
     def populate_config_for_guidance_type(self, job: JobConfig, args: argparse.Namespace):
         """Apply per-job grid-search values onto this guidance configuration."""
@@ -559,7 +559,7 @@ class GuidanceConfig:
         to their host equivalents so that
         ``job_metadata.json`` is reproducible outside the container.
 
-        ``reward_config`` is emitted as a JSON string rather than a nested
+        ``loss_config`` is emitted as a JSON string rather than a nested
         mapping: this dictionary is also written into the output CIF as the
         ``sampleworks`` category, where a nested value would be read as a column
         of rows and produce a broken category.
@@ -571,59 +571,59 @@ class GuidanceConfig:
         output["structure"] = _remap_container_path(str(self.structure))
         output["output_dir"] = _remap_container_path(str(self.output_dir))
         output["log_path"] = _remap_container_path(str(self.log_path))
-        output["reward_type"] = ",".join(self.reward_config)
-        output["reward_config"] = json.dumps(
-            self.resolved_reward_config().remapped_paths(_remap_container_path)
+        output["loss_type"] = ",".join(self.loss_config)
+        output["loss_config"] = json.dumps(
+            self.resolved_loss_config().remapped_paths(_remap_container_path)
         )
         return output
 
     def __setstate__(self, state: dict[str, Any]) -> None:
-        """Restore state, migrating pickles written before ``model_name`` and rewards.
+        """Restore state, migrating pickles written before ``model_name`` and losses.
 
         Job queues are pickled by whichever build submitted them and unpickled by
         the worker, so a config from an older build has to keep working: it names
-        the model ``model``, and has no ``reward_config`` -- only the flat density
-        fields the reward configuration is reconciled with.
+        the model ``model``, and has no ``loss_config`` -- only the flat density
+        fields the loss configuration is reconciled with.
         """
         migrated = state.copy()
         if "model" in migrated:
             migrated.setdefault("model_name", migrated.pop("model"))
-        migrated.setdefault("reward_config", {})
+        migrated.setdefault("loss_config", {})
         self.__dict__.update(migrated)
-        self._reconcile_reward_config()
+        self._reconcile_loss_config()
 
 
-def add_reward_selection_args(parser: argparse.ArgumentParser):
-    """Add the two ways of choosing rewards: one by name, or several from a file.
+def add_loss_selection_args(parser: argparse.ArgumentParser):
+    """Add the two ways of choosing losses: one by name, or several from a file.
 
     Parameters
     ----------
     parser : argparse.ArgumentParser
-        Parser to add ``--reward-type`` and ``--reward-config`` to.
+        Parser to add ``--loss-type`` and ``--loss-config`` to.
     """
     parser.add_argument(
-        "--reward-type",
+        "--loss-type",
         type=str,
-        default=DEFAULT_REWARD_TYPE.value,
-        choices=reward_type_names(),
-        help=f"Reward to guide with (default: {DEFAULT_REWARD_TYPE.value}). Its options are "
-        "listed below. Use --reward-config to combine several rewards.",
+        default=DEFAULT_LOSS_TYPE.value,
+        choices=loss_type_names(),
+        help=f"Loss to guide with (default: {DEFAULT_LOSS_TYPE.value}). Its options are "
+        "listed below. Use --loss-config to combine several losses.",
     )
     parser.add_argument(
-        "--reward-config",
+        "--loss-config",
         type=str,
         default=None,
-        help="Reward configuration file (.yaml/.json/.toml) mapping each reward to its "
-        "weight and reward_options. Takes the place of --reward-type and the "
-        "per-reward flags, and is the only way to combine rewards.",
+        help="Loss configuration file (.yaml/.json/.toml) mapping each loss to its "
+        "weight and loss_options. Takes the place of --loss-type and the "
+        "per-loss flags, and is the only way to combine losses.",
     )
 
 
-def add_reward_args(parser: argparse.ArgumentParser, reward: Rewards | str):
-    """Add the CLI flags for one reward's options, derived from its option schema.
+def add_loss_args(parser: argparse.ArgumentParser, loss: Losses | str):
+    """Add the CLI flags for one loss's options, derived from its option schema.
 
-    Only the selected reward's flags are registered, so a flag belonging to a
-    different reward is rejected by argparse rather than silently ignored. Every
+    Only the selected loss's flags are registered, so a flag belonging to a
+    different loss is rejected by argparse rather than silently ignored. Every
     flag defaults to None here: the option schema owns the real defaults, and
     "not passed" has to stay distinguishable from "passed the default" so a
     configuration file can be layered underneath.
@@ -631,12 +631,12 @@ def add_reward_args(parser: argparse.ArgumentParser, reward: Rewards | str):
     Parameters
     ----------
     parser : argparse.ArgumentParser
-        Parser to add the reward's flags to.
-    reward : Rewards | str
-        The selected reward type.
+        Parser to add the loss's flags to.
+    loss : Losses | str
+        The selected loss type.
     """
-    spec = get_reward_spec(reward)
-    group = parser.add_argument_group(f"{spec.name.value} reward options", spec.description)
+    spec = get_loss_spec(loss)
+    group = parser.add_argument_group(f"{spec.name.value} loss options", spec.description)
 
     for option in dataclasses.fields(spec.options_cls):
         value_type = option_type(spec.options_cls, option.name)
@@ -646,7 +646,7 @@ def add_reward_args(parser: argparse.ArgumentParser, reward: Rewards | str):
             help_text = f"{help_text} (default: {option.default})"
 
         kwargs: dict[str, Any] = {
-            "dest": f"{_REWARD_OPTION_PREFIX}{option.name}",
+            "dest": f"{_LOSS_OPTION_PREFIX}{option.name}",
             "default": None,
             "help": help_text,
         }
@@ -655,7 +655,7 @@ def add_reward_args(parser: argparse.ArgumentParser, reward: Rewards | str):
         else:
             if not metadata["choices"]:
                 # Otherwise the prefixed dest becomes the metavar and --help reads
-                # "--mtzfile REWARD_OPTION_MTZFILE". Options with choices are left
+                # "--mtzfile LOSS_OPTION_MTZFILE". Options with choices are left
                 # alone so argparse can show the choices in their place.
                 kwargs["metavar"] = option.name.upper()
             if metadata["json_arg"]:
@@ -672,8 +672,8 @@ def add_reward_args(parser: argparse.ArgumentParser, reward: Rewards | str):
         group.add_argument("--" + option.name.replace("_", "-"), **kwargs)
 
 
-def reward_options_from_args(args: argparse.Namespace) -> dict[str, Any]:
-    """Collect the reward options that were actually passed on the command line.
+def loss_options_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    """Collect the loss options that were actually passed on the command line.
 
     Parameters
     ----------
@@ -686,9 +686,9 @@ def reward_options_from_args(args: argparse.Namespace) -> dict[str, Any]:
         Option name to value, omitting everything left unset.
     """
     return {
-        name.removeprefix(_REWARD_OPTION_PREFIX): value
+        name.removeprefix(_LOSS_OPTION_PREFIX): value
         for name, value in vars(args).items()
-        if name.startswith(_REWARD_OPTION_PREFIX) and value is not None
+        if name.startswith(_LOSS_OPTION_PREFIX) and value is not None
     }
 
 

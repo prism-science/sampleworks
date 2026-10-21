@@ -1,10 +1,10 @@
-"""Per-reward option schemas.
+"""Per-loss option schemas.
 
-Each reward type declares its configurable options once, here, as a frozen
+Each loss type declares its configurable options once, here, as a frozen
 dataclass. Everything else is derived from that declaration: the CLI flags
-(:func:`sampleworks.utils.guidance_script_arguments.add_reward_args`), the
-``reward_options`` schema of a reward configuration file
-(:mod:`sampleworks.core.rewards.config`), container path remapping in
+(:func:`sampleworks.utils.guidance_script_arguments.add_loss_args`), the
+``loss_options`` schema of a loss configuration file
+(:mod:`sampleworks.core.losses.config`), container path remapping in
 ``GuidanceConfig.as_dict``, and the "unknown option" error messages.
 
 Option names are the configuration-file keys, and the CLI flag for an option is
@@ -14,8 +14,8 @@ serve every consumer.
 
 This module deliberately imports nothing heavy. The registry has to be
 importable in every pixi environment to render ``--help`` or validate a config,
-while the reward implementations themselves pull in environment-specific stacks
-(``SFC_Torch``, the vendored qFit code); those are only imported when a reward is
+while the loss implementations themselves pull in environment-specific stacks
+(``SFC_Torch``, the vendored qFit code); those are only imported when a loss is
 actually built.
 """
 
@@ -36,7 +36,7 @@ def opt(
     path: bool = False,
     json_arg: bool = False,
 ) -> Any:
-    """Declare one reward option.
+    """Declare one loss option.
 
     Parameters
     ----------
@@ -68,7 +68,7 @@ def opt(
 
 @dataclass(frozen=True)
 class RealSpaceDensityOptions:
-    """Options for :class:`~sampleworks.core.rewards.real_space_density.RealSpaceRewardFunction`."""
+    """Options for :class:`~sampleworks.core.losses.real_space_density.RealSpaceLossFunction`."""
 
     density: str | None = opt(None, help="Input density map (CCP4/MRC/MAP or MTZ)", path=True)
     resolution: float | None = opt(None, help="Map resolution in Angstroms")
@@ -83,9 +83,9 @@ class RealSpaceDensityOptions:
 
 @dataclass(frozen=True)
 class StructureFactorOptions:
-    """Options for the structure-factor reward.
+    """Options for the structure-factor loss.
 
-    See :class:`~sampleworks.core.rewards.structure_factor.StructureFactorRewardFunction`.
+    See :class:`~sampleworks.core.losses.structure_factor.StructureFactorLossFunction`.
     """
 
     mtzfile: str | None = opt(None, help="MTZ holding the target amplitudes", path=True)
@@ -118,9 +118,9 @@ class StructureFactorOptions:
 
 @dataclass(frozen=True)
 class DiffuseBraggOptions:
-    """Options for the combined Bragg + diffuse reward.
+    """Options for the combined Bragg + diffuse loss.
 
-    See :class:`~sampleworks.core.rewards.diffuse_bragg.DiffuseBraggRewardFunction`.
+    See :class:`~sampleworks.core.losses.diffuse_bragg.DiffuseBraggLossFunction`.
     """
 
     bragg_target: str | None = opt(
@@ -179,7 +179,7 @@ def option_type(options_cls: type, name: str) -> Any:
     Parameters
     ----------
     options_cls
-        A reward's option dataclass.
+        A loss's option dataclass.
     name
         Option name.
 
@@ -202,7 +202,7 @@ def path_option_names(options_cls: type) -> tuple[str, ...]:
     Parameters
     ----------
     options_cls
-        A reward's option dataclass.
+        A loss's option dataclass.
 
     Returns
     -------

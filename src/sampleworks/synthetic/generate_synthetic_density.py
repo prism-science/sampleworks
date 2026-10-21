@@ -9,12 +9,12 @@ import torch
 from loguru import logger
 
 from sampleworks.core.forward_models.xray.real_space_density import XMap_torch
-from sampleworks.core.rewards.real_space_density import (
+from sampleworks.core.losses.real_space_density import (
     resolve_scattering_table,
     SCATTERING_TABLES,
 )
 from sampleworks.synthetic.synthetic_utils import (
-    load_structure_for_synthetic_reward,
+    load_structure_for_synthetic_loss,
     resolve_parallel_jobs,
     validate_occupancy_values,
     validate_structure_extension,
@@ -184,7 +184,7 @@ def _process_single_row(
         Optional isotropic B-factor assigned to every retained atom.
     """
     structure_path = base_dir / row.filename
-    atom_array = load_structure_for_synthetic_reward(
+    atom_array = load_structure_for_synthetic_loss(
         structure_path,
         occupancy_mode=occupancy_mode,
         occupancy_values=row.occupancy_values,

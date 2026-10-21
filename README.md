@@ -106,15 +106,15 @@ Output files appear in `output/boltz2_pure_guidance/`: `refined.cif` (final ense
 | `--guidance-type` | `pure_guidance`, `fk_steering`, or `latent_opt`                           |
 | `--protein`       | Protein identifier (should match naming used in grid search / evaluation) |
 | `--structure`     | Path to input structure file (CIF)                                        |
-| `--density`       | Path to density map (CCP4/MRC/MAP) — required by the default reward       |
-| `--resolution`    | Map resolution in Angstroms — required by the default reward              |
+| `--density`       | Path to density map (CCP4/MRC/MAP) — required by the default loss       |
+| `--resolution`    | Map resolution in Angstroms — required by the default loss              |
 
 Model-specific arguments (e.g. `--method` for boltz2, `--msa-path` for rf3) and guidance-type-specific arguments (e.g. `--num-particles` for fk_steering) are included automatically. Run `sampleworks-guidance --model <model> --guidance-type <type> --help` to see all available options.
 
 ### Latent optimization (IT-opt)
 
 `--guidance-type latent_opt` optimizes the model's cached post-trunk latents — the single
-representation `s` and the pair representation `z` — against the reward, rather than nudging
+representation `s` and the pair representation `z` — against the loss, rather than nudging
 coordinates. No model weights are trained. Available for `protenix`, `rf3` and `boltz1`.
 
 ```bash
@@ -142,11 +142,11 @@ pixi run -e protenix sampleworks-guidance \
 See [docs/IT_OPT_DESIGN.md](docs/IT_OPT_DESIGN.md) for the algorithm and the per-model gradient
 readiness table, and [docs/IT_OPT_TESTING.md](docs/IT_OPT_TESTING.md) for how to run and debug it.
 
-### Rewards
+### Losses
 
-`--reward-type` chooses what the run is guided by, and each reward brings its own options:
+`--loss-type` chooses what the run is guided by, and each loss brings its own options:
 
-| Reward                         | Guided by                                                              | Its options                                                                                    |
+| Loss                         | Guided by                                                              | Its options                                                                                    |
 | ------------------------------ | ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | `real_space_density` (default) | Fit to a density map                                                   | `--density`, `--resolution`, `--loss-order`, `--em`, `--scattering-table`                      |
 | `structure_factor`             | Fit to structure-factor amplitudes from an MTZ                         | `--mtzfile`, `--expcolumns`, `--resolution`, `--bulk-solvent`, `--scattering-factor-mode`, ... |
@@ -155,26 +155,26 @@ readiness table, and [docs/IT_OPT_TESTING.md](docs/IT_OPT_TESTING.md) for how to
 ```bash
 sampleworks-guidance --model boltz2 --guidance-type pure_guidance \
     --protein 1VME --structure 1vme.cif \
-    --reward-type structure_factor --mtzfile 1vme.mtz --bulk-solvent combined
+    --loss-type structure_factor --mtzfile 1vme.mtz --bulk-solvent combined
 ```
 
-To combine rewards, or to keep reward settings in version control, describe them in a file
-(YAML, JSON, or TOML) and pass `--reward-config rewards.yaml`:
+To combine losses, or to keep loss settings in version control, describe them in a file
+(YAML, JSON, or TOML) and pass `--loss-config losses.yaml`:
 
 ```yaml
 real_space_density:
   weight: 0.4
-  reward_options:
+  loss_options:
     density: 1vme.ccp4
     resolution: 1.8
 structure_factor:
   weight: 0.6
-  reward_options:
+  loss_options:
     mtzfile: 1vme.mtz
     bulk_solvent: combined
 ```
 
-Weights default to `1/N` when omitted, so combining rewards leaves the meaning of the
+Weights default to `1/N` when omitted, so combining losses leaves the meaning of the
 guidance step size intact.
 
 ## Grid Search

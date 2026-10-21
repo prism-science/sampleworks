@@ -15,7 +15,7 @@ from sampleworks.synthetic.synthetic_utils import (
     assign_occupancies,
     atomarray_to_gemmi,
     BatchRowForMTZ,
-    load_structure_for_synthetic_reward,
+    load_structure_for_synthetic_loss,
     resolve_crystal_metadata,
     resolve_mtz_column,
     resolve_parallel_jobs,
@@ -182,7 +182,7 @@ def test_resolve_parallel_jobs_preserves_single_cuda_worker() -> None:
 @pytest.mark.parametrize("b_factor", [1.0, 37.5, 100.0])
 def test_load_structure_overrides_b_factors(resources_dir: Path, b_factor: float) -> None:
     """A flat B-factor override replaces every retained input value."""
-    atom_array = load_structure_for_synthetic_reward(
+    atom_array = load_structure_for_synthetic_loss(
         resources_dir / "6b8x" / "6b8x_final.pdb",
         occupancy_mode="default",
         occupancy_values=[],
@@ -201,7 +201,7 @@ def test_load_structure_drops_zero_occupancy_atoms_after_assignment(
     resources_dir: Path,
 ) -> None:
     """Conformers assigned zero occupancy are absent from the prepared structure."""
-    atom_array = load_structure_for_synthetic_reward(
+    atom_array = load_structure_for_synthetic_loss(
         resources_dir / "6b8x" / "6b8x_final.pdb",
         occupancy_mode="custom",
         occupancy_values=[0.5, 0.5],
@@ -217,7 +217,7 @@ def test_load_structure_drops_zero_occupancy_atoms_after_assignment(
 def test_load_structure_rejects_invalid_b_factor(resources_dir: Path, b_factor: float) -> None:
     """B-factor overrides must be finite and non-negative."""
     with pytest.raises(ValueError, match="B-factor must be finite and non-negative"):
-        load_structure_for_synthetic_reward(
+        load_structure_for_synthetic_loss(
             resources_dir / "6b8x" / "6b8x_final.pdb",
             occupancy_mode="default",
             occupancy_values=[],

@@ -56,8 +56,8 @@ class TrajectoryScalers(StrEnum):
     LATENT_OPT = "latent_opt"
 
 
-class Rewards(StrEnum):
-    """Enum for all RewardFunctionProtocol implementations."""
+class Losses(StrEnum):
+    """Enum for all LossFunctionProtocol implementations."""
 
     REAL_SPACE_DENSITY = "real_space_density"
     STRUCTURE_FACTOR = "structure_factor"

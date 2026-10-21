@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from loguru import logger
 from tqdm import tqdm
 
-from sampleworks.core.rewards.protocol import prepare_reward_if_needed, RewardFunctionProtocol
+from sampleworks.core.losses.protocol import LossFunctionProtocol, prepare_loss_if_needed
 from sampleworks.core.samplers.protocol import (
     SamplerStepOutput,
     StepParams,
@@ -70,7 +70,7 @@ class FKSteering:
         model: FlowModelWrapper,
         sampler: TrajectorySampler,
         step_scaler: StepScalerProtocol[FlowModelWrapper],
-        reward: RewardFunctionProtocol,
+        loss_function: LossFunctionProtocol,
         num_particles: int = 1,
     ) -> GuidanceOutput:
         """Generate samples using Feynman-Kac steering.
@@ -85,8 +85,8 @@ class FKSteering:
             Sampler for trajectory generation (provides schedule and step mechanics).
         step_scaler : StepScalerProtocol
             Step scaler for per-step guidance.
-        reward : RewardFunctionProtocol
-            Reward function for computing particle energies.
+        loss_function : LossFunctionProtocol
+            Loss function for computing particle energies.
         num_particles : int
             Number of particles. Default is 1, i.e., no population.
 
@@ -113,12 +113,12 @@ class FKSteering:
         )
 
         reconciler = processed.reconciler.to(coords.device)
-        reward_inputs = processed.to_reward_inputs(device=coords.device)
-        # Two-phase rewards are bound to the same inputs every step hands to `reward`: model
+        loss_inputs = processed.to_loss_inputs(device=coords.device)
+        # Two-phase losses are bound to the same inputs every step hands to `loss`: model
         # atom order, the structure's B-factors on the common atoms, and the reconciled
         # reference coordinates. `processed` (a frozen dataclass) and its atom arrays are
         # never written to.
-        prepare_reward_if_needed(reward, reward_inputs, device=coords.device)
+        prepare_loss_if_needed(loss_function, loss_inputs, device=coords.device)
 
         schedule = sampler.compute_schedule(self.num_steps)
         loss_history: list[torch.Tensor] = []
@@ -151,7 +151,7 @@ class FKSteering:
             apply_guidance = i >= self.guidance_start
 
             if apply_guidance:
-                context = context.with_reward(reward, reward_inputs)
+                context = context.with_loss(loss_function, loss_inputs)
 
             context = context.with_reconciler(
                 reconciler=reconciler,
@@ -204,7 +204,7 @@ class FKSteering:
             coords_4d_current = coords.reshape(num_particles, self.ensemble_size, -1, 3)
             trajectory_next_step.append(coords_4d_current.clone().cpu())
 
-        # Select the particle (ensemble) with the best final reward.
+        # Select the particle (ensemble) with the lowest final loss.
         # final_coords_4d: (particles, ensemble, atoms, 3)
         # lowest_loss_coords: (ensemble, atoms, 3) — the winning ensemble's
         # denoised coordinates.
@@ -262,7 +262,7 @@ class FKSteering:
         features : GenerativeModelInput
             Model features/inputs.
         context : StepParams
-            Step context with time info and optionally reward.
+            Step context with time info and optionally loss.
         step_scaler : StepScalerProtocol | None
             Step scaler for guidance (None if guidance not active).
         num_particles : int
@@ -326,7 +326,7 @@ class FKSteering:
         features : GenerativeModelInput
             Model features/inputs.
         context : StepParams
-            Step context with time info and optionally reward.
+            Step context with time info and optionally loss.
         step_scaler : StepScalerProtocol
             Active step scaler providing per-particle guidance.
         num_particles : int

@@ -1,4 +1,4 @@
-"""Weighted combination of several reward functions."""
+"""Weighted combination of several loss functions."""
 
 from __future__ import annotations
 
@@ -7,67 +7,67 @@ from typing import TYPE_CHECKING
 
 import torch
 from jaxtyping import Float, Int
-from sampleworks.core.rewards.protocol import prepare_reward_if_needed, RewardFunctionProtocol
+from sampleworks.core.losses.protocol import LossFunctionProtocol, prepare_loss_if_needed
 
 
 if TYPE_CHECKING:
-    from sampleworks.core.rewards.protocol import RewardInputs
+    from sampleworks.core.losses.protocol import LossInputs
 
 
-class CompositeReward:
-    """Sum of weighted reward functions, itself a reward function.
+class CompositeLoss:
+    """Sum of weighted loss functions, itself a loss function.
 
     Combines terms that score different things about the same coordinates -- a
     density fit and a physical-plausibility prior, say, or two experimental data
     sets. Every term follows the package's sign convention (see
-    :class:`~sampleworks.core.rewards.protocol.RewardFunctionProtocol`): values are
+    :class:`~sampleworks.core.losses.protocol.LossFunctionProtocol`): values are
     minimized, so the weighted sum is too.
 
     Weights are the terms' relative influence on the gradient. They default to
-    ``1/len(rewards)``, which keeps the combined magnitude comparable to a single
-    reward's and so leaves the guidance step size meaning what it meant before.
+    ``1/len(losses)``, which keeps the combined magnitude comparable to a single
+    loss's and so leaves the guidance step size meaning what it meant before.
 
     Parameters
     ----------
-    rewards
-        Reward functions to combine. Must not be empty.
+    losses
+        Loss functions to combine. Must not be empty.
     weights
-        One weight per reward, or None (default) for uniform ``1/N`` weights.
+        One weight per loss, or None (default) for uniform ``1/N`` weights.
 
     Raises
     ------
     ValueError
-        If ``rewards`` is empty, ``weights`` has a different length, or any
+        If ``losses`` is empty, ``weights`` has a different length, or any
         weight is negative.
     """
 
     def __init__(
         self,
-        rewards: Sequence[RewardFunctionProtocol],
+        losses: Sequence[LossFunctionProtocol],
         weights: Sequence[float] | None = None,
     ):
-        if not rewards:
+        if not losses:
             raise ValueError(
-                "CompositeReward needs at least one reward function; combining none of "
+                "CompositeLoss needs at least one loss function; combining none of "
                 "them has no meaningful value or gradient."
             )
 
         if weights is None:
-            weights = [1.0 / len(rewards)] * len(rewards)
-        elif len(weights) != len(rewards):
+            weights = [1.0 / len(losses)] * len(losses)
+        elif len(weights) != len(losses):
             raise ValueError(
-                f"Got {len(weights)} weights for {len(rewards)} rewards; they must correspond "
+                f"Got {len(weights)} weights for {len(losses)} losses; they must correspond "
                 "one to one."
             )
 
         negative = [w for w in weights if w < 0]
         if negative:
             raise ValueError(
-                f"Reward weights must be non-negative, got {negative}. A negative weight "
+                f"Loss weights must be non-negative, got {negative}. A negative weight "
                 "inverts that term's sign and steers away from it."
             )
 
-        self.rewards = list(rewards)
+        self.losses = list(losses)
         self.weights = [float(w) for w in weights]
 
     def __call__(
@@ -79,7 +79,7 @@ class CompositeReward:
         unique_combinations: torch.Tensor | None = None,
         inverse_indices: torch.Tensor | None = None,
     ) -> Float[torch.Tensor, ""]:
-        """Compute the weighted sum of the component rewards.
+        """Compute the weighted sum of the component losses.
 
         Parameters
         ----------
@@ -93,7 +93,7 @@ class CompositeReward:
             Per-atom occupancies, shape [batch, n_atoms].
         unique_combinations
             Pre-computed unique (element, b_factor) pairs, forwarded verbatim.
-            Rewards that do not use them ignore them; they exist so a caller can
+            Losses that do not use them ignore them; they exist so a caller can
             hoist that deduplication out of a vmap, where dynamic shapes are not
             allowed.
         inverse_indices
@@ -106,8 +106,8 @@ class CompositeReward:
             Scalar value to be minimized.
         """
         total = torch.zeros((), dtype=coordinates.dtype, device=coordinates.device)
-        for reward, weight in zip(self.rewards, self.weights, strict=True):
-            total = total + weight * reward(
+        for loss, weight in zip(self.losses, self.weights, strict=True):
+            total = total + weight * loss(
                 coordinates,
                 elements,
                 b_factors,
@@ -117,22 +117,22 @@ class CompositeReward:
             )
         return total
 
-    def prepare(self, reward_inputs: RewardInputs, *, device: torch.device | str = "cpu") -> None:
-        """Prepare each component reward that needs binding to the reward inputs.
+    def prepare(self, loss_inputs: LossInputs, *, device: torch.device | str = "cpu") -> None:
+        """Prepare each component loss that needs binding to the loss inputs.
 
         Parameters
         ----------
-        reward_inputs
-            Model-order reward inputs every component's ``__call__`` will be fed.
+        loss_inputs
+            Model-order loss inputs every component's ``__call__`` will be fed.
         device
             PyTorch device the prepared state is placed on.
         """
-        for reward in self.rewards:
-            prepare_reward_if_needed(reward, reward_inputs, device=device)
+        for loss in self.losses:
+            prepare_loss_if_needed(loss, loss_inputs, device=device)
 
     def __repr__(self) -> str:
         terms = ", ".join(
-            f"{weight:g}*{type(reward).__name__}"
-            for reward, weight in zip(self.rewards, self.weights, strict=True)
+            f"{weight:g}*{type(loss).__name__}"
+            for loss, weight in zip(self.losses, self.weights, strict=True)
         )
-        return f"CompositeReward({terms})"
+        return f"CompositeLoss({terms})"

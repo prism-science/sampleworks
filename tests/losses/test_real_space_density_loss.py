@@ -1,15 +1,15 @@
-"""Tests specific to the real-space density reward function.
+"""Tests specific to the real-space density loss function.
 
-Reward-agnostic contract tests (interface, relative correlation, coordinate gradients,
-batch/edge handling) have been extracted to ``test_reward_function_contract.py``, where
-they run against every reward function. What remains here is specific to
-``RealSpaceRewardFunction`` (``sampleworks.core.rewards.real_space_density``) or to the
+Loss-agnostic contract tests (interface, relative correlation, coordinate gradients,
+batch/edge handling) have been extracted to ``test_loss_function_contract.py``, where
+they run against every loss function. What remains here is specific to
+``RealSpaceLossFunction`` (``sampleworks.core.losses.real_space_density``) or to the
 real-space density forward model:
 
 1. Scattering-parameter setup / element normalization (forward model).
-2. ``precompute_unique_combinations`` / vmap support (``PrecomputableRewardFunctionProtocol``).
-3. ``structure_to_reward_input`` (not implemented by SFC). (Batch=1 occupancy gradients are
-   now reward-agnostic and live in ``test_reward_function_contract.py``.)
+2. ``precompute_unique_combinations`` / vmap support (``PrecomputableLossFunctionProtocol``).
+3. ``structure_to_loss_input`` (not implemented by SFC). (Batch=1 occupancy gradients are
+   now loss-agnostic and live in ``test_loss_function_contract.py``.)
 4. The single-atom case (SFC fixes topology at ``prepare()``).
 """
 
@@ -25,9 +25,9 @@ from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.sf import
     ATOM_STRUCTURE_FACTORS,
     ELEMENT_TO_ATOMIC_NUM,
 )
-from sampleworks.core.rewards.real_space_density import (
+from sampleworks.core.losses.real_space_density import (
     extract_density_inputs_from_atomarray,
-    RealSpaceRewardFunction,
+    RealSpaceLossFunction,
     setup_scattering_params,
 )
 
@@ -38,7 +38,7 @@ class TestSetupScatteringParams:
     def test_setup_scattering_params_covers_supported_elements(self, device):
         """Every key in ATOM_STRUCTURE_FACTORS must have a nonzero row in the
         scattering tensor, and its exact coefficients must match the table."""
-        from sampleworks.core.rewards.real_space_density import ELEMENT_TO_SCATTERING_INDEX
+        from sampleworks.core.losses.real_space_density import ELEMENT_TO_SCATTERING_INDEX
 
         params = setup_scattering_params(em_mode=False, device=device)
 
@@ -116,7 +116,7 @@ class TestSetupScatteringParams:
         """IT92 is four Gaussians plus a constant, padded into the six-term layout
         with the constant as a Gaussian of b = 0, so summing all six terms must
         equal f(s) from gemmi's coefficients."""
-        from sampleworks.core.rewards.real_space_density import ELEMENT_TO_SCATTERING_INDEX
+        from sampleworks.core.losses.real_space_density import ELEMENT_TO_SCATTERING_INDEX
 
         params = setup_scattering_params(em_mode=False, device=device, scattering_table="it1992")
         s = torch.linspace(0.0, 0.6, 7, device=device)
@@ -135,7 +135,7 @@ class TestSetupScatteringParams:
     def test_it1992_match_the_published_carbon_values(self, device):
         """International Tables Vol. C, Table 6.1.1.4, carbon: a, b, then c in the
         sixth a-slot with a zero fifth pair."""
-        from sampleworks.core.rewards.real_space_density import ELEMENT_TO_SCATTERING_INDEX
+        from sampleworks.core.losses.real_space_density import ELEMENT_TO_SCATTERING_INDEX
 
         params = setup_scattering_params(em_mode=False, device=device, scattering_table="it1992")
         row = params[ELEMENT_TO_SCATTERING_INDEX["C"]].cpu()
@@ -149,7 +149,7 @@ class TestSetupScatteringParams:
     def test_it1992_ignore_formal_charge(self, device):
         """IT92 tabulates neutral atoms, so ionic rows take their element's factors
         rather than scattering off nothing."""
-        from sampleworks.core.rewards.real_space_density import ELEMENT_TO_SCATTERING_INDEX
+        from sampleworks.core.losses.real_space_density import ELEMENT_TO_SCATTERING_INDEX
 
         params = setup_scattering_params(em_mode=False, device=device, scattering_table="it1992")
         for ion, neutral in (("Fe2+", "Fe"), ("O1-", "O")):
@@ -162,7 +162,7 @@ class TestSetupScatteringParams:
         """Every real element gets a row. The ``'?'`` placeholder and qFit's
         valence-state pseudo-element have no IT92 entry and stay zero rather than
         borrowing a neighbour's factors."""
-        from sampleworks.core.rewards.real_space_density import ELEMENT_TO_SCATTERING_INDEX
+        from sampleworks.core.losses.real_space_density import ELEMENT_TO_SCATTERING_INDEX
 
         params = setup_scattering_params(em_mode=False, device=device, scattering_table="it1992")
         zero_rows = {
@@ -200,16 +200,16 @@ class TestSetupScatteringParams:
             setup_scattering_params(em_mode=True, device=device, scattering_table="it1992")
 
 
-class TestStructureToRewardInput:
+class TestStructureToLossInput:
     def test_reuses_density_input_preprocessing(self, atom_array_with_nan_coords, device):
         """Filter invalid/zero-occupancy atoms and replace valid NaN B-factors."""
         atom_array = atom_array_with_nan_coords.copy()
         atom_array.b_factor = np.array([10.0, 15.0, np.nan, 15.0, 40.0])
         atom_array.occupancy = np.array([1.0, 1.0, 1.0, 1.0, 0.0])
 
-        reward_function = RealSpaceRewardFunction.__new__(RealSpaceRewardFunction)
-        reward_function.device = device
-        inputs = reward_function.structure_to_reward_input({"asym_unit": atom_array})
+        loss_function = RealSpaceLossFunction.__new__(RealSpaceLossFunction)
+        loss_function.device = device
+        inputs = loss_function.structure_to_loss_input({"asym_unit": atom_array})
         expected_coordinates, expected_elements, expected_b_factors, expected_occupancies = (
             extract_density_inputs_from_atomarray(atom_array, device)
         )
@@ -238,9 +238,9 @@ class TestStructureToRewardInput:
         atom_array_stack.b_factor = np.array([np.nan, 20.0, 20.0])
         atom_array_stack.occupancy = np.array([0.5, 0.5, 0.0])
 
-        reward_function = RealSpaceRewardFunction.__new__(RealSpaceRewardFunction)
-        reward_function.device = device
-        inputs = reward_function.structure_to_reward_input({"asym_unit": atom_array_stack})
+        loss_function = RealSpaceLossFunction.__new__(RealSpaceLossFunction)
+        loss_function.device = device
+        inputs = loss_function.structure_to_loss_input({"asym_unit": atom_array_stack})
         expected_coordinates, expected_elements, expected_b_factors, expected_occupancies = (
             extract_density_inputs_from_atomarray(atom_array_stack, device)
         )
@@ -259,9 +259,7 @@ class TestStructureToRewardInput:
 class TestVmapCompatibility:
     """Test vmap functionality for use in FK steering and particle methods."""
 
-    def test_vmap_over_particle_dimension(
-        self, reward_function_1vme, test_coordinates_1vme, device
-    ):
+    def test_vmap_over_particle_dimension(self, loss_function_1vme, test_coordinates_1vme, device):
         """Test vmap over particle dimension as used in FK steering."""
         coords, atom_array = test_coordinates_1vme
 
@@ -286,12 +284,12 @@ class TestVmapCompatibility:
             "n -> p e n", occupancies, p=num_particles, e=ensemble_size
         )
 
-        unique_combinations, inverse_indices = reward_function_1vme.precompute_unique_combinations(
+        unique_combinations, inverse_indices = loss_function_1vme.precompute_unique_combinations(
             elements_batch[0], b_factors_batch[0]
         )
 
         rf_partial = partial(
-            reward_function_1vme,
+            loss_function_1vme,
             unique_combinations=unique_combinations,
             inverse_indices=inverse_indices,
         )
@@ -312,7 +310,7 @@ class TestVmapCompatibility:
         assert torch.all(torch.isfinite(result))
 
     def test_vmap_with_precomputed_combinations(
-        self, reward_function_1vme, test_coordinates_1vme, device
+        self, loss_function_1vme, test_coordinates_1vme, device
     ):
         """Test vmap with pre-computed unique combinations."""
         coords, atom_array = test_coordinates_1vme
@@ -328,11 +326,11 @@ class TestVmapCompatibility:
         b_factors = torch.from_numpy(atom_array.b_factor).to(device=device, dtype=torch.float32)
         occupancies = torch.from_numpy(atom_array.occupancy).to(device=device, dtype=torch.float32)
 
-        unique_combinations, inverse_indices = reward_function_1vme.precompute_unique_combinations(
+        unique_combinations, inverse_indices = loss_function_1vme.precompute_unique_combinations(
             elements, b_factors
         )
 
-        loss_with_precompute = reward_function_1vme(
+        loss_with_precompute = loss_function_1vme(
             coordinates=coords.unsqueeze(0),
             elements=elements.unsqueeze(0),
             b_factors=b_factors.unsqueeze(0),
@@ -341,7 +339,7 @@ class TestVmapCompatibility:
             inverse_indices=inverse_indices,
         )
 
-        loss_without_precompute = reward_function_1vme(
+        loss_without_precompute = loss_function_1vme(
             coordinates=coords.unsqueeze(0),
             elements=elements.unsqueeze(0),
             b_factors=b_factors.unsqueeze(0),
@@ -350,7 +348,7 @@ class TestVmapCompatibility:
 
         torch.testing.assert_close(loss_with_precompute, loss_without_precompute)
 
-    def test_vmap_output_shape(self, reward_function_1vme, test_coordinates_1vme, device):
+    def test_vmap_output_shape(self, loss_function_1vme, test_coordinates_1vme, device):
         """Test vmap returns correct shape (num_particles,)."""
         coords, atom_array = test_coordinates_1vme
 
@@ -372,14 +370,14 @@ class TestVmapCompatibility:
             occupancies_batch = einx.rearrange("n -> p e n", occupancies, p=num_particles, e=1)
 
             unique_combinations, inverse_indices = (
-                reward_function_1vme.precompute_unique_combinations(
+                loss_function_1vme.precompute_unique_combinations(
                     elements_batch[0, 0],
                     b_factors_batch[0, 0],
                 )
             )
 
             rf_partial = partial(
-                reward_function_1vme,
+                loss_function_1vme,
                 unique_combinations=unique_combinations,
                 inverse_indices=inverse_indices,
             )
@@ -395,7 +393,7 @@ class TestVmapCompatibility:
 
             assert result.shape == torch.Size([num_particles])
 
-    def test_vmap_consistency(self, reward_function_1vme, test_coordinates_1vme, device):
+    def test_vmap_consistency(self, loss_function_1vme, test_coordinates_1vme, device):
         """Test vmap results match sequential calls."""
         coords, atom_array = test_coordinates_1vme
 
@@ -416,13 +414,13 @@ class TestVmapCompatibility:
         b_factors_batch = einx.rearrange("n -> p e n", b_factors, p=num_particles, e=1)
         occupancies_batch = einx.rearrange("n -> p e n", occupancies, p=num_particles, e=1)
 
-        unique_combinations, inverse_indices = reward_function_1vme.precompute_unique_combinations(
+        unique_combinations, inverse_indices = loss_function_1vme.precompute_unique_combinations(
             elements_batch[0, 0],
             b_factors_batch[0, 0],
         )
 
         rf_partial = partial(
-            reward_function_1vme,
+            loss_function_1vme,
             unique_combinations=unique_combinations,
             inverse_indices=inverse_indices,
         )
@@ -459,7 +457,7 @@ class TestVmapCompatibility:
 class TestEdgeCases:
     """RealSpace-specific edge cases (shared edge cases are in the contract file)."""
 
-    def test_single_atom(self, reward_function_1vme, test_coordinates_1vme, device):
+    def test_single_atom(self, loss_function_1vme, test_coordinates_1vme, device):
         """Test with just one atom."""
         coords, atom_array = test_coordinates_1vme
 
@@ -468,7 +466,7 @@ class TestEdgeCases:
         occupancies = torch.tensor([1.0], device=device, dtype=torch.float32)
         coords_single = coords[:1]
 
-        loss = reward_function_1vme(
+        loss = loss_function_1vme(
             coordinates=coords_single.unsqueeze(0),
             elements=elements.unsqueeze(0),
             b_factors=b_factors.unsqueeze(0),
@@ -477,9 +475,9 @@ class TestEdgeCases:
 
         assert torch.isfinite(loss)
 
-    def test_structure_to_reward_input(self, reward_function_1vme, structure_1vme_density):
-        """Test structure_to_reward_input function."""
-        inputs = reward_function_1vme.structure_to_reward_input(structure_1vme_density)
+    def test_structure_to_loss_input(self, loss_function_1vme, structure_1vme_density):
+        """Test structure_to_loss_input function."""
+        inputs = loss_function_1vme.structure_to_loss_input(structure_1vme_density)
 
         assert "coordinates" in inputs
         assert "elements" in inputs
@@ -496,6 +494,6 @@ class TestEdgeCases:
         assert inputs["occupancies"].ndim == 2
         assert inputs["occupancies"].shape[0] == 1
 
-        loss = reward_function_1vme(**inputs)
+        loss = loss_function_1vme(**inputs)
         assert torch.isfinite(loss)
         assert loss.item() >= 0.0

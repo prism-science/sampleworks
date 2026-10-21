@@ -66,7 +66,7 @@ def model_topology_and_coords(
     -------
     atom_array
         The model's topology with the reconciled coordinates and B-factors, as
-        ``RewardInputs.to_atom_array`` rebuilds it: the same array the reward's
+        ``LossInputs.to_atom_array`` rebuilds it: the same array the loss's
         ``prepare`` bakes into its scattering kernels during guidance, so the
         target and the guided model share scattering factors.
     coords
@@ -93,9 +93,9 @@ def model_topology_and_coords(
         structure=structure, coords_from_prior=prior, features=features, ensemble_size=1
     )
 
-    # The same inputs a trajectory scaler hands to reward.prepare(): structure
+    # The same inputs a trajectory scaler hands to loss.prepare(): structure
     # B-factors copied onto the matched model atoms, reconciled coordinates.
-    atom_array = processed.to_reward_inputs().to_atom_array()
+    atom_array = processed.to_loss_inputs().to_atom_array()
     coords = np.asarray(atom_array.coord, dtype=np.float64)
 
     logger.info(
@@ -235,7 +235,7 @@ def generate(args: argparse.Namespace) -> None:
         f"      --model boltz2 --guidance-type pure_guidance --protein recovery \\\n"
         f"      --model-checkpoint {args.model_checkpoint} \\\n"
         f"      --structure {args.structure} \\\n"
-        f"      --reward-type diffuse_bragg \\\n"
+        f"      --loss-type diffuse_bragg \\\n"
         f"      --bragg-target {bragg_path} \\\n"
         f"      --diffuse-target {diffuse_path} \\\n"
         f"      --bragg-weight {args.bragg_weight} --no-fit-scale \\\n"

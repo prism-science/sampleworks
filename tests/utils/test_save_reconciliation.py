@@ -83,8 +83,8 @@ def test_save_restores_input_numbering_and_keeps_model_only_atoms_in_residue(tmp
 def test_save_writes_modeled_met_and_input_b_factors_at_mse_position(tmp_path: Path):
     """A MET modeled for an input MSE is written as MET at the input's numbering.
 
-    The reward scored sulfur, so the output says sulfur; matched atoms carry the input's
-    B-factors, which are the ones the reward used.
+    The loss scored sulfur, so the output says sulfur; matched atoms carry the input's
+    B-factors, which are the ones the loss used.
     """
     model = build_test_atom_array(chain_ids=["A", "A"], res_ids=[0, 0], atom_names=["N", "SD"])
     model.res_name[:] = "MET"
