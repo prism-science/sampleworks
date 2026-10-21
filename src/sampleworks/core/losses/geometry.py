@@ -19,32 +19,16 @@ and does nothing unless its weight is set.
 
 from __future__ import annotations
 
-import gemmi
 import numpy as np
 import torch
 from biotite.structure import AtomArray, connect_via_residue_names
+from sampleworks.utils.elements import covalent_radius
 from torch import Tensor
 
 
 # Type hints below (": str", "-> Tensor", "| None" meaning "or None") only CLAIM what a value
 # should be -- nothing enforces them at runtime, and deleting them changes nothing. They are for
 # human readers and the ty checker. Worked examples: core/scalers/latent_optimization.py.
-
-
-# TODO(#421): move into utils/elements.py, the per-element lookup module.
-def _covalent_radius(element: str) -> float:
-    """Covalent radius of an element (Å).
-
-    gemmi resolves an unrecognized symbol (e.g. the '?' some density inputs carry) to its unknown
-    element instead of raising, so this never fails -- it returns that element's 0.50 Å radius.
-    Such an atom gets a too-short ideal bond length, so a correct bond may be penalized, and a
-    shrunken clash sphere, so its clashes are under-reported.
-
-    This function cannot flag either situation: an unresolvable symbol returns silently, and a
-    non-str element raises TypeError straight out of gemmi. If bond or clash numbers look wrong,
-    suspect the atom array's element symbols first.
-    """
-    return float(gemmi.Element(element).covalent_r)
 
 
 # TODO(#420): this loss has no test coverage.
@@ -108,7 +92,7 @@ class BondGeometryLoss:
         distance is the sum of that pair's radii, so every number both penalties need is a sum of
         two entries of this tensor. Looking each atom up once here keeps the lookups to one pass.
         """
-        radii = [_covalent_radius(element) for element in atom_array.element]
+        radii = [covalent_radius(element) for element in atom_array.element]
         return torch.tensor(radii, dtype=torch.float32, device=device)
 
     def _build_bonds(self, atom_array: AtomArray, device):
