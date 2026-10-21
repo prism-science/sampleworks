@@ -35,7 +35,7 @@ for each outer round (a round = one full traversal of the schedule, fresh prior 
     optimizer = Adam([s, z])                      # ONE persistent Adam per round
     for each diffusion step:
         x̂₀   = differentiable denoise(x_t, s, z)  # ONE forward, run under autograd
-        loss  = loss(x̂₀) + anchor(s, z) + bond_geometry(x̂₀)   # both penalties off at weight 0
+        loss  = loss_function(x̂₀) + anchor(s, z) + bond_geometry(x̂₀)   # both penalties off at weight 0
         loss.backward();  clip s and z INDEPENDENTLY;  optimizer.step()
         x_t   = step_output.state.detach()         # advance; coordinate graph cut here
 final clean sampling pass with the optimized latents  ->  saved ensemble
@@ -52,7 +52,7 @@ detaches each step, and a true unroll is O(steps·N²·d) memory.)
 | Component | File | What it is |
 |---|---|---|
 | `LatentOptimization` | [core/scalers/latent_optimization.py](../src/sampleworks/core/scalers/latent_optimization.py) | The scaler / entry point. Owns the loop, the ensemble, and the final sampling pass. |
-| `LatentAnchor` | same file | `Σ wᵢ·mean((latentᵢ − baselineᵢ)²)` — mean-squared drift from the baseline latents. Regularizer, added to the loss directly (not a loss). |
+| `LatentAnchor` | same file | `Σ wᵢ·mean((latentᵢ − baselineᵢ)²)` — mean-squared drift from the baseline latents. Regularizer, added to the loss directly (not a loss function). |
 | `_GradEnablingScaler` | same file | Minimal `StepScalerProtocol` that only turns autograd on (§4). |
 | `BondGeometryLoss` | [core/losses/geometry.py](../src/sampleworks/core/losses/geometry.py) | Bond-length + steric-clash hinges on `x̂₀`. Built only when `bond_length_weight > 0`. Bounded hinges (not the reference's exploding `exp(relu(...))`). |
 | `AttrLatentIO` / `LatentIO` | [models/latent_adapter.py](../src/sampleworks/models/latent_adapter.py) | Reads/writes `s`/`z` by attribute name; writes via `dataclasses.replace` (honors `frozen=True, slots=True`). The only model-specific knowledge is a pair of attribute names. |

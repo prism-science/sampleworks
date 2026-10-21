@@ -48,23 +48,13 @@ Needs no loss; confirms precondition (a). Inject a `requires_grad` leaf as `z_tr
 
 ```python
 import torch
-from sampleworks.utils.guidance_script_utils import (
-    get_model_and_device,
-    get_loss_function_and_structure,
-)
+from sampleworks.utils.guidance_script_utils import get_model_and_device, load_guidance_structure
 from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
 from sampleworks.models.latent_adapter import AttrLatentIO
 from sampleworks.models.protocol import GenerativeModelInput
 
 device, model = get_model_and_device("cuda:0", "<protenix.ckpt>", "protenix")
-loss, structure = get_loss_function_and_structure(
-    density="<map.ccp4>",
-    device=device,
-    em=False,
-    loss_order=2,
-    resolution=1.8,
-    structure_path="<structure.cif>",
-)
+structure = load_guidance_structure("<structure.cif>")
 
 feats = model.featurize(structure)  # trunk pass
 io = AttrLatentIO(single_attr="s_trunk", pair_attr="z_trunk")
@@ -97,7 +87,12 @@ print("z_leaf.grad abs-sum:", None if z_leaf.grad is None else z_leaf.grad.abs()
 ### Level 1 — A tiny end-to-end run
 
 ```python
+from sampleworks.core.losses.config import LossConfig, build_loss
+from sampleworks.core.losses.registry import LossBuildContext
 from sampleworks.core.scalers.latent_optimization import LatentOptimization
+
+loss_config = LossConfig.single("real_space_density", density="<map.ccp4>", resolution=1.8)
+loss = build_loss(loss_config, LossBuildContext(structure=structure, device=device))
 
 itopt = LatentOptimization(
     ensemble_size=1,
@@ -111,7 +106,7 @@ itopt = LatentOptimization(
     single_attr="s_trunk",
     pair_attr="z_trunk",
 )
-out = itopt.sample(structure, model, sampler, step_scaler=None, loss=loss)
+out = itopt.sample(structure, model, sampler, step_scaler=None, loss_function=loss)
 opt = out.metadata["optimization_losses"][0]  # per-step data losses, round 0
 print("first→last opt loss:", opt[0], "→", opt[-1])
 ```

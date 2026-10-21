@@ -58,8 +58,7 @@ class BondGeometryLoss:
     atom set whose ordering matches the coordinate tensor the loss sees -- the *model* atom array,
     not the deposited structure -- or the bond indices will not line up with the coordinates.
 
-    Despite the ``Loss`` name (the module's convention), this is a penalty: it is added to,
-    and minimized as part of, ``LatentOptimization``'s loss.
+    This is a penalty: it is added to, and minimized as part of, ``LatentOptimization``'s loss.
 
     Note: this does not satisfy ``LossFunctionProtocol``. ``__call__`` takes only ``coords``,
     not the protocol's per-atom ``elements``/``b_factors``/``occupancies``, so the planned

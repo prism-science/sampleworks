@@ -68,7 +68,7 @@ class DataSpaceDPSScaler:
     ) -> tuple[Float[Tensor, "*batch atoms 3"], Float[Tensor, " batch"]]:
         if context.loss_function is None or context.loss_inputs is None:
             raise ValueError(
-                "StepParams missing loss/loss_inputs. "
+                "StepParams missing loss_function/loss_inputs. "
                 "Use context.with_loss() before calling scale()."
             )
 
@@ -121,7 +121,7 @@ class NoiseSpaceDPSScaler:
         model: FlowModelWrapper | None = None,
     ) -> tuple[Float[Tensor, "*batch atoms 3"], Float[Tensor, " batch"]]:
         if context.loss_function is None or context.loss_inputs is None:
-            raise ValueError("StepParams missing loss/loss_inputs")
+            raise ValueError("StepParams missing loss_function/loss_inputs")
 
         if context.metadata is None or "x_t" not in context.metadata:
             raise ValueError(

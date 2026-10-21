@@ -89,7 +89,7 @@ class PureGuidance:
 
         reconciler = processed_structure.reconciler.to(coords.device)
         loss_inputs = processed_structure.to_loss_inputs(device=coords.device)
-        # Two-phase losses are bound to the same inputs every step hands to `loss`: model
+        # Two-phase losses are bound to the same inputs every step hands to `loss_function`: model
         # atom order, the structure's B-factors on the common atoms, and the reconciled
         # reference coordinates. `processed_structure` (a frozen dataclass) and its atom
         # arrays are never written to.

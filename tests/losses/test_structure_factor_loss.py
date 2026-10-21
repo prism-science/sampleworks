@@ -541,8 +541,9 @@ class TestStructureFactorBulkSolvent:
 
         Fprotein_HKL, Fmask_HKL = loss_function.sfc.Fprotein_HKL, loss_function.sfc.Fmask_HKL
         assert Fprotein_HKL.requires_grad and Fmask_HKL.requires_grad, (
-            f"{loss_function.bulk_solvent} mode should have requires_grad=True on both Fprotein_HKL "
-            f"and Fmask_HKL, but got {Fprotein_HKL.requires_grad} and {Fmask_HKL.requires_grad}"
+            f"{loss_function.bulk_solvent} mode should have requires_grad=True on both "
+            f"Fprotein_HKL and Fmask_HKL, but got {Fprotein_HKL.requires_grad} and "
+            f"{Fmask_HKL.requires_grad}"
         )
         (total_gradient,) = torch.autograd.grad(loss, coordinates, retain_graph=True)
         d_protein, d_solvent = torch.autograd.grad(
@@ -555,8 +556,8 @@ class TestStructureFactorBulkSolvent:
 
         for branch, gradient in (("Fprotein", via_protein), ("Fmask", via_solvent)):
             assert 0 < gradient.norm().item() < 1e6, (
-                f"the coordinate gradient through {branch} in {loss_function.bulk_solvent} mode has "
-                f"norm {gradient.norm().item():.3e}"
+                f"the coordinate gradient through {branch} in {loss_function.bulk_solvent} mode "
+                f"has norm {gradient.norm().item():.3e}"
             )
 
         residual = (

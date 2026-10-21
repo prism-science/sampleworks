@@ -312,7 +312,7 @@ def prepare_loss_if_needed(
     *,
     device: torch.device | str = "cpu",
 ) -> None:
-    """Prepare ``loss`` against ``loss_inputs`` when it asks to be prepared.
+    """Prepare ``loss_function`` against ``loss_inputs`` when it asks to be prepared.
 
     Losses that do not implement :class:`PreparableLossFunctionProtocol` are
     left untouched, so callers can apply this unconditionally.

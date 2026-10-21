@@ -122,7 +122,7 @@ Atomworks Structure → ModelWrapper.featurize() → Features
                     ModelWrapper.step() → Denoised prediction
                                                     ↓
 ┌────────────────── Sampling Loop ──────────────────┐
-│  Schedule → StepParams (t, dt, loss, etc.)     │
+│  Schedule → StepParams (t, dt, loss, etc.)       │
 │                     ↓                             │
 │  Sampler.step(state, model, context, scaler)      │
 │       ├── Model forward pass                      │
@@ -151,7 +151,7 @@ Atomworks Structure → ModelWrapper.featurize() → Features
 src/sampleworks/
 ├── core/
 │   ├── forward_models/    # Differentiable physics (X-ray density, cryo-EM)
-│   ├── losses/           # Loss functions for experimental data fit
+│   ├── losses/            # Loss functions for experimental data fit
 │   ├── scalers/           # Guidance strategies (DPS, FK steering)
 │   └── samplers/          # Numerical solvers (EDM)
 ├── models/                # Generative model wrappers (Boltz, Protenix, RF3)

@@ -18,7 +18,7 @@ The algorithm (kept faithful to the reference), with the reference's bugs fixed:
         build ONE Adam over [s, z]                       # reference rebuilt it per step
         for each diffusion step:
             x0_hat  = differentiable denoise(noisy_t, s, z)   # one forward
-            loss    = loss(x0_hat) + anchor(s, z)
+            loss    = loss_function(x0_hat) + anchor(s, z)
             loss.backward();  per-latent grad-clip (s, then z);  adam.step()
             advance the trajectory one step (latents frozen)
     final clean sampling round with the optimized latents -> saved ensemble
@@ -278,7 +278,7 @@ class LatentOptimization:
         """
         # Reject unusable settings here rather than at the CLI. An invalid value does not fail
         # loudly downstream -- outer_steps <= 0 skips optimization entirely and still writes an
-        # ensemble, and a negative weight turns a penalty into a loss -- so both would read as a
+        # ensemble, and a negative weight turns a penalty into a bonus -- so both would read as a
         # successful run. Both paths that build this scaler (GuidanceConfig.from_cli and the grid
         # search's populate_config_for_guidance_type) converge on this constructor.
         for name, value in (
@@ -330,10 +330,10 @@ class LatentOptimization:
         loss_function: LossFunctionProtocol,
         num_particles=1,
     ) -> GuidanceOutput:
-        """Optimize the latents against ``loss``, then sample the final ensemble.
+        """Optimize the latents against ``loss_function``, then sample the final ensemble.
 
         ``step_scaler`` is ignored: v1 does latent optimization only (no
-        coordinate-space guidance). ``loss`` is evaluated on the
+        coordinate-space guidance). ``loss_function`` is evaluated on the
         reconciler-aligned denoised prediction.
         """
         latent_io = AttrLatentIO(
