@@ -583,12 +583,18 @@ class TestBuilder:
         assert reward.bragg_weight == 0.3
 
     def test_solvent_and_free_flag_options_reach_the_reward(self, diffuse_bragg_targets):
-        """Solvent and R-free options pass through the builder unchanged."""
-        reward = self.build(diffuse_bragg_targets, bulk_solvent="per_conformer", solvent_cutoff=0.3)
+        """Solvent and R-free options pass through the builder and take effect."""
+        reward = self.build(
+            diffuse_bragg_targets,
+            bulk_solvent="per_conformer",
+            solvent_cutoff=0.3,
+            exclude_free_reflections=True,
+        )
 
         assert reward.bulk_solvent == "per_conformer"
         assert reward._solvent.cutoff == 0.3
-        assert reward.exclude_free_reflections is False
+        n = diffuse_bragg_targets.n_reflections - diffuse_bragg_targets.n_free
+        assert len(reward._bragg_hkl) == n
 
     def test_is_registered(self):
         """The registry knows the reward under its CLI name."""
