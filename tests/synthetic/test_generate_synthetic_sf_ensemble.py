@@ -8,14 +8,11 @@ import numpy as np
 import pytest
 import reciprocalspaceship as rs
 import torch
-from sampleworks.synthetic.generate_synthetic_sf import (
-    _process_single_row as process_single_structure,
-    BatchRowForMTZ,
-)
 from sampleworks.synthetic.generate_synthetic_sf_ensemble import (
-    _process_single_row as process_single_ensemble,
+    _process_single_row,
     process_batch,
 )
+from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ
 from sampleworks.utils.atom_array_utils import load_structure_with_altlocs
 
 
@@ -133,14 +130,14 @@ def test_summed_models_match_merged_altloc_structure(tmp_path: Path) -> None:
         [_toy_single_model([offset], [1.0], [BLANK_ALTLOC_ID]) for offset in OFFSETS],
     )
 
-    process_single_structure(
+    _process_single_row(
         row=BatchRowForMTZ(filename="multi_altlocs.pdb", mtzfile="multi_altlocs.mtz"),
         base_dir=tmp_path,
         output_dir=tmp_path,
         occupancy_mode="default",
         **SHARED_SETTINGS,
     )
-    process_single_ensemble(
+    _process_single_row(
         row=BatchRowForMTZ(
             filename="multi_model.pdb", occupancy_values=OCCUPANCIES, mtzfile="multi_model.mtz"
         ),
@@ -188,15 +185,15 @@ def test_identical_models_match_single_structure_with_solvent(
         [_toy_single_model([offset], [1.0], [BLANK_ALTLOC_ID]) for offset in [0.0, 0.0]],
     )
 
-    process_single_structure(
+    _process_single_row(
         row=BatchRowForMTZ(filename="single.pdb", mtzfile="single.mtz"),
         base_dir=tmp_path,
         output_dir=tmp_path,
         occupancy_mode="default",
-        simulate_solvent_and_scale=True,
+        bulk_solvent="combined",
         **SHARED_SETTINGS,
     )
-    process_single_ensemble(
+    _process_single_row(
         row=BatchRowForMTZ(
             filename="multi_model.pdb", occupancy_values=OCCUPANCIES, mtzfile="multi_model.mtz"
         ),
@@ -232,7 +229,7 @@ def test_solvent_modes_leave_fprotein_unchanged(tmp_path: Path) -> None:
 
     datasets = {}
     for bulk_solvent in ("off", "combined", "per_conformer"):
-        process_single_ensemble(
+        _process_single_row(
             row=BatchRowForMTZ(
                 filename="multi_model.pdb",
                 occupancy_values=OCCUPANCIES,
@@ -275,7 +272,7 @@ def test_batch_csv_matches_single_ensemble_mode(tmp_path: Path) -> None:
     process_batch(
         csv_path=csv_path, base_dir=tmp_path, output_dir=batch_dir, n_jobs=1, **SHARED_SETTINGS
     )
-    process_single_ensemble(
+    _process_single_row(
         row=BatchRowForMTZ(
             filename="multi_model.pdb", occupancy_values=OCCUPANCIES, mtzfile="ab.mtz"
         ),
@@ -300,7 +297,7 @@ def test_occupancy_count_mismatch_writes_no_mtz(tmp_path: Path) -> None:
         [_toy_single_model([offset], [1.0], [BLANK_ALTLOC_ID]) for offset in OFFSETS],
     )
 
-    process_single_ensemble(
+    _process_single_row(
         row=BatchRowForMTZ(
             filename="multi_model.pdb", occupancy_values=[0.2, 0.3, 0.5], mtzfile="x.mtz"
         ),
@@ -325,7 +322,7 @@ def test_saved_structure_keeps_one_model_per_conformer(tmp_path: Path) -> None:
         [_toy_single_model([offset], [1.0], [BLANK_ALTLOC_ID]) for offset in OFFSETS],
     )
 
-    process_single_ensemble(
+    _process_single_row(
         row=BatchRowForMTZ(
             filename="multi_model.pdb", occupancy_values=OCCUPANCIES, mtzfile="out/multi_model.mtz"
         ),

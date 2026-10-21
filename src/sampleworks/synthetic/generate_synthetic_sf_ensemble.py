@@ -13,7 +13,7 @@ weighted by each model's population, so only one model's ``[N_atom, N_HKL]`` ten
 alive at once. Every model must have the same atoms in the same order.
 
 Bulk solvent is optional (``--bulk-solvent``), with the same modes as the structure-factor
-loss. The bulk solvent masks here are built from Fprotein rather than directly from atoms:
+loss. The bulk solvent masks are built from Fprotein rather than directly from atoms:
 ``combined`` builds one bulk solvent mask from the population-weighted Fprotein sum, and
 ``per_conformer`` builds one bulk solvent mask per model and takes the population-weighted
 mean of the bulk solvent structure factors. Either mode writes Ftotal/SIGFtotal/PHIFtotal
@@ -237,7 +237,8 @@ def _process_single_row(
     b_factor: float | None = None,
     bulk_solvent: str = "off",
 ) -> None:
-    """Compute and write the summed structure factors of one ensemble.
+    """Compute and write the structure factors of one structure file. Assume no anomalous
+    scattering.
 
     Failures are logged rather than raised so one bad row does not stop a batch.
 
@@ -267,7 +268,7 @@ def _process_single_row(
     strip_ligands
         If True, keep only polymer amino-acid atoms (removes ligands and waters).
     save_structure
-        If True, save the processed ensemble as ``<input_stem>_sf_input.cif`` beside
+        If True, save the processed structure as ``<input_stem>_sf_input.cif`` beside
         the MTZ.
     b_factor
         Optional isotropic B-factor assigned to every retained atom.
@@ -279,9 +280,7 @@ def _process_single_row(
     -----
     Writes the MTZ ``row.mtzfile`` (default ``<input_stem>_<res>A.mtz``) to output_dir.
     The columns are ``Fprotein``/``SIGFprotein``/``PHIFprotein`` plus optional R-free
-    flags, and, unless ``bulk_solvent="off"``, ``Ftotal``/``SIGFtotal``/``PHIFtotal``:
-    the layouts ``generate_synthetic_sf.py`` writes without and with
-    ``--simulate-solvent-and-scale``.
+    flags, and, unless ``bulk_solvent="off"``, ``Ftotal``/``SIGFtotal``/``PHIFtotal``.
     """
     structure_path = base_dir / row.filename
     output_path = output_dir / (row.mtzfile or f"{structure_path.stem}_{resolution:.2f}A.mtz")
@@ -293,7 +292,7 @@ def _process_single_row(
                 f"{len(gemmi_meta)} models."
             )
         cell, space_group = resolve_crystal_metadata(row, structure_path)
-        logger.info(f"Ensemble cell {cell.parameters}, space group '{space_group}'")
+        logger.info(f"Cell {cell.parameters}, space group '{space_group}'")
         sfcalculator = compute_ensemble_structure_factors(
             structure_path,
             row.occupancy_values,
@@ -334,10 +333,7 @@ def _process_single_row(
             f"{e}\n{''.join(traceback.format_tb(e.__traceback__))}"
         )
         return
-    logger.info(
-        f"Summed {len(row.occupancy_values)} models at occupancies "
-        f"{row.occupancy_values!r} (bulk solvent {bulk_solvent}) into {output_path}"
-    )
+    logger.info(f"Wrote {row.filename} (bulk solvent {bulk_solvent}) to {output_path}")
 
 
 def process_batch(
@@ -357,12 +353,12 @@ def process_batch(
     b_factor: float | None = None,
     bulk_solvent: str = "off",
 ) -> None:
-    """Process multiple ensembles from a CSV file in batch mode.
+    """Process multiple structure files from a CSV file in batch mode.
 
     Parameters
     ----------
     csv_path
-        Path to CSV file listing ensembles to process, one multi-model file per row.
+        Path to CSV file listing structures to process, one structure file per row.
     base_dir
         Base directory for resolving relative structure file paths.
     output_dir
@@ -386,7 +382,7 @@ def process_batch(
     strip_ligands
         If True, keep only polymer amino-acid atoms (removes ligands and waters).
     save_structure
-        If True, save each processed ensemble as mmCIF beside its MTZ.
+        If True, save each processed structure as mmCIF beside its MTZ.
     b_factor
         Optional isotropic B-factor assigned to every retained atom.
     bulk_solvent
@@ -396,7 +392,7 @@ def process_batch(
 
     rows = load_batch_csv(csv_path)
     effective_n_jobs = resolve_parallel_jobs(device, n_jobs)
-    logger.info(f"Processing {len(rows)} ensembles from {csv_path} using {effective_n_jobs} jobs")
+    logger.info(f"Processing {len(rows)} structures from {csv_path} using {effective_n_jobs} jobs")
 
     Parallel(n_jobs=effective_n_jobs, backend="loky")(
         delayed(_process_single_row)(
@@ -425,7 +421,7 @@ def parse_args() -> argparse.Namespace:
     Returns
     -------
     argparse.Namespace
-        Parsed ensemble structure factor configuration.
+        Parsed structure factor configuration.
     """
     parser = argparse.ArgumentParser(
         description=(
@@ -447,7 +443,7 @@ def parse_args() -> argparse.Namespace:
         "--base-dir",
         type=Path,
         default=Path("."),
-        help="Base directory for relative paths in CSV, not used in single-ensemble mode",
+        help="Base directory for relative paths in CSV, not used in single-structure mode",
     )
 
     selection_group = parser.add_argument_group("Selection Options")
@@ -524,7 +520,7 @@ def parse_args() -> argparse.Namespace:
         help="Random seed for reproducible R-free flag assignment",
     )
 
-    crystal_group = parser.add_argument_group("Crystal Options (single-ensemble mode only)")
+    crystal_group = parser.add_argument_group("Crystal Options (single-structure mode only)")
     crystal_group.add_argument(
         "--unit-cell",
         type=str,
@@ -540,7 +536,7 @@ def parse_args() -> argparse.Namespace:
     output_group.add_argument(
         "--save-structure",
         action="store_true",
-        help="Save the processed ensemble as <input_stem>_sf_input.cif beside the MTZ",
+        help="Save the processed structure as <input_stem>_sf_input.cif beside the MTZ",
     )
     output_group.add_argument("--output", "-o", type=Path, help="Output MTZ file path")
     output_group.add_argument(
@@ -559,7 +555,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Generate ensemble MTZs using command-line arguments."""
+    """Generate synthetic MTZs using command-line arguments."""
     args = parse_args()
     device = try_gpu()
 
