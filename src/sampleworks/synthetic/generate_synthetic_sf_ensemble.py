@@ -50,6 +50,7 @@ from sampleworks.synthetic.generate_synthetic_sf import (
 from sampleworks.synthetic.synthetic_utils import (
     atomarray_to_gemmi,
     load_structure_for_synthetic_reward,
+    resolve_crystal_metadata,
     resolve_parallel_jobs,
 )
 from sampleworks.utils.torch_utils import try_gpu
@@ -291,8 +292,7 @@ def _process_single_row(
                 f"Expected one occupancy per model, got {len(row.occupancy_values)} for "
                 f"{len(gemmi_meta)} models."
             )
-        cell = row.unit_cell if row.unit_cell is not None else gemmi_meta.cell
-        space_group = row.space_group if row.space_group is not None else gemmi_meta.spacegroup_hm
+        cell, space_group = resolve_crystal_metadata(row, structure_path)
         logger.info(f"Ensemble cell {cell.parameters}, space group '{space_group}'")
         sfcalculator = compute_ensemble_structure_factors(
             structure_path,

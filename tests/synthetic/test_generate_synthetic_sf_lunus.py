@@ -18,7 +18,7 @@ import pytest
 import torch
 from atomworks.io.transforms.atom_array import remove_waters
 from biotite.structure import AtomArrayStack, stack
-from sampleworks.synthetic.synthetic_utils import atomarray_to_gemmi
+from sampleworks.synthetic.synthetic_utils import atomarray_to_gemmi, rfree_flags
 from sampleworks.utils.atom_array_utils import keep_amino_acids, keep_polymer
 
 
@@ -331,10 +331,34 @@ class TestMTZWriters:
         )
         flags = gemmi.read_mtz_file(str(with_flags)).column_with_label("R-free-flags")
         assert flags.type == "I"
-        assert set(np.unique(flags.array)) <= {0.0, 1.0}
-        # The requested fraction (1 = test). The flagged count is round(0.25 * n), so
-        # the mean can differ from 0.25 by at most half a reflection.
-        assert flags.array.mean() == pytest.approx(0.25, abs=0.5 / len(hkl))
+        assert set(np.unique(flags.array)) == {0.0, 1.0}
+        # The same draw as rfree_flags, which tests/synthetic/test_synthetic_utils.py
+        # pins to reciprocalspaceship's.
+        _, expected = rfree_flags(len(flags.array), 0.25, seed=7)
+        np.testing.assert_array_equal(flags.array, expected)
+
+    def test_ccp4_convention_writes_the_rs_column_name(self, tmp_path):
+        """Under the CCP4 convention the flag column is ``FreeR_flag`` with 0 = test."""
+        hkl = self.reflections()
+        path = tmp_path / "ccp4.mtz"
+        save_mtz(
+            dataset_from_bragg_amplitudes(
+                hkl,
+                np.ones(len(hkl), dtype=np.complex64),
+                gemmi.UnitCell(30.0, 30.0, 30.0, 90.0, 90.0, 90.0),
+                gemmi.SpaceGroup("P 1"),
+                test_fraction=0.25,
+                seed=7,
+                ccp4_convention=True,
+            ),
+            path,
+            "structure factors",
+        )
+        flags = gemmi.read_mtz_file(str(path)).column_with_label("FreeR_flag")
+        assert flags.type == "I"
+        assert set(np.unique(flags.array)) == {0.0, 1.0}
+        _, expected = rfree_flags(len(flags.array), 0.25, seed=7, ccp4_convention=True)
+        np.testing.assert_array_equal(flags.array, expected)
 
     def test_intensity_type_survives_an_unconventional_label(self, tmp_path):
         """The intensity type is J for any label; rs alone would infer R for this one."""

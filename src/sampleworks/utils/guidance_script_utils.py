@@ -4,16 +4,25 @@ import json
 import os
 import pickle
 import traceback
+from collections import Counter
 from datetime import datetime
 from importlib.resources import files
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import numpy as np
 import torch
 from atomworks.io.transforms.atom_array import ensure_atom_array_stack
-from biotite.structure import AtomArray, AtomArrayStack, stack
-from biotite.structure.io import save_structure
+from biotite.database.rcsb import fetch
+from biotite.structure import (
+    AtomArray,
+    AtomArrayStack,
+    get_residue_positions,
+    get_residue_starts,
+    stack,
+)
+from biotite.structure.io.pdbx import CIFFile, set_structure
 from loguru import logger
 
 from sampleworks.core.rewards.config import build_reward
@@ -32,7 +41,13 @@ from sampleworks.eval.occupancy_utils import (
     rcsb_id_from_protein_name,
 )
 from sampleworks.utils.atom_array_utils import parse_structure
-from sampleworks.utils.cif_utils import add_category_to_cif, resolve_mixed_hetatm_atom_altlocs
+from sampleworks.utils.atom_reconciler import AtomReconciler
+from sampleworks.utils.cif_utils import (
+    add_category_to_cif,
+    carry_polymer_entity_categories,
+    renumber_atom_site_ids,
+    resolve_mixed_hetatm_atom_altlocs,
+)
 from sampleworks.utils.guidance_constants import (
     GuidanceType,
     StructurePredictor,
@@ -78,6 +93,44 @@ except (ImportError, OSError):  # OSError can arise from a missing model_params 
 from sampleworks.utils.torch_utils import try_gpu
 
 
+_RCSB_CACHE = Path("~/.sampleworks/rcsb").expanduser()
+
+
+def _load_reference_cif(protein: str) -> CIFFile | None:
+    """Fetch and parse one deposited CIF for output metadata carry.
+
+    Parameters
+    ----------
+    protein : str
+        Protein name: an RCSB id followed only by occupancy tokens, as
+        ``rcsb_id_from_protein_name`` accepts (e.g. ``"1VME_0.5occA_0.5occB"``).
+
+    Returns
+    -------
+    CIFFile | None
+        Parsed deposited CIF from the local RCSB cache, or ``None`` when the name is not an
+        RCSB id. The cache entry is populated atomically, so concurrent first-time fetches
+        cannot read a truncated file.
+    """
+    rcsb_id = rcsb_id_from_protein_name(protein)
+    if rcsb_id is None:
+        logger.warning(
+            f"Writing outputs without polymer entity categories: {protein!r} is not an RCSB id"
+        )
+        return None
+    rcsb_id = rcsb_id.lower()
+    _RCSB_CACHE.mkdir(parents=True, exist_ok=True)
+    cached_path = _RCSB_CACHE / f"{rcsb_id}.cif"
+    if not cached_path.is_file():
+        # Grid-search workers share the cache directory. Fetching straight into it lets one
+        # worker read another's partially written entry, so stage the download in a private
+        # directory on the same filesystem and move it into place atomically.
+        with TemporaryDirectory(dir=_RCSB_CACHE) as staging_dir:
+            fetched_path = fetch(rcsb_id, format="cif", target_path=staging_dir)
+            os.replace(fetched_path, cached_path)
+    return CIFFile.read(str(cached_path))
+
+
 def save_trajectory(
     scaler_type: str,
     trajectory,
@@ -85,6 +138,7 @@ def save_trajectory(
     output_dir,
     subdir_name,
     save_every=10,
+    reference_cif: CIFFile | None = None,
 ):
     """Dispatch trajectory serialization to the handler for the selected scaler."""
     # IT-opt wiring (changed): this condition was `== GuidanceType.PURE_GUIDANCE`; we widened it to
@@ -92,9 +146,11 @@ def save_trajectory(
     # its final sampling pass emits a trajectory with the same [ensemble, atoms, 3] layout that
     # _save_trajectory already expects, so no separate writer is needed for it.
     if scaler_type in (GuidanceType.PURE_GUIDANCE, GuidanceType.LATENT_OPT):
-        _save_trajectory(trajectory, atom_array, output_dir, subdir_name, save_every)
+        _save_trajectory(trajectory, atom_array, output_dir, subdir_name, save_every, reference_cif)
     elif scaler_type == GuidanceType.FK_STEERING:
-        _save_fk_steering_trajectory(trajectory, atom_array, output_dir, subdir_name, save_every)
+        _save_fk_steering_trajectory(
+            trajectory, atom_array, output_dir, subdir_name, save_every, reference_cif
+        )
     else:  # we shouldn't ever get here, since we can't have run guidance w/o this!
         raise ValueError(f"Invalid scaler type: {scaler_type}")
 
@@ -119,7 +175,128 @@ def _write_coords_into_array(
     array_copy.coord = coords
 
 
-def _save_trajectory(trajectory, atom_array, output_dir, subdir_name, save_every):
+def relabel_model_residues(
+    model_atom_array: AtomArray,
+    struct_atom_array: AtomArray,
+    reconciler: AtomReconciler,
+) -> AtomArray:
+    """Give the model topology the input's residue labels and the B-factors the reward scored.
+
+    Chain, residue number and insertion code come from the input for every model residue with a
+    matched atom. Residues the input lacks (termini or gaps predicted under a sequence override)
+    take the chain and numbering of the nearest matched residue in the same model chain,
+    continuing consecutively. Everything else (atoms, order, names, elements, occupancy) stays
+    the model's, except ``b_factor`` on matched atoms, which is the input's, as in
+    ``SampleworksProcessedStructure.to_reward_inputs``.
+
+    Parameters
+    ----------
+    model_atom_array : AtomArray
+        Model-space topology, ``n_model`` atoms.
+    struct_atom_array : AtomArray
+        Filtered input topology the reconciler was built against, ``n_struct`` atoms.
+    reconciler : AtomReconciler
+        Mapping between the two.
+
+    Returns
+    -------
+    AtomArray
+        Relabeled copy of ``model_atom_array``.
+    """
+    model_idx = reconciler.model_indices.cpu().numpy()  # (n_common,)
+    struct_idx = reconciler.struct_indices.cpu().numpy()  # (n_common,)
+    starts = get_residue_starts(model_atom_array)  # (n_residues,)
+    residue_of_atom = get_residue_positions(  # (n_model,)
+        model_atom_array, np.arange(len(model_atom_array))
+    )
+    residue_chain = model_atom_array.chain_id[starts]  # (n_residues,)
+    matched = residue_of_atom[model_idx]  # (n_common,) residue of each common atom
+
+    # (n_residues,) per-residue model -> input res_id offset, chain and insertion code
+    offset = np.zeros(len(starts), dtype=int)
+    offset[matched] = struct_atom_array.res_id[struct_idx] - model_atom_array.res_id[model_idx]
+    chain = residue_chain.copy()
+    chain[matched] = struct_atom_array.chain_id[struct_idx]
+    ins_code = np.full(len(starts), "", dtype=model_atom_array.ins_code.dtype)
+    ins_code[matched] = struct_atom_array.ins_code[struct_idx]
+
+    # Residues the input lacks (chain ends, or gaps the model built) get residue numbers starting
+    # from their neighbor. Those numbers can clash with the input's own numbers, and such a residue
+    # can take another input chain's label. The duplicate-label warning below reports these cases.
+    for model_chain in np.unique(residue_chain):
+        residues = np.flatnonzero(residue_chain == model_chain)
+        known = residues[np.isin(residues, matched)]
+        if known.size == 0:
+            continue  # chain absent from the input: keep the model's labels
+        # Unmatched residues follow the nearest matched residue before them (else after).
+        nearest = known[np.clip(np.searchsorted(known, residues, side="right") - 1, 0, None)]
+        offset[residues] = offset[nearest]
+        chain[residues] = chain[nearest]
+
+    relabeled = model_atom_array.copy()
+    relabeled.chain_id = chain[residue_of_atom]
+    relabeled.res_id = (model_atom_array.res_id[starts] + offset)[residue_of_atom]
+    relabeled.ins_code = ins_code[residue_of_atom]
+    relabeled.b_factor[model_idx] = struct_atom_array.b_factor[struct_idx]
+    residue_labels = list(
+        zip(
+            chain.tolist(),
+            (model_atom_array.res_id[starts] + offset).tolist(),
+            ins_code.tolist(),
+        )
+    )
+    duplicates = [label for label, count in Counter(residue_labels).items() if count > 1]
+    if duplicates:
+        logger.warning(
+            f"Relabeled output model has duplicate residue labels {duplicates}. These residues "
+            "will be merged together when the CIF is read back into an AtomArray if they are "
+            "adjacent and share a residue name. Otherwise they stay separate but share residue "
+            "name and number labels."
+        )
+    return relabeled
+
+
+def _write_structure_cif(
+    output_path: Path,
+    atom_array: AtomArray | AtomArrayStack,
+    reference_cif: CIFFile | None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Write a structure with unique atom IDs and available entity metadata.
+
+    Parameters
+    ----------
+    output_path : Path
+        Destination CIF path.
+    atom_array : AtomArray | AtomArrayStack
+        Single structure or multi-model ensemble to serialize.
+    reference_cif : CIFFile | None
+        Deposited CIF used to carry polymer entity categories when available.
+    metadata : dict[str, Any] | None
+        Optional Sampleworks metadata added to the output CIF.
+    """
+    cif_file = CIFFile()
+    set_structure(cif_file, atom_array)
+    renumber_atom_site_ids(cif_file)
+    if metadata is not None:
+        add_category_to_cif(cif_file, metadata, category_name="sampleworks")
+    if reference_cif is not None:
+        try:
+            carry_polymer_entity_categories(cif_file, reference_cif)
+        except Exception as error:
+            # Entity metadata is best effort: never lose a completed run's coordinates over it.
+            logger.warning(f"Writing {output_path} without polymer entity categories: {error}")
+    cif_file.write(str(output_path))
+
+
+def _save_trajectory(
+    trajectory,
+    atom_array,
+    output_dir,
+    subdir_name,
+    save_every,
+    reference_cif: CIFFile | None = None,
+):
     """Save a pure-guidance coordinate trajectory as sampled multi-model CIFs."""
     output_dir = Path(output_dir / "trajectory" / subdir_name)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -139,10 +316,17 @@ def _save_trajectory(trajectory, atom_array, output_dir, subdir_name, save_every
         array_copy = atom_array.copy()
         array_copy = stack([array_copy] * ensemble_size)
         _write_coords_into_array(array_copy, coords.detach().numpy())
-        save_structure(str(output_dir / f"trajectory_{i}.cif"), array_copy)
+        _write_structure_cif(output_dir / f"trajectory_{i}.cif", array_copy, reference_cif)
 
 
-def _save_fk_steering_trajectory(trajectory, atom_array, output_dir, subdir_name, save_every):
+def _save_fk_steering_trajectory(
+    trajectory,
+    atom_array,
+    output_dir,
+    subdir_name,
+    save_every,
+    reference_cif: CIFFile | None = None,
+):
     """Save the first-particle FK-steering trajectory as sampled multi-model CIFs."""
     output_dir = Path(output_dir / "trajectory" / subdir_name)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -164,7 +348,7 @@ def _save_fk_steering_trajectory(trajectory, atom_array, output_dir, subdir_name
         # we save only the first ensemble out of n_particles, since saving
         # each particle at every step would clog trajectory saving
         _write_coords_into_array(array_copy, coords[0].detach().numpy())
-        save_structure(str(output_dir / f"trajectory_{i}.cif"), array_copy)
+        _write_structure_cif(output_dir / f"trajectory_{i}.cif", array_copy, reference_cif)
 
 
 def save_losses(losses, output_dir):
@@ -314,6 +498,7 @@ def save_everything(
     scaler_type: str,
     final_state: torch.Tensor | None = None,
     model_atom_array: AtomArray | None = None,
+    reference_cif: CIFFile | None = None,
 ) -> None:
     """Save everything: refined structure/ensemble CIF, trajectories, and losses.
 
@@ -346,12 +531,21 @@ def save_everything(
     model_atom_array : AtomArray | None
         Optional model-space atom template. When provided (mismatch runs),
         this template is used for final structure and trajectory saving.
+    reference_cif : CIFFile | None
+        Optional preloaded deposited CIF. When omitted, it is fetched from RCSB.
     """
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Saving results")
-    from biotite.structure.io.pdbx import CIFFile, set_structure
+    if reference_cif is None:
+        try:
+            reference_cif = _load_reference_cif(args.protein)
+        except Exception as error:
+            logger.warning(
+                f"Writing outputs without polymer entity categories because the deposited "
+                f"CIF for {args.protein!r} could not be loaded: {error}"
+            )
 
     base_atom_array = ensure_atom_array_stack(refined_structure["asym_unit"])[0]
 
@@ -371,11 +565,12 @@ def save_everything(
         atom_array = base_atom_array
 
     metadata = args.as_dict()
-
-    final_structure = CIFFile()
-    set_structure(final_structure, atom_array)
-    add_category_to_cif(final_structure, metadata, category_name="sampleworks")
-    final_structure.write(str(output_dir / "refined.cif"))
+    _write_structure_cif(
+        output_dir / "refined.cif",
+        atom_array,
+        reference_cif,
+        metadata,
+    )
 
     # job_metadata.json (config + JobResult) is written by run_guidance after this returns;
     # don't duplicate it here.
@@ -388,6 +583,7 @@ def save_everything(
         output_dir,
         "denoised",
         save_every=10,
+        reference_cif=reference_cif,
     )
     save_trajectory(
         scaler_type,
@@ -396,6 +592,7 @@ def save_everything(
         output_dir,
         "next_step",
         save_every=10,
+        reference_cif=reference_cif,
     )
     save_losses(losses, output_dir)
 
@@ -718,7 +915,12 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
         logger.error(f"Unknown guidance type: {guidance_type}")
         raise TypeError("Unknown guidance type!")
 
-    model_atom_array = result.metadata.get("model_atom_array") if result.metadata else None
+    metadata = result.metadata or {}
+    model_atom_array = metadata.get("model_atom_array")
+    if model_atom_array is not None:
+        model_atom_array = relabel_model_residues(
+            model_atom_array, metadata["struct_atom_array"], metadata["reconciler"]
+        )
 
     save_everything(
         args,

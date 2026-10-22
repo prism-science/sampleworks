@@ -22,6 +22,29 @@ from sampleworks.utils.frame_transforms import (
 )
 
 
+def _normalize_methionine_chalcogen_names(atom_array: AtomArray) -> AtomArray:
+    """Return an array with equivalent MET/MSE chalcogen names normalized.
+
+    Parameters
+    ----------
+    atom_array
+        Atom array whose methionine chalcogen atom names may need normalization.
+
+    Returns
+    -------
+    AtomArray
+        The original array when no MSE selenium is present, otherwise a copy
+        where MSE ``SE`` atom names are normalized to the MET name ``SD``.
+    """
+    mse_selenium = (atom_array.res_name == "MSE") & (atom_array.atom_name == "SE")
+    if not np.any(mse_selenium):
+        return atom_array
+
+    normalized = atom_array.copy()
+    normalized.atom_name[mse_selenium] = "SD"
+    return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class AtomReconciler:
     """Bidirectional adapter between model and structure atom spaces.
@@ -40,7 +63,8 @@ class AtomReconciler:
     ----------
     has_mismatch : bool
         Whether reconciliation is required (count mismatch, order mismatch,
-        or subset mismatch).
+        subset mismatch, or label mismatch where chain_id, res_id, res_name,
+        atom_name or element differ).
     model_indices : Tensor, shape ``(n_common,)``
         Indices into the model array for the common atom subset.
     struct_indices : Tensor, shape ``(n_common,)``
@@ -82,9 +106,11 @@ class AtomReconciler:
         -------
         AtomReconciler
         """
+        model_array_for_matching = _normalize_methionine_chalcogen_names(model_array)
+        struct_array_for_matching = _normalize_methionine_chalcogen_names(struct_array)
         _, (m_idx, s_idx) = filter_to_common_atoms(
-            model_array,
-            struct_array,
+            model_array_for_matching,
+            struct_array_for_matching,
             normalize_ids=True,
             return_indices=True,
         )
@@ -93,8 +119,13 @@ class AtomReconciler:
         n_struct = len(struct_array)
         full_coverage = n_model == n_struct == len(m_idx)
         same_indexing = np.array_equal(m_idx, s_idx)
+        identity_annotations = ("chain_id", "res_id", "res_name", "atom_name", "element")
+        same_identity = all(
+            np.array_equal(model_array.get_annotation(name), struct_array.get_annotation(name))
+            for name in identity_annotations
+        )
 
-        if full_coverage and same_indexing:
+        if full_coverage and same_indexing and same_identity:
             return cls.identity(n_model)
 
         return cls(

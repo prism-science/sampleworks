@@ -27,6 +27,7 @@ from sampleworks.synthetic.synthetic_utils import (
     BatchRowForMTZ,
     load_batch_csv,
     load_structure_for_synthetic_reward,
+    resolve_crystal_metadata,
     resolve_mtz_column,
     resolve_parallel_jobs,
 )
@@ -277,14 +278,7 @@ def _process_single_row(
 
     # Convert to gemmi for SFcalculator
     try:
-        unit_cell = row.unit_cell
-        space_group = row.space_group
-        if unit_cell is None or space_group is None:
-            gemmi_meta = gemmi.read_structure(str(structure_path))
-            if unit_cell is None:
-                unit_cell = gemmi_meta.cell
-            if space_group is None:
-                space_group = gemmi_meta.spacegroup_hm
+        unit_cell, space_group = resolve_crystal_metadata(row, structure_path)
         gemmi_structure = atomarray_to_gemmi(atom_array, unit_cell, space_group)
     except Exception as e:
         logger.error(

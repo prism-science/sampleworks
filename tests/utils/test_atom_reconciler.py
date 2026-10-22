@@ -110,6 +110,43 @@ class TestFromArrays:
         with pytest.raises(RuntimeError, match="No common atoms"):
             AtomReconciler.from_arrays(model, struct)
 
+    @pytest.mark.parametrize(
+        "chain_ids,res_ids",
+        [(["B"] * 4, [0, 0, 1, 1]), (["A"] * 4, [365, 365, 366, 366])],
+        ids=["chain_only", "res_id_only"],
+    )
+    def test_label_only_difference_requires_reconciliation(self, chain_ids, res_ids):
+        model = build_test_atom_array(
+            chain_ids=["A"] * 4, res_ids=[0, 0, 1, 1], atom_names=["N", "CA"] * 2
+        )
+        struct = build_test_atom_array(
+            chain_ids=chain_ids, res_ids=res_ids, atom_names=["N", "CA"] * 2
+        )
+
+        rec = AtomReconciler.from_arrays(model, struct)
+
+        assert rec.n_common == len(model) == len(struct)
+        # Indices come back id-sorted, so compare them to each other rather than to a range.
+        assert rec.model_indices.tolist() == rec.struct_indices.tolist()
+        assert rec.has_mismatch
+
+    def test_mse_se_maps_to_met_sd(self):
+        model = build_test_atom_array(chain_ids=["A", "A"], res_ids=[0, 0], atom_names=["N", "SD"])
+        model.res_name[:] = "MET"
+        model.element[:] = ["N", "S"]
+        struct = build_test_atom_array(
+            chain_ids=["A", "A"], res_ids=[13, 13], atom_names=["N", "SE"]
+        )
+        struct.res_name[:] = "MSE"
+        struct.element[:] = ["N", "Se"]
+
+        rec = AtomReconciler.from_arrays(model, struct)
+
+        assert rec.has_mismatch
+        assert rec.n_common == len(model) == len(struct)
+        assert rec.model_indices.tolist() == [0, 1]
+        assert rec.struct_indices.tolist() == [0, 1]
+
 
 class TestCoordinateTranslation:
     """Round-trip and index correctness for struct → model mapping and alignment."""

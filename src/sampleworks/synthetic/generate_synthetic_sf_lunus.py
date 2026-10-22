@@ -43,7 +43,9 @@ from sampleworks.synthetic.synthetic_utils import (
     BatchRowForMTZ,
     load_batch_csv,
     load_structure_for_synthetic_reward,
+    resolve_crystal_metadata,
     resolve_parallel_jobs,
+    rfree_flags,
 )
 from sampleworks.utils.atom_array_utils import (
     apply_selection,
@@ -452,8 +454,7 @@ def dataset_from_bragg_amplitudes(
     seed
         Seed for reproducible R-free assignment.
     ccp4_convention
-        R-free convention: False (default) is Phenix (1 = test, 0 = work), True
-        is CCP4 (0 = test, 1 = work).
+        R-free convention; see :func:`rfree_flags`.
 
     Returns
     -------
@@ -467,10 +468,8 @@ def dataset_from_bragg_amplitudes(
         f"PHIF{label}": ("P", np.rad2deg(np.angle(structure_factors))),
     }
     if test_fraction > 0:
-        n_test = int(round(test_fraction * len(hkl)))
-        test = np.zeros(len(hkl), dtype=bool)
-        test[np.random.default_rng(seed).choice(len(hkl), n_test, replace=False)] = True
-        columns["R-free-flags"] = ("I", np.where(test == (not ccp4_convention), 1.0, 0.0))
+        label, flags = rfree_flags(len(hkl), test_fraction, seed, ccp4_convention)
+        columns[label] = ("I", flags)
 
     mtz = _new_mtz(unit_cell, space_group)
     _set_columns(mtz, hkl, columns)
@@ -492,21 +491,6 @@ def save_mtz(mtz: gemmi.Mtz, output_path: Path, description: str) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     mtz.write_to_file(str(output_path))
     logger.info(f"Saved {description} to {output_path}")
-
-
-def _resolve_crystal_metadata(
-    row: BatchRowForMTZ, structure_path: Path
-) -> tuple[gemmi.UnitCell, gemmi.SpaceGroup]:
-    """Resolve cell and space group, preferring per-row overrides over the file."""
-    unit_cell = row.unit_cell
-    space_group_hm = row.space_group
-    if unit_cell is None or space_group_hm is None:
-        meta = gemmi.read_structure(str(structure_path))
-        if unit_cell is None:
-            unit_cell = meta.cell
-        if space_group_hm is None:
-            space_group_hm = meta.spacegroup_hm
-    return unit_cell, gemmi.SpaceGroup(space_group_hm)
 
 
 def _process_single_row(
@@ -555,7 +539,8 @@ def _process_single_row(
             strip_ligands=strip_ligands,
             altlocs_as_models=altlocs_as_models,
         )
-        unit_cell, space_group = _resolve_crystal_metadata(row, structure_path)
+        unit_cell, space_group_hm = resolve_crystal_metadata(row, structure_path)
+        space_group = gemmi.SpaceGroup(space_group_hm)
     except Exception as e:
         logger.error(
             f"Failed to load {row.filename} ({type(e).__name__}): {e}\n"

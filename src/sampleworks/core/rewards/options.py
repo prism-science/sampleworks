@@ -116,6 +116,58 @@ class StructureFactorOptions:
     )
 
 
+@dataclass(frozen=True)
+class DiffuseBraggOptions:
+    """Options for the combined Bragg + diffuse reward.
+
+    See :class:`~sampleworks.core.rewards.diffuse_bragg.DiffuseBraggRewardFunction`.
+    """
+
+    bragg_target: str | None = opt(
+        None, help="MTZ of target amplitudes (required unless --bragg-weight is 0)", path=True
+    )
+    diffuse_target: str | None = opt(
+        None,
+        help="MTZ of target diffuse intensities (required unless --bragg-weight is 1)",
+        path=True,
+    )
+    bragg_weight: float = opt(0.5, help="Convex mixture: 1.0 scores Bragg alone, 0.0 diffuse alone")
+    bragg_column: str | None = opt(
+        None, help="Amplitude column in the Bragg MTZ (default: auto-detect)"
+    )
+    diffuse_column: str | None = opt(
+        None, help="Intensity column in the diffuse MTZ (default: auto-detect)"
+    )
+    resolution: float | None = opt(
+        None, help="High-resolution limit (dmin) in Angstroms (default: the targets' own)"
+    )
+    normalize: bool = opt(True, help="Normalize each term by its target's squared norm")
+    fit_scale: bool = opt(True, help="Fit and detach an overall scale before the residual")
+    bulk_solvent: str = opt(
+        "off",
+        help="Bulk-solvent treatment: off (score |Fprotein|) or per_conformer (a mask from "
+        "each configuration's own density)",
+        choices=("off", "per_conformer"),
+    )
+    solvent_cutoff: float | None = opt(
+        None,
+        help="Density below which a voxel is solvent, e/A^3 (default: calibrated to the "
+        "solvent fraction of gemmi's geometric mask)",
+    )
+    solvent_taper_width: float = opt(
+        0.10, help="Width of the solvent mask's transition, e/A^3, for an explicit cutoff"
+    )
+    exclude_free_reflections: bool = opt(
+        False, help="Drop the R-free test set from the Bragg target"
+    )
+    free_flag_column: str | None = opt(
+        None, help="R-free flag column in the Bragg MTZ (default: its sole integer column)"
+    )
+    test_set_value: int = opt(
+        1, help="Flag value marking the test set: 1 (Phenix, default) or 0 (CCP4)"
+    )
+
+
 def option_type(options_cls: type, name: str) -> Any:
     """Return the declared type of one option, with ``None`` stripped from unions.
 
