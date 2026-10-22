@@ -116,8 +116,11 @@ def _build_job(model: StructurePredictor) -> JobConfig:
     return JobConfig(
         protein="protein",
         structure_path="/tmp/structure.cif",
-        density_path="/tmp/density.mrc",
-        resolution=2.0,
+        reward_config={
+            "real_space_density": {
+                "reward_options": {"density": "/tmp/density.mrc", "resolution": 2.0}
+            }
+        },
         model_name=model,
         scaler=GuidanceType.PURE_GUIDANCE,
         ensemble_size=1,

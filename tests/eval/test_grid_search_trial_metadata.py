@@ -39,6 +39,22 @@ def test_scan_grid_search_results_prefers_job_metadata(tmp_path) -> None:
     assert trial.input_structure_path == Path("/inputs/1abc.cif")
     assert trial.density_path == Path("/inputs/1abc.ccp4")
     assert trial.resolution == 1.8
+    assert trial.reward_type == "real_space_density"
+
+
+def test_scan_records_the_reward_a_trial_was_guided_with(tmp_path) -> None:
+    """A structure-factor trial is told apart from a density trial by its metadata."""
+    trial_dir = tmp_path / "1ABC_1.0occA" / "boltz2_MD" / "pure_guidance" / "ens8_gw0.1"
+    trial_dir.mkdir(parents=True)
+    (trial_dir / "refined.cif").write_text("data_test")
+    (trial_dir / "job_metadata.json").write_text(
+        json.dumps({"reward_type": "structure_factor", "density": None, "resolution": None})
+    )
+
+    (trial,) = scan_grid_search_results(trial_dir, current_depth=4, target_depth=4)
+
+    assert trial.reward_type == "structure_factor"
+    assert trial.density_path is None
 
 
 def test_load_job_metadata_rejects_non_object_json(tmp_path) -> None:

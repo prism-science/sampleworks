@@ -366,19 +366,7 @@ class GuidanceConfig:
         _GUIDANCE_ARG_ADDERS[guidance_type](parser)
 
         args = parser.parse_args(argv)
-
-        # The file names its own rewards; taking a --reward-type alongside it would
-        # mean silently ignoring one of the two. --reward-type always has a default,
-        # so "was it passed" has to be answered from the command line itself.
-        given = argv if argv is not None else sys.argv[1:]
-        if args.reward_config is not None and any(
-            token.split("=", 1)[0] == "--reward-type" for token in given
-        ):
-            parser.error(
-                "--reward-type and --reward-config are alternatives: the configuration "
-                "file already names the rewards it configures."
-            )
-        reward_config = cls._reward_config_from_args(parser, args)
+        reward_config = cls._reward_config_from_args(parser, args, argv)
 
         if model_preset and args.model_name != model_name:
             parser.error(
@@ -421,7 +409,7 @@ class GuidanceConfig:
 
     @staticmethod
     def _reward_config_from_args(
-        parser: argparse.ArgumentParser, args: argparse.Namespace
+        parser: argparse.ArgumentParser, args: argparse.Namespace, argv: list[str] | None
     ) -> RewardConfig:
         """Resolve the run's rewards from either CLI surface.
 
@@ -431,21 +419,15 @@ class GuidanceConfig:
             Parser to report user errors through, so they read as usage errors.
         args : argparse.Namespace
             Parsed arguments.
+        argv : list[str] or None
+            The arguments ``args`` was parsed from; ``None`` means ``sys.argv[1:]``.
 
         Returns
         -------
         RewardConfig
             The rewards this run scores against.
         """
-        if args.reward_config is None:
-            config = RewardConfig.single(
-                args.reward_type, **reward_options_from_args(args)
-            ).with_effective_options()
-        else:
-            try:
-                config = RewardConfig.from_file(args.reward_config).with_effective_options()
-            except (OSError, ValueError) as error:
-                parser.error(f"--reward-config {args.reward_config}: {error}")
+        config = reward_config_from_args(parser, args, argv).with_effective_options()
 
         # Report a missing input as a usage error now, rather than after a model
         # has been loaded. The reward builders check this too.
@@ -506,6 +488,11 @@ class GuidanceConfig:
         self.resolution = density_options.get("resolution")
         self.loss_order = density_options.get("loss_order", 2)
         self.em = density_options.get("em", False)
+
+    @property
+    def reward_type(self) -> str:
+        """Comma-separated names of the rewards this run scores against."""
+        return ",".join(self.reward_config)
 
     def resolved_reward_config(self) -> RewardConfig:
         """Return this run's rewards as a validated :class:`RewardConfig`.
@@ -571,7 +558,7 @@ class GuidanceConfig:
         output["structure"] = _remap_container_path(str(self.structure))
         output["output_dir"] = _remap_container_path(str(self.output_dir))
         output["log_path"] = _remap_container_path(str(self.log_path))
-        output["reward_type"] = ",".join(self.reward_config)
+        output["reward_type"] = self.reward_type
         output["reward_config"] = json.dumps(
             self.resolved_reward_config().remapped_paths(_remap_container_path)
         )
@@ -617,6 +604,48 @@ def add_reward_selection_args(parser: argparse.ArgumentParser):
         "weight and reward_options. Takes the place of --reward-type and the "
         "per-reward flags, and is the only way to combine rewards.",
     )
+
+
+def reward_config_from_args(
+    parser: argparse.ArgumentParser, args: argparse.Namespace, argv: list[str] | None
+) -> RewardConfig:
+    """Build the rewards a command line selected, from ``--reward-type`` or ``--reward-config``.
+
+    Only what was given is recorded: defaults are not materialized and required
+    options are not checked, so a grid search can still fill in per-protein data.
+
+    Parameters
+    ----------
+    parser : argparse.ArgumentParser
+        Parser to report user errors through, so they read as usage errors.
+    args : argparse.Namespace
+        Arguments parsed by a parser carrying :func:`add_reward_selection_args`.
+    argv : list[str] or None
+        The arguments ``args`` was parsed from; ``None`` means ``sys.argv[1:]``.
+
+    Returns
+    -------
+    RewardConfig
+        The selected rewards and the options given for them.
+    """
+    # The file names its own rewards; taking a --reward-type alongside it would
+    # mean silently ignoring one of the two. --reward-type always has a default,
+    # so "was it passed" has to be answered from the command line itself.
+    given = argv if argv is not None else sys.argv[1:]
+    if args.reward_config is not None and any(
+        token.split("=", 1)[0] == "--reward-type" for token in given
+    ):
+        parser.error(
+            "--reward-type and --reward-config are alternatives: the configuration "
+            "file already names the rewards it configures."
+        )
+
+    if args.reward_config is None:
+        return RewardConfig.single(args.reward_type, **reward_options_from_args(args))
+    try:
+        return RewardConfig.from_file(args.reward_config)
+    except (OSError, ValueError) as error:
+        parser.error(f"--reward-config {args.reward_config}: {error}")
 
 
 def add_reward_args(parser: argparse.ArgumentParser, reward: Rewards | str):
@@ -964,8 +993,9 @@ class JobConfig:
 
     protein: str
     structure_path: Path | str
-    density_path: Path | str
-    resolution: float
+    # {reward: {weight, reward_options}} with this protein's data filled in; see
+    # GuidanceConfig.reward_config for why it is a plain mapping.
+    reward_config: dict[str, Any]
     model_name: str
     scaler: str
     ensemble_size: int
@@ -995,6 +1025,9 @@ class JobResult:
     finished_at: str
     log_path: str
     output_dir: str
+    # Comma-separated reward names. Results written before rewards were selectable
+    # were all density runs.
+    reward_type: str = DEFAULT_REWARD_TYPE.value
 
     def as_dict(self) -> dict[str, Any]:
         """Return a dictionary representation of the job result.

@@ -408,9 +408,9 @@ def main(args: argparse.Namespace):
         logger.info("Results Summary:")
         logger.info(df.drop(drop_cols, axis=1).head(20).to_string())  # noqa
 
-        logger.info("\n\nSummary Statistics by Protein and Scaler:")
+        logger.info("\n\nSummary Statistics by Protein, Scaler, and Reward:")
         summary = (
-            df.groupby(["protein", "scaler"])["rscc"]
+            df.groupby(["protein", "scaler", "reward_type"])["rscc"]
             .agg(["count", "mean", "std", "min", "max"])
             .round(4)
         )

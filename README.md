@@ -197,9 +197,11 @@ pixi run -e boltz python run_grid_search.py \
 
 **`proteins.csv` format**
 
-Required columns are `name`, `structure`, `density`, and `resolution`. Supported density map formats: `.ccp4`, `.mrc`, `.map` (not MTZ or SF-CIF yet).
-The optional `sequence` column overrides the protein sequence, for example for cases where the structure is missing full sequence metadata and there are missing termini or gaps. Give either a one-letter
+Required columns are `name` and `structure`. The optional `sequence` column overrides the protein sequence, for example for cases where the structure is missing full sequence metadata and there are missing termini or gaps. Give either a one-letter
 amino-acid string or a path to a single-record FASTA file (relative paths resolve against the CSV's directory). Leave it empty to use the structure's own sequence.
+
+Every other column is named after a reward option and holds that protein's value for it. The
+default `real_space_density` reward needs `density` (`.ccp4`, `.mrc`, `.map`) and `resolution`:
 
 ```csv
 name,structure,density,resolution,sequence
@@ -207,11 +209,22 @@ name,structure,density,resolution,sequence
 2xyz,/data/structures/2xyz.cif,/data/maps/2xyz.mrc,1.8,sequences/2xyz.fasta
 ```
 
+**Choosing the reward.** The grid search takes the same `--reward-type` / `--reward-config`
+as `sampleworks-guidance` (see [Rewards](#rewards)). With
+`--reward-type structure_factor` the CSV needs an `mtzfile` column; with `diffuse_bragg`,
+`bragg_target` and/or `diffuse_target`. A column feeds every selected reward that has an option of
+that name and is ignored by the others, so one CSV with `density`, `mtzfile` and `resolution`
+columns serves density, structure-factor, and combined sweeps. Option flags on the command line
+(e.g. `--bulk-solvent combined`) and values in a `--reward-config` file apply to every protein and
+win over the CSV. A protein missing a required option fails the grid before any job is queued.
+
 **Key arguments:**
 
 | Argument             | Description                                                | Default                     |
 | -------------------- | ---------------------------------------------------------- | --------------------------- |
-| `--proteins`         | CSV of name/structure/density/resolution(/sequence)        | required                    |
+| `--proteins`         | CSV of name/structure(/sequence) plus reward-option columns | required                    |
+| `--reward-type`      | Reward to guide with; its option flags become available    | `real_space_density`        |
+| `--reward-config`    | Reward configuration file, to combine rewards              | none                        |
 | `--models`           | Model to run. One of `boltz1`, `boltz2`, `protenix`, `rf3` | required                    |
 | `--scalers`          | Guidance method(s) to sweep                                | `pure_guidance fk_steering` |
 | `--ensemble-sizes`   | Space-separated values, e.g. `"1 4"`                       | `"1 2 4 8"`                 |
@@ -223,7 +236,7 @@ name,structure,density,resolution,sequence
 | `--only-failed`      | Re-run only failed jobs                                    | off                         |
 | `--only-missing`     | Run only jobs not yet started                              | off                         |
 
-Output layout: `grid_search_results/<protein>/<model>[_<method>]/<scaler>/ens<N>_gw<W>/`
+Output layout: `grid_search_results/<protein>/<model>[_<method>]/<scaler>/ens<N>_gw<W>[_<rewards>]/`
 
 > **Note**: Jobs are skipped if a `refined.cif` file already exists in the output directory. Some flags (e.g., `--use-tweedie`, `--gradient-normalization`) are not reflected in the directory structure, so changing them alone won't trigger a re-run. Use `--force-all` to re-run all jobs regardless. This is under active development and will likely change soon.
 
