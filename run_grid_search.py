@@ -18,12 +18,17 @@ from threading import Lock
 from typing import Any
 
 from loguru import logger as log
+from sampleworks.core.rewards.config import RewardConfig
 from sampleworks.utils.guidance_constants import GuidanceType, StructurePredictor
 from sampleworks.utils.guidance_script_arguments import (
     add_latent_opt_args,
+    add_reward_args,
+    add_reward_selection_args,
+    DEFAULT_REWARD_TYPE,
     GuidanceConfig,
     JobConfig,
     JobResult,
+    reward_config_from_args,
 )
 from sampleworks.utils.protein_input import ProteinInput
 
@@ -40,6 +45,8 @@ class GridSearchConfig:
     method: str
     proteins_file: str
     output_dir: str
+    # The rewards as selected on the command line, before per-protein data is filled in.
+    reward_config: dict[str, Any]
 
 
 def get_job_status(job: JobConfig) -> str:
@@ -208,21 +215,20 @@ def build_args_for_process_pool(
     guidance_config = GuidanceConfig(
         protein=job.protein,
         structure=job.structure_path,
-        density=job.density_path,
+        density=None,  # mirrored from the reward configuration in __post_init__
         model_name=job.model_name,
         guidance_type=job.scaler,
         log_path=job.log_path,
         output_dir=job.output_dir,
-        loss_order=args.loss_order,
         partial_diffusion_step=args.partial_diffusion_step,
         guidance_start=args.guidance_start,
-        resolution=job.resolution,
         device=f"cuda:{device_num}" if device_num is not None else "",
         gradient_normalization=args.gradient_normalization,
         augmentation=args.augmentation,
         align_to_input=args.align_to_input,
         recycling_steps=args.recycling_steps,
         num_diffusion_steps=args.num_diffusion_steps,
+        reward_config=job.reward_config,
         sequence=job.sequence,
     )
     # given model_type and guidance_type, the GuidanceConfig class will set itself up
@@ -379,13 +385,15 @@ def run_grid_search(
                 if r.status == "success":
                     successful += 1
                     log.info(
-                        f"SUCCESS ({r.protein}, {r.model_name}, {r.method}, {r.scaler} "
+                        f"SUCCESS ({r.protein}, {r.model_name}, {r.method}, {r.scaler}, "
+                        f"{r.reward_type} "
                         f"{r.runtime_seconds:.1f}s): {r.log_path}"
                     )
                 else:
                     failed += 1
                     log.error(
-                        f"FAILED ({r.protein}, {r.model_name}, {r.method}, {r.scaler} "
+                        f"FAILED ({r.protein}, {r.model_name}, {r.method}, {r.scaler}, "
+                        f"{r.reward_type} "
                         f"exit={r.exit_code}): {r.log_path}"
                     )
     return results
@@ -545,6 +553,7 @@ def main(args: argparse.Namespace):
         method=args.method,
         proteins_file=args.proteins,
         output_dir=args.output_dir,
+        reward_config=args.rewards.to_mapping(),
     )
 
     start_time = time.time()
@@ -556,6 +565,64 @@ def main(args: argparse.Namespace):
     log.info("=" * 50)
     log.info("Grid search complete")
     log.info("=" * 50)
+
+
+def protein_reward_config(rewards: RewardConfig, protein: ProteinInput) -> RewardConfig:
+    """Fill one protein's CSV columns into the selected rewards and check nothing is missing.
+
+    Parameters
+    ----------
+    rewards : RewardConfig
+        Rewards selected on the command line, holding only explicitly given options.
+    protein : ProteinInput
+        The protein whose data the rewards score against.
+
+    Returns
+    -------
+    RewardConfig
+        This protein's rewards, with every default written out.
+
+    Raises
+    ------
+    ValueError
+        If a reward still lacks a required option, so the grid fails before any
+        job is queued rather than one worker at a time.
+    """
+    config = rewards.with_defaults(protein.reward_options).with_effective_options()
+    missing = config.missing_required_options()
+    if missing:
+        raise ValueError(
+            f"Protein '{protein.name}' has no value for "
+            + "; ".join(
+                f"{', '.join(options)} (required by the {reward} reward)"
+                for reward, options in missing.items()
+            )
+            + ". Add the column(s) to the proteins CSV, or pass the option on the command line."
+        )
+    return config
+
+
+def trial_dir_suffix(rewards: RewardConfig) -> str:
+    """Return the trial-directory suffix that keeps runs of different rewards apart.
+
+    Density-only runs get none, so grids written before rewards were selectable
+    are still found (and skipped) by status checks.
+
+    Parameters
+    ----------
+    rewards : RewardConfig
+        Rewards the trial scores against.
+
+    Returns
+    -------
+    str
+        ``""`` for the density reward alone, otherwise ``"_"`` plus the reward
+        names joined by ``+``.
+    """
+    names = [entry.reward.value for entry in rewards.entries]
+    if names == [DEFAULT_REWARD_TYPE.value]:
+        return ""
+    return "_" + "+".join(names)
 
 
 def generate_jobs(args: argparse.Namespace) -> list[JobConfig]:
@@ -571,9 +638,9 @@ def generate_jobs(args: argparse.Namespace) -> list[JobConfig]:
 
     for protein in proteins:
         structure = protein.structure
-        density = str(protein.density)
-        resolution = protein.resolution
         protein_name = protein.name
+        rewards = protein_reward_config(args.rewards, protein)
+        reward_suffix = trial_dir_suffix(rewards)
 
         method_suffix = f"_{args.method.replace(' ', '_')}" if args.method else ""
         for scaler in scalers:
@@ -586,15 +653,14 @@ def generate_jobs(args: argparse.Namespace) -> list[JobConfig]:
                                 protein_name,
                                 f"{model}{method_suffix}",
                                 scaler,
-                                f"ens{ens}_gw{gw}_gd{gd}",
+                                f"ens{ens}_gw{gw}_gd{gd}{reward_suffix}",
                             )
                             log_path = os.path.join(output_dir, "run.log")
                             jobs.append(
                                 JobConfig(
                                     protein=protein_name,
                                     structure_path=structure,
-                                    density_path=density,
-                                    resolution=resolution,
+                                    reward_config=rewards.to_mapping(),
                                     model_name=model,
                                     scaler=scaler,
                                     ensemble_size=ens,
@@ -614,15 +680,14 @@ def generate_jobs(args: argparse.Namespace) -> list[JobConfig]:
                             protein_name,
                             f"{model}{method_suffix}",
                             scaler,
-                            f"ens{ens}_gw{gw}",
+                            f"ens{ens}_gw{gw}{reward_suffix}",
                         )
                         log_path = os.path.join(output_dir, "run.log")
                         jobs.append(
                             JobConfig(
                                 protein=protein_name,
                                 structure_path=structure,
-                                density_path=density,
-                                resolution=resolution,
+                                reward_config=rewards.to_mapping(),
                                 model_name=model,
                                 scaler=scaler,
                                 ensemble_size=ens,
@@ -670,6 +735,7 @@ def save_results(
             r.ensemble_size,
             r.gradient_weight,
             r.gd_steps,
+            r.reward_type,
         )
         for r in results
     }
@@ -679,6 +745,7 @@ def save_results(
         normalized_run = existing_run.copy()
         if "model" in normalized_run:
             normalized_run.setdefault("model_name", normalized_run.pop("model"))
+        normalized_run.setdefault("reward_type", DEFAULT_REWARD_TYPE.value)
         key = (
             normalized_run.get("protein"),
             normalized_run.get("model_name"),
@@ -687,6 +754,7 @@ def save_results(
             normalized_run.get("ensemble_size"),
             normalized_run.get("gradient_weight"),
             normalized_run.get("gd_steps"),
+            normalized_run.get("reward_type"),
         )
         if key not in new_run_keys:
             merged_runs.append(normalized_run)
@@ -708,15 +776,36 @@ def save_results(
     log.info(f"Results saved to {results_path} ({len(merged_runs)} total runs)")
 
 
-def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments for one model-specific grid search."""
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for one model-specific grid search.
+
+    Parameters
+    ----------
+    argv : list[str] or None
+        Arguments to parse; ``None`` means ``sys.argv[1:]``.
+
+    Returns
+    -------
+    argparse.Namespace
+        Parsed arguments, plus ``rewards``: the selected :class:`RewardConfig`,
+        holding only the options given explicitly, which win over the proteins CSV.
+    """
+    # The reward decides which option flags exist, so it is resolved first, as in
+    # GuidanceConfig.from_cli.
+    pre = argparse.ArgumentParser(add_help=False)
+    add_reward_selection_args(pre)
+    pre_args, _ = pre.parse_known_args(argv)
+
     parser = argparse.ArgumentParser(
         description="Run grid search across scalers, and parameters for a single "
         "protein structure predictor model."
     )
     # Experiment level arguments
     parser.add_argument(
-        "--proteins", required=True, help="CSV file with columns: structure,density,resolution,name"
+        "--proteins",
+        required=True,
+        help="CSV file with name and structure columns, an optional sequence column, and a "
+        "column per reward option the proteins differ in (e.g. density,resolution or mtzfile)",
     )
 
     # Model arguments
@@ -821,8 +910,10 @@ def parse_args() -> argparse.Namespace:
         help="Log RF3 chiral gradient magnitudes at each denoising step",
     )
 
-    # Reward/Loss function arguments
-    parser.add_argument("--loss-order", type=int, default=2, help="L1 (1) or L2 (2) loss")
+    # Reward arguments. Option flags apply to every protein and win over the CSV's columns.
+    add_reward_selection_args(parser)
+    if pre_args.reward_config is None:
+        add_reward_args(parser, pre_args.reward_type)
 
     # Output arguments
     parser.add_argument("--output-dir", default="./grid_search_results", help="Output directory")
@@ -862,7 +953,9 @@ def parse_args() -> argparse.Namespace:
         help="Run only un-run jobs, skip failed and successful jobs",
     )
 
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    args.rewards = reward_config_from_args(parser, args, argv)
+    return args
 
 
 def log_args(args: argparse.Namespace, gpus: list[str]):
@@ -875,6 +968,7 @@ def log_args(args: argparse.Namespace, gpus: list[str]):
     if args.model == "rf3":
         log.info(f"Disable chiral features: {args.disable_chiral_features}")
         log.info(f"Track chiral features: {args.track_chiral_features}")
+    log.info(f"Rewards: {args.rewards.to_mapping()}")
     log.info(f"Scalers: {args.scalers}")
     log.info(f"Ensemble sizes: {args.ensemble_sizes}")
     log.info(f"Gradient weights: {args.gradient_weights}")

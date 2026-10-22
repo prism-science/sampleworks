@@ -12,6 +12,9 @@ from sampleworks.core.rewards.registry import (
     build_single_reward,
     coerce_options,
     get_reward_spec,
+    is_path_option,
+    option_from_text,
+    reward_option_names,
     REWARD_SPECS,
     reward_type_names,
     RewardBuildContext,
@@ -30,14 +33,18 @@ class TestRegistryEntries:
     def test_spec_is_keyed_by_its_own_name(self, reward: Rewards):
         assert REWARD_SPECS[reward].name is reward
 
-    def test_declared_data_and_resolution_options_exist(self, reward: Rewards):
-        """The grid-search injection points must name real options."""
-        spec = REWARD_SPECS[reward]
-        option_names = {f.name for f in dataclasses.fields(spec.options_cls)}
-
-        for declared in (spec.data_path_option, spec.resolution_option):
-            if declared is not None:
-                assert declared in option_names
+    def test_shared_option_names_share_a_declaration(self, reward: Rewards):
+        """A proteins-CSV column is parsed by option name alone, for every reward that has it."""
+        for option in dataclasses.fields(REWARD_SPECS[reward].options_cls):
+            for other in REWARD_SPECS.values():
+                for other_option in dataclasses.fields(other.options_cls):
+                    if other_option.name != option.name:
+                        continue
+                    assert option_type(other.options_cls, option.name) == option_type(
+                        REWARD_SPECS[reward].options_cls, option.name
+                    )
+                    assert other_option.metadata["path"] == option.metadata["path"]
+                    assert other_option.metadata["json_arg"] == option.metadata["json_arg"]
 
     def test_file_valued_options_are_declared_as_paths(self, reward: Rewards):
         """A path option that forgets ``path=True`` silently escapes path remapping."""
@@ -121,3 +128,41 @@ class TestBuilderValidation:
     def test_structure_factor_reward_requires_an_mtz(self):
         with pytest.raises(ValueError, match="needs a target MTZ"):
             build_single_reward(Rewards.STRUCTURE_FACTOR, {}, RewardBuildContext(structure={}))
+
+
+class TestOptionsFromText:
+    """Proteins-CSV cells are parsed to each option's declared type."""
+
+    @pytest.mark.parametrize(
+        ("name", "text", "expected"),
+        [
+            ("resolution", "1.8", 1.8),
+            ("loss_order", "1", 1),
+            ("em", "true", True),
+            ("normalize_amplitude", "No", False),
+            ("expcolumns", "FP SIGFP", ["FP", "SIGFP"]),
+            ("sfcalculator_kwargs", '{"n_bins": 15}', {"n_bins": 15}),
+            ("bulk_solvent", "combined", "combined"),
+        ],
+    )
+    def test_parses_to_the_declared_type(self, name, text, expected):
+        assert option_from_text(name, text) == expected
+
+    def test_rejects_a_value_that_is_not_a_boolean(self):
+        with pytest.raises(ValueError, match="Expected true or false"):
+            option_from_text("em", "maybe")
+
+    def test_rejects_an_option_no_reward_declares(self):
+        with pytest.raises(ValueError, match="No registered reward has an option named 'mtz_file'"):
+            option_from_text("mtz_file", "x.mtz")
+
+    def test_knows_which_options_are_paths(self):
+        assert is_path_option("mtzfile")
+        assert is_path_option("diffuse_target")
+        assert not is_path_option("resolution")
+
+    def test_option_names_span_every_reward(self):
+        names = reward_option_names()
+
+        assert {"density", "mtzfile", "bragg_target", "diffuse_target", "resolution"} <= set(names)
+        assert len(names) == len(set(names))

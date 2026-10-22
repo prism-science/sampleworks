@@ -282,7 +282,7 @@ class RewardConfig:
         defaults change between versions, and an option that was defaulted is
         otherwise indistinguishable from one that did not exist. Options left at
         ``None`` stay absent, so they remain fillable by
-        :meth:`with_experimental_data`.
+        :meth:`with_defaults`.
 
         Returns
         -------
@@ -357,40 +357,32 @@ class RewardConfig:
             )
         return weights
 
-    def with_experimental_data(
-        self, *, path: str | Path | None = None, resolution: float | None = None
-    ) -> RewardConfig:
-        """Fill in per-run experimental data without knowing which reward is configured.
+    def with_defaults(self, options: Mapping[str, Any]) -> RewardConfig:
+        """Fill in options this configuration leaves unset, for whichever rewards declare them.
 
-        Grid search resolves a map or MTZ and a resolution per protein, long after
-        the reward type was chosen. Each reward declares which of its options hold
-        those (``data_path_option`` / ``resolution_option``), so they can be
-        injected generically. Options already set are left alone -- an explicit
-        value from the user or a config file wins.
+        Grid search reads a row of options per protein (a map, an MTZ, a
+        resolution) long after the reward was chosen. Each value goes to every
+        configured reward that has an option of that name and is ignored by the
+        rest, so one proteins CSV serves any reward. Options already set are left
+        alone -- an explicit value from the user or a config file wins.
 
         Parameters
         ----------
-        path
-            Experimental data file for this run (map or MTZ).
-        resolution
-            Resolution in Angstroms for this run.
+        options
+            Option name to value, e.g. ``{"mtzfile": "/data/1vme.mtz"}``.
 
         Returns
         -------
         RewardConfig
-            A new configuration with the data filled in where it was missing.
+            A new configuration with unset options filled in.
         """
         entries = []
         for entry in self.entries:
-            spec = get_reward_spec(entry.reward)
-            options = dict(entry.options)
-            for option_name, value in (
-                (spec.data_path_option, None if path is None else str(path)),
-                (spec.resolution_option, resolution),
-            ):
-                if option_name is not None and value is not None:
-                    options.setdefault(option_name, value)
-            entries.append(replace(entry, options=options))
+            declared = {
+                f.name for f in dataclasses.fields(get_reward_spec(entry.reward).options_cls)
+            }
+            defaults = {name: value for name, value in options.items() if name in declared}
+            entries.append(replace(entry, options={**defaults, **entry.options}))
 
         return RewardConfig(tuple(entries))
 

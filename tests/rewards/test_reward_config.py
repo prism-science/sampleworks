@@ -181,17 +181,19 @@ class TestWeights:
             )
 
 
-class TestExperimentalDataInjection:
-    """Grid search resolves the data file per protein, after the reward is chosen."""
+class TestPerProteinDefaults:
+    """Grid search fills each protein's CSV columns in after the reward is chosen."""
 
-    def test_data_lands_in_each_reward_s_own_option(self):
+    PROTEIN_ROW = {"density": "/data/1vme.ccp4", "mtzfile": "/data/1vme.mtz", "resolution": 1.8}
+
+    def test_each_value_lands_only_in_rewards_that_declare_it(self):
         config = RewardConfig.from_mapping(
             {"real_space_density": {}, "structure_factor": {}}
-        ).with_experimental_data(path="/data/1vme.mtz", resolution=1.8)
+        ).with_defaults(self.PROTEIN_ROW)
 
         by_reward = {entry.reward: entry.options for entry in config.entries}
         assert by_reward[Rewards.REAL_SPACE_DENSITY] == {
-            "density": "/data/1vme.mtz",
+            "density": "/data/1vme.ccp4",
             "resolution": 1.8,
         }
         assert by_reward[Rewards.STRUCTURE_FACTOR] == {
@@ -202,9 +204,15 @@ class TestExperimentalDataInjection:
     def test_explicitly_configured_values_win(self):
         config = RewardConfig.single(
             Rewards.STRUCTURE_FACTOR, mtzfile="/explicit.mtz"
-        ).with_experimental_data(path="/per-protein.mtz", resolution=2.5)
+        ).with_defaults(self.PROTEIN_ROW)
 
-        assert config.entries[0].options == {"mtzfile": "/explicit.mtz", "resolution": 2.5}
+        assert config.entries[0].options == {"mtzfile": "/explicit.mtz", "resolution": 1.8}
+
+    def test_filled_options_satisfy_required_option_checks(self):
+        config = RewardConfig.single(Rewards.STRUCTURE_FACTOR)
+
+        assert config.missing_required_options() == {"structure_factor": ("mtzfile",)}
+        assert config.with_defaults(self.PROTEIN_ROW).missing_required_options() == {}
 
     def test_paths_are_remapped_for_run_metadata(self):
         config = RewardConfig.single(

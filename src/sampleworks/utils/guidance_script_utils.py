@@ -1014,6 +1014,7 @@ def get_job_result(
         finished_at=ended_at.isoformat(),
         log_path=args.log_path or os.path.join(args.output_dir, "run.log"),
         output_dir=args.output_dir,
+        reward_type=args.reward_type,
     )
     return result
 

@@ -6,6 +6,7 @@ import numpy as np
 from loguru import logger
 from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.volume import XMap
 from sampleworks.eval.occupancy_utils import occupancy_to_str
+from sampleworks.utils.guidance_constants import Rewards
 
 
 @dataclass
@@ -24,6 +25,9 @@ class Trial:
     input_structure_path: Path | None = None
     density_path: Path | None = None
     resolution: float | None = None
+    # Comma-separated reward names the trial was guided with; trials that predate
+    # selectable rewards were all density runs.
+    reward_type: str = Rewards.REAL_SPACE_DENSITY.value
     rscc: float = np.nan  # these last three are placeholders for RSCC calculations.
     base_map_path: Path | None = None
     error: Exception | None = None
@@ -40,6 +44,7 @@ class TrialList(list[Trial]):
         logger.info(f"Proteins: {set(trial.protein for trial in self)}")
         logger.info(f"Models: {set(trial.model for trial in self)}")
         logger.info(f"Scalers: {set(trial.scaler for trial in self)}")
+        logger.info(f"Rewards: {set(trial.reward_type for trial in self)}")
 
 
 @dataclass
