@@ -1,0 +1,60 @@
+name: Docs
+
+on:
+  push:
+    # fy/docs-sphinx is a temporary entry so the build can be checked from the PR; it comes
+    # out before the PR leaves draft. Only main publishes, see the deploy job below.
+    branches: [main, fy/docs-sphinx]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  pages: write
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # autoapi reads the source files instead of importing them, so the build needs Sphinx
+      # and nothing else: sampleworks, torch and the model packages are not installed.
+      - name: Install Sphinx
+        run: pip install sphinx==9.1.0 sphinx-autoapi==3.8.1 myst-parser==5.1.0 furo==2025.12.19
+
+      - name: Build the site
+        run: sphinx-build -b html docs docs/_build/html
+
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/_build/html
+
+  deploy:
+    needs: build
+    # Only main publishes. Every other ref stops after the build, so a branch can be checked
+    # without touching the live site.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

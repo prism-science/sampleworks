@@ -54,6 +54,7 @@ from jaxtyping import Float, Int
 from loguru import logger
 from lunus.sf import mean_and_diffuse
 from lunus.sf.symmetry_torch import supercell_factors
+
 from sampleworks.core.forward_models.xray import lunus_sf
 from sampleworks.core.rewards.options import DiffuseBraggOptions
 from sampleworks.core.rewards.protocol import RewardInputs

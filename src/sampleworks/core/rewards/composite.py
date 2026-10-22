@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from jaxtyping import Float, Int
+
 from sampleworks.core.rewards.protocol import prepare_reward_if_needed, RewardFunctionProtocol
 
 
