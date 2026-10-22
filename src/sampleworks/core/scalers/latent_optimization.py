@@ -278,9 +278,10 @@ class LatentOptimization:
         """
         # Reject unusable settings here rather than at the CLI. An invalid value does not fail
         # loudly downstream -- outer_steps <= 0 skips optimization entirely and still writes an
-        # ensemble, and a negative weight turns a penalty into a bonus -- so both would read as a
-        # successful run. Both paths that build this scaler (GuidanceConfig.from_cli and the grid
-        # search's populate_config_for_guidance_type) converge on this constructor.
+        # ensemble, and a negative weight makes the penalty go in the other direction (e.g.
+        # encourage drift from the baseline latents) -- so both would read as a successful run. Both
+        # paths that build this scaler (GuidanceConfig.from_cli and the grid search's
+        # populate_config_for_guidance_type) converge on this constructor.
         for name, value in (
             ("ensemble_size", ensemble_size),
             ("num_steps", num_steps),

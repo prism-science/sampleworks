@@ -548,39 +548,27 @@ def test_a_loss_configuration_mirrors_back_onto_the_flat_density_fields():
     assert (config.density, config.resolution, config.loss_order) == ("/data/x.ccp4", 2.4, 1)
 
 
-def test_a_legacy_pickle_without_a_loss_configuration_still_loads():
-    """Job queues are pickled by one build and unpickled by another."""
-    config = _density_config()
-    state = config.__dict__.copy()
-    del state["loss_config"]
-
-    restored = GuidanceConfig.__new__(GuidanceConfig)
-    restored.__setstate__(state)
-
-    assert restored.resolved_loss_config().entries[0].options["density"] == (
-        "/data/inputs/1abc.ccp4"
+def test_a_pickled_loss_configuration_survives_the_job_queue():
+    """Job queues are pickled by the submitter and unpickled by the worker."""
+    config = _density_config(
+        density=None,
+        resolution=None,
+        loss_config={
+            "real_space_density": {
+                "weight": 0.4,
+                "loss_options": {"density": "/data/inputs/1abc.ccp4", "resolution": 1.8},
+            },
+            "structure_factor": {
+                "weight": 0.6,
+                "loss_options": {"mtzfile": "/data/inputs/1abc.mtz"},
+            },
+        },
     )
 
+    restored = pickle.loads(pickle.dumps(config))
 
-def test_a_pickle_from_before_the_loss_rename_keeps_its_configuration():
-    """Pickles written before #71 hold the same mapping under ``reward_*`` names."""
-    state = _density_config().__dict__.copy()
-    del state["loss_config"]
-    state["reward_config"] = {
-        "real_space_density": {
-            "weight": 0.4,
-            "reward_options": {"density": "/data/inputs/1abc.ccp4", "resolution": 1.8},
-        },
-        "structure_factor": {"weight": 0.6, "reward_options": {"mtzfile": "/data/inputs/1abc.mtz"}},
-    }
-
-    restored = GuidanceConfig.__new__(GuidanceConfig)
-    restored.__setstate__(state)
-
-    entries = {entry.loss.value: entry for entry in restored.resolved_loss_config().entries}
-    assert entries["structure_factor"].options["mtzfile"] == "/data/inputs/1abc.mtz"
-    assert (entries["real_space_density"].weight, entries["structure_factor"].weight) == (0.4, 0.6)
-    assert not hasattr(restored, "reward_config")
+    assert restored.resolved_loss_config() == config.resolved_loss_config()
+    assert (restored.density, restored.resolution) == ("/data/inputs/1abc.ccp4", 1.8)
 
 
 def test_as_dict_serializes_the_loss_configuration_as_a_string(monkeypatch):

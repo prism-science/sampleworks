@@ -583,26 +583,12 @@ class GuidanceConfig:
         Job queues are pickled by whichever build submitted them and unpickled by
         the worker, so a config from an older build has to keep working: it names
         the model ``model``, and has no ``loss_config`` -- only the flat density
-        fields the loss configuration is reconciled with, or the same mapping under
-        its pre-#71 names, ``reward_config`` and ``reward_options``.
+        fields the loss configuration is reconciled with.
         """
         migrated = state.copy()
         if "model" in migrated:
             migrated.setdefault("model_name", migrated.pop("model"))
-        if "reward_config" in migrated:
-            migrated.setdefault(
-                "loss_config",
-                {
-                    name: {
-                        LOSS_OPTIONS_KEY if key == "reward_options" else key: value
-                        for key, value in entry.items()
-                    }
-                    for name, entry in migrated.pop("reward_config").items()
-                },
-            )
-        migrated.setdefault("loss_config", {})
         self.__dict__.update(migrated)
-        self._reconcile_loss_config()
 
 
 def add_loss_selection_args(parser: argparse.ArgumentParser):
