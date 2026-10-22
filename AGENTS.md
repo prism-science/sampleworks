@@ -218,7 +218,7 @@ register it in `core/losses/registry.py` with a `build_*` function that raises i
 errors for inputs it cannot do without. CLI flags, configuration-file schema, validation
 messages, and run metadata all follow from that one declaration. A loss that needs the
 model's atom ordering (structure factors, anything with a topology) implements
-`prepare(atom_array, *, device)` from `PreparableLossFunctionProtocol`; the trajectory
+`prepare(loss_inputs, *, device)` from `PreparableLossFunctionProtocol`; the trajectory
 scalers call it once the model atom array exists.
 
 The `run_guidance()` function in `utils/guidance_script_utils.py` is the central orchestrator. It wires together the model wrapper, sampler (`AF3EDMSampler`), step scaler (`DataSpaceDPSScaler` or `NoiseSpaceDPSScaler`), trajectory scaler (`PureGuidance` or `FKSteering`), and loss function. When adding a new model or guidance strategy, this is the best reference for how components compose in practice.

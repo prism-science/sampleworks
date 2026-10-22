@@ -119,7 +119,7 @@ class TrajectoryScalerProtocol(Protocol):
             Sampler to use for generating the trajectory, e.g. EDM solver, Annealed Langevin, etc.
         step_scaler: StepScalerProtocol
             StepScalerProtocol defining update rule for per-step guidance.
-        loss: LossFunctionProtocol
+        loss_function: LossFunctionProtocol
             Loss function for steering the model.
         num_particles: int
             Number of particles for trajectory-level methods that require a population.

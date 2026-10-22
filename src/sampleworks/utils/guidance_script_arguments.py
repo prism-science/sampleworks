@@ -267,8 +267,7 @@ class GuidanceConfig:
     # mapping of issue #358. Kept as plain primitives, not a LossConfig: these
     # configs are pickled into job queues and read back by workers that may be
     # running a different sampleworks build. Left empty, __post_init__ fills it
-    # in from the density fields below, which is how grid search and older
-    # pickles keep working.
+    # in from the density fields below, which is how grid search builds configs.
     loss_config: dict[str, Any] = field(default_factory=dict)
     sequence: str | None = None
 
@@ -482,7 +481,7 @@ class GuidanceConfig:
         the shape grid search builds configs in, ``job_metadata.json`` records, and
         the evaluation scripts read back. So the two representations are kept in
         sync in one place, in whichever direction has the information: a config
-        built without ``loss_config`` (grid search, an older pickle) derives it
+        built without ``loss_config`` (grid search) derives it
         from the flat fields, and one built with it mirrors the density options
         back out.
         """
@@ -578,12 +577,11 @@ class GuidanceConfig:
         return output
 
     def __setstate__(self, state: dict[str, Any]) -> None:
-        """Restore state, migrating pickles written before ``model_name`` and losses.
+        """Restore state, migrating pickles that name the model ``model``.
 
         Job queues are pickled by whichever build submitted them and unpickled by
-        the worker, so a config from an older build has to keep working: it names
-        the model ``model``, and has no ``loss_config`` -- only the flat density
-        fields the loss configuration is reconciled with.
+        the worker. Pickles from older builds are not necessarily migrated, so
+        resubmit those jobs.
         """
         migrated = state.copy()
         if "model" in migrated:
