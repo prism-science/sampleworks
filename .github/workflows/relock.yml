@@ -24,7 +24,7 @@ jobs:
       - name: Install pixi
         uses: prefix-dev/setup-pixi@v0.8.8
         with:
-          pixi-version: v0.82.0
+          pixi-version: v0.82.1
           run-install: false
 
       - name: Regenerate lockfile
@@ -44,6 +44,6 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add pixi.lock
-            git commit -m "chore: relock pixi.lock on linux (pixi v0.73.0)"
+            git commit -m "chore: relock pixi.lock on linux (pixi v0.82.1)"
             git push origin HEAD:${{ github.ref_name }}
           fi

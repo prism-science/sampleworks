@@ -52,7 +52,7 @@ jobs:
       - name: Install pixi
         uses: prefix-dev/setup-pixi@19eac09b398e3d0c747adc7921926a6d802df4da # v0.8.8
         with:
-          pixi-version: v0.82.0
+          pixi-version: v0.82.1
           cache: false  # NFS-backed cache on self-hosted runner handles this
 
       - name: Build CUDA extensions
