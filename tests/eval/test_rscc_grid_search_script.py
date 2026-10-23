@@ -88,10 +88,10 @@ def test_trial_parse_failure_emits_error_rows(rscc_fixture_factory, rscc_script,
 
     real_parse_structure = rscc_script.parse_structure
 
-    def flaky_parse_structure(path):
+    def flaky_parse_structure(path, **kwargs):
         if "refined" in str(path):
             raise RuntimeError("simulated trial parse failure")
-        return real_parse_structure(path)
+        return real_parse_structure(path, **kwargs)
 
     monkeypatch.setattr(rscc_script, "parse_structure", flaky_parse_structure)
 
