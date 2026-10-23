@@ -56,7 +56,7 @@ assert isinstance(MyImpl(), MyProtocol)  # True if @runtime_checkable decorates 
 
 ### 2. Decouple Guidance from Generation
 
-The separation of **Guidance** (Scalers/Rewards) from **Generation** (ModelWrappers/Samplers) is the architectural core. A reward function (e.g., real-space density fit) is written once and applied to any supported generative model. This maps to the inverse problem paradigm: define a forward model and target reward, optimize during guidance.
+The separation of **Guidance** (Scalers/Losses) from **Generation** (ModelWrappers/Samplers) is the architectural core. A loss function (e.g., real-space density fit) is written once and applied to any supported generative model. This maps to the inverse problem paradigm: define a forward model and target loss, optimize during guidance.
 
 ### 3. Restraints vs. Constraints
 
@@ -88,7 +88,7 @@ Gradient-based guidance requires differentiability from experimental observable 
 ### 7. Atomic Responsibility
 
 Each component does one thing well:
-- A reward function computes one experimental mismatch
+- A loss function computes one experimental mismatch
 - A scaler applies one guidance strategy
 - A sampler implements one numerical solver
 - A model wrapper adapts one generative model
@@ -110,8 +110,8 @@ sampleworks
 ├── Scalers — guidance strategies
 │   ├── StepScalerProtocol — per-step (DPS, Tweedie)
 │   └── TrajectoryScalerProtocol — population-level (PureGuidance, FK steering)
-└── Rewards — experimental data fit via differentiable forward models
-    └── RewardFunctionProtocol
+└── Losses — experimental data fit via differentiable forward models
+    └── LossFunctionProtocol
 ```
 
 ### Data Flow
@@ -122,7 +122,7 @@ Atomworks Structure → ModelWrapper.featurize() → Features
                     ModelWrapper.step() → Denoised prediction
                                                     ↓
 ┌────────────────── Sampling Loop ──────────────────┐
-│  Schedule → StepParams (t, dt, reward, etc.)     │
+│  Schedule → StepParams (t, dt, loss, etc.)       │
 │                     ↓                             │
 │  Sampler.step(state, model, context, scaler)      │
 │       ├── Model forward pass                      │
@@ -143,7 +143,7 @@ Atomworks Structure → ModelWrapper.featurize() → Features
 
 **Scaler** (`core/scalers/protocol.py`): `StepScalerProtocol.scale()` returns a guidance direction + loss. `TrajectoryScalerProtocol.sample()` orchestrates full trajectory generation with population-level control.
 
-**RewardFunction** (`core/rewards/protocol.py`): `RewardFunctionProtocol` defines a callable computing scalar reward from coordinates. `PrecomputableRewardFunctionProtocol` extends it with `precompute_unique_combinations()` for vmap compatibility. `RewardInputs` dataclass bundles pre-extracted inputs (elements, b_factors, occupancies, coords).
+**LossFunction** (`core/losses/protocol.py`): `LossFunctionProtocol` defines a callable computing scalar loss from coordinates. `PrecomputableLossFunctionProtocol` extends it with `precompute_unique_combinations()` for vmap compatibility. `LossInputs` dataclass bundles pre-extracted inputs (elements, b_factors, occupancies, coords).
 
 ### Module Layout
 
@@ -151,7 +151,7 @@ Atomworks Structure → ModelWrapper.featurize() → Features
 src/sampleworks/
 ├── core/
 │   ├── forward_models/    # Differentiable physics (X-ray density, cryo-EM)
-│   ├── rewards/           # Loss functions for experimental data fit
+│   ├── losses/            # Loss functions for experimental data fit
 │   ├── scalers/           # Guidance strategies (DPS, FK steering)
 │   └── samplers/          # Numerical solvers (EDM)
 ├── models/                # Generative model wrappers (Boltz, Protenix, RF3)
@@ -184,44 +184,44 @@ pixi run -e boltz sampleworks-guidance \
 
 Run `sampleworks-guidance --model <model> --guidance-type <type> --help` to see all available options.
 
-### Choosing rewards
+### Choosing losses
 
-`--reward-type` selects which reward guides the run (default `real_space_density`), and the
-options listed under it in `--help` are that reward's own — `--density`/`--resolution` above
-belong to the density reward, while `--reward-type structure_factor` takes `--mtzfile` and
-friends instead. Passing one reward's option to another is an error rather than a silent
+`--loss-type` selects which loss guides the run (default `real_space_density`), and the
+options listed under it in `--help` are that loss's own — `--density`/`--resolution` above
+belong to the density loss, while `--loss-type structure_factor` takes `--mtzfile` and
+friends instead. Passing one loss's option to another is an error rather than a silent
 no-op.
 
-To combine rewards, or to keep a run's reward settings in version control, pass a
+To combine losses, or to keep a run's loss settings in version control, pass a
 configuration file instead (YAML, JSON, or TOML; `${oc.env:VAR}` interpolation works in YAML):
 
 ```yaml
-# rewards.yaml -- sampleworks-guidance ... --reward-config rewards.yaml
+# losses.yaml -- sampleworks-guidance ... --loss-config losses.yaml
 real_space_density:
   weight: 0.4
-  reward_options:
+  loss_options:
     density: /data/1vme.ccp4
     resolution: 1.8
 structure_factor:
   weight: 0.6
-  reward_options:
+  loss_options:
     mtzfile: /data/1vme.mtz
     bulk_solvent: combined
 ```
 
-Weights default to `1/N`, so combining rewards does not change what the guidance step size
+Weights default to `1/N`, so combining losses does not change what the guidance step size
 means. Omit them all or give them all; a partly-weighted configuration is an error.
 
-**Adding a reward type** is three things and no argparse edits: implement the reward in
-`core/rewards/`, declare its options as a frozen dataclass in `core/rewards/options.py`, and
-register it in `core/rewards/registry.py` with a `build_*` function that raises its own
+**Adding a loss type** is three things and no argparse edits: implement the loss in
+`core/losses/`, declare its options as a frozen dataclass in `core/losses/options.py`, and
+register it in `core/losses/registry.py` with a `build_*` function that raises its own
 errors for inputs it cannot do without. CLI flags, configuration-file schema, validation
-messages, and run metadata all follow from that one declaration. A reward that needs the
+messages, and run metadata all follow from that one declaration. A loss that needs the
 model's atom ordering (structure factors, anything with a topology) implements
-`prepare(atom_array, *, device)` from `PreparableRewardFunctionProtocol`; the trajectory
+`prepare(loss_inputs, *, device)` from `PreparableLossFunctionProtocol`; the trajectory
 scalers call it once the model atom array exists.
 
-The `run_guidance()` function in `utils/guidance_script_utils.py` is the central orchestrator. It wires together the model wrapper, sampler (`AF3EDMSampler`), step scaler (`DataSpaceDPSScaler` or `NoiseSpaceDPSScaler`), trajectory scaler (`PureGuidance` or `FKSteering`), and reward function. When adding a new model or guidance strategy, this is the best reference for how components compose in practice.
+The `run_guidance()` function in `utils/guidance_script_utils.py` is the central orchestrator. It wires together the model wrapper, sampler (`AF3EDMSampler`), step scaler (`DataSpaceDPSScaler` or `NoiseSpaceDPSScaler`), trajectory scaler (`PureGuidance` or `FKSteering`), and loss function. When adding a new model or guidance strategy, this is the best reference for how components compose in practice.
 
 ## Development Environment
 
@@ -298,7 +298,7 @@ All commit messages **must** follow the [Conventional Commits](https://www.conve
 
 **Examples:**
 ```bash
-feat(rewards): add cryo-EM image stack reward function
+feat(losses): add cryo-EM image stack loss function
 fix(boltz): correct atom reconciler index mapping for OXT atoms
 docs: update AGENTS.md with new model wrapper example
 refactor(scalers)!: rename StepScaler to StepGuide
@@ -334,7 +334,7 @@ We use `major_on_zero = false`, meaning breaking changes bump minor (not major) 
 
 Use **squash merge** for all PRs. This collapses a PR's commits into a single commit on `main`, with the PR title as the commit message. The PR title **must** follow Conventional Commits format and controls the version bump:
 
-- `feat(rewards): add cryo-EM image stack reward` → minor bump
+- `feat(losses): add cryo-EM image stack loss` → minor bump
 - `fix(boltz): correct OXT atom mapping` → patch bump
 - `docs: update installation guide` → no release
 
@@ -362,7 +362,7 @@ def test_wrapper_calls_internal_method():
         m.assert_called_once()  # Breaks on refactor
 ```
 
-Test structure: `tests/{cli,eval,forward_models,integration,metrics,mocks,models,rewards,runs,synthetic,utils}/`, alongside `tests/resources/` for fixture files.
+Test structure: `tests/{cli,eval,forward_models,integration,metrics,mocks,models,losses,runs,synthetic,utils}/`, alongside `tests/resources/` for fixture files.
 
 Mark any test that requires a GPU or model checkpoint with `@pytest.mark.slow` so it is excluded from fast CI runs:
 
@@ -414,7 +414,7 @@ def process(coords: Float[Tensor, "batch atoms 3"]) -> Float[Tensor, "batch atom
 ## Adding New Components
 
 1. **Model wrapper**: Implement the appropriate `ModelWrapper` protocol in `models/`
-2. **Reward function**: Implement `RewardFunctionProtocol` in `core/rewards/`
+2. **Loss function**: Implement `LossFunctionProtocol` in `core/losses/`
 3. **Scaler**: Implement `StepScalerProtocol` or `TrajectoryScalerProtocol` in `core/scalers/`
 4. **Sampler**: Implement `Sampler` or `TrajectorySampler` protocol in `core/samplers/`
 5. **Forward model**: Implement differentiable physics in `core/forward_models/`
@@ -471,14 +471,14 @@ See `models/boltz/wrapper.py` for a production reference with pairformer caching
 
 ### Alignment and SE(3) Invariance
 
-Most reward functions (e.g., real-space density fit) are **not** SE(3)-invariant — they compare coordinates in a fixed reference frame (the crystallographic or cryo-EM map frame). But generative models produce structures in an arbitrary frame. This means:
+Most loss functions (e.g., real-space density fit) are **not** SE(3)-invariant — they compare coordinates in a fixed reference frame (the crystallographic or cryo-EM map frame). But generative models produce structures in an arbitrary frame. This means:
 
-- **Structures must be aligned** to the experimental reference frame before computing rewards. The `AtomReconciler` (`utils/atom_reconciler.py`) handles this, computing rigid alignment on the common atom subset between model and structure representations.
+- **Structures must be aligned** to the experimental reference frame before computing losses. The `AtomReconciler` (`utils/atom_reconciler.py`) handles this, computing rigid alignment on the common atom subset between model and structure representations.
 - **Atom count mismatches** are common. A model's internal representation may have different atoms than the input structure (e.g., missing hydrogens, extra OXT atoms, different residue coverage). `AtomReconciler.from_arrays()` detects this and provides bidirectional index mappings.
 - **Alignment must be differentiable** when using gradient-based guidance. `AtomReconciler.align()` uses `weighted_rigid_align_differentiable()` from `utils/frame_transforms.py` to preserve gradients through the alignment step.
-- **The sampler handles alignment timing**. `AF3EDMSampler` uses the `alignment_reference` field in `StepParams` and the reconciler to align at each step. Don't add alignment logic inside reward functions or scalers.
+- **The sampler handles alignment timing**. `AF3EDMSampler` uses the `alignment_reference` field in `StepParams` and the reconciler to align at each step. Don't add alignment logic inside loss functions or scalers.
 
-When writing new reward functions, assume coordinates arrive pre-aligned. When writing new samplers or trajectory scalers, ensure alignment happens before the reward is evaluated.
+When writing new loss functions, assume coordinates arrive pre-aligned. When writing new samplers or trajectory scalers, ensure alignment happens before the loss is evaluated.
 
 ### Atom Count Mismatches Between Model and Structure
 
@@ -491,7 +491,7 @@ if reconciler.has_mismatch:
     aligned_coords, transform = reconciler.align(model_coords, reference_coords)
 ```
 
-Build reward inputs from the model atom array (not the input structure) when a mismatch exists. See `utils/structure_utils.py::SampleworksProcessedStructure.to_reward_inputs()` for the canonical pattern. Two-phase rewards (`PreparableRewardFunctionProtocol`) are prepared with those same `RewardInputs`, never with an atom array; `RewardInputs.to_atom_array()` rebuilds a reference `AtomArray` (model topology, reconciled coordinates and B-factors) for forward models that need one. Do not write reconciled values back into the model atom array.
+Build loss inputs from the model atom array (not the input structure) when a mismatch exists. See `utils/structure_utils.py::SampleworksProcessedStructure.to_loss_inputs()` for the canonical pattern. Two-phase losses (`PreparableLossFunctionProtocol`) are prepared with those same `LossInputs`, never with an atom array; `LossInputs.to_atom_array()` rebuilds a reference `AtomArray` (model topology, reconciled coordinates and B-factors) for forward models that need one. Do not write reconciled values back into the model atom array.
 
 ## Avoiding Technical Debt
 
@@ -529,8 +529,8 @@ Crystallographic symmetry is handled natively in forward models. Most ML models 
 - **`models/protocol.py`**: ModelWrapper protocol definitions
 - **`core/scalers/protocol.py`**: StepScalerProtocol, TrajectoryScalerProtocol
 - **`core/samplers/protocol.py`**: Sampler, TrajectorySampler, StepParams
-- **`core/rewards/protocol.py`**: RewardFunctionProtocol, PrecomputableRewardFunctionProtocol, RewardInputs
-- **`core/rewards/real_space_density.py`**: Reference reward implementation
+- **`core/losses/protocol.py`**: LossFunctionProtocol, PrecomputableLossFunctionProtocol, LossInputs
+- **`core/losses/real_space_density.py`**: Reference loss implementation
 - **`core/forward_models/xray/real_space_density.py`**: Differentiable density calculation
 - **`core/scalers/step_scalers.py`**: DataSpaceDPSScaler, NoiseSpaceDPSScaler implementations
 - **`core/scalers/pure_guidance.py`**: PureGuidance trajectory scaler (reference TrajectoryScalerProtocol impl)

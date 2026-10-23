@@ -13,7 +13,7 @@ weighted by each model's population, so only one model's ``[N_atom, N_HKL]`` ten
 alive at once. Every model must have the same atoms in the same order.
 
 Bulk solvent is optional (``--bulk-solvent``), with the same modes as the structure-factor
-reward. The bulk solvent masks here are built from Fprotein rather than directly from atoms:
+loss. The bulk solvent masks here are built from Fprotein rather than directly from atoms:
 ``combined`` builds one bulk solvent mask from the population-weighted Fprotein sum, and
 ``per_conformer`` builds one bulk solvent mask per model and takes the population-weighted
 mean of the bulk solvent structure factors. Either mode writes Ftotal/SIGFtotal/PHIFtotal
@@ -49,14 +49,14 @@ from sampleworks.synthetic.generate_synthetic_sf import (
 )
 from sampleworks.synthetic.synthetic_utils import (
     atomarray_to_gemmi,
-    load_structure_for_synthetic_reward,
+    load_structure_for_synthetic_loss,
     resolve_crystal_metadata,
     resolve_parallel_jobs,
 )
 from sampleworks.utils.torch_utils import try_gpu
 
 
-# Same modes as the structure-factor reward's ``bulk_solvent`` option.
+# Same modes as the structure-factor loss's ``bulk_solvent`` option.
 BULK_SOLVENT_MODES = ("off", "combined", "per_conformer")
 
 
@@ -133,13 +133,13 @@ def compute_ensemble_structure_factors(
     Fprotein is computed at occupancy 1.0 and weighted by its population afterwards.
 
     The solvent fraction is estimated from model 1's atom positions, as the
-    structure-factor reward estimates it from the guidance reference, which is model 1
+    structure-factor loss estimates it from the guidance reference, which is model 1
     of a multi-model input. ``per_conformer`` goes through
-    ``SFcalculator.calc_fsolvent_batch``, the path the structure-factor reward uses, so
+    ``SFcalculator.calc_fsolvent_batch``, the path the structure-factor loss uses, so
     it inherits that path's batch behavior: models are processed in chunks of
-    ``calc_fsolvent_batch``'s default ``PARTITION=10`` (also the reward's default
+    ``calc_fsolvent_batch``'s default ``PARTITION=10`` (also the loss's default
     ``batch_partition``), the density is normalized over each whole chunk, and the
-    solvent cutoff comes from the chunk's first model. Unlike the reward, which
+    solvent cutoff comes from the chunk's first model. Unlike the loss, which
     weights every conformer's mask by ``1/batch_size``, the masks here are weighted by
     population; the two agree for uniform populations.
     """
@@ -154,7 +154,7 @@ def compute_ensemble_structure_factors(
     for model, occupancy in enumerate(occupancies):
         sfcalculator = None  # release the previous model's scattering table first
         torch.cuda.empty_cache()
-        atom_array = load_structure_for_synthetic_reward(
+        atom_array = load_structure_for_synthetic_loss(
             structure_path,
             occupancy_mode="default",
             occupancy_values=[],

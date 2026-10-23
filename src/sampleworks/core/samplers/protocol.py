@@ -8,7 +8,7 @@ from typing import Any, Generic, Protocol, runtime_checkable, TYPE_CHECKING, Typ
 import torch
 from jaxtyping import Float
 
-from sampleworks.core.rewards.protocol import RewardFunctionProtocol
+from sampleworks.core.losses.protocol import LossFunctionProtocol
 from sampleworks.models.protocol import (
     EnergyBasedModelWrapper,
     FlowModelWrapper,
@@ -19,7 +19,7 @@ from sampleworks.utils.framework_utils import Array
 
 
 if TYPE_CHECKING:
-    from sampleworks.core.rewards.protocol import RewardInputs
+    from sampleworks.core.losses.protocol import LossInputs
     from sampleworks.core.scalers.protocol import StepScalerProtocol
     from sampleworks.utils.atom_reconciler import AtomReconciler
 
@@ -62,8 +62,8 @@ class StepParams:
     learning_rate: Float[Array, " batch"] | None = None
 
     # Guidance parameters (optional, for guided sampling)
-    reward: RewardFunctionProtocol | None = None
-    reward_inputs: RewardInputs | None = None
+    loss_function: LossFunctionProtocol | None = None
+    loss_inputs: LossInputs | None = None
 
     # Optional atom reconciliation
     reconciler: AtomReconciler | None = None
@@ -94,27 +94,27 @@ class StepParams:
         """Whether this is a trajectory-based step (diffusion/flow)."""
         return self.t is not None
 
-    def with_reward(
+    def with_loss(
         self,
-        reward: RewardFunctionProtocol,
-        reward_inputs: RewardInputs,
+        loss_function: LossFunctionProtocol,
+        loss_inputs: LossInputs,
     ) -> StepParams:
-        """Return a new ``StepParams`` with reward information attached.
+        """Return a new ``StepParams`` with loss information attached.
 
         Parameters
         ----------
-        reward : RewardFunctionProtocol
-            Reward (or loss) function used for guided sampling.
-        reward_inputs : RewardInputs
-            Pre-computed inputs required by *reward* (e.g. reference
+        loss_function : LossFunctionProtocol
+            Loss function used for guided sampling.
+        loss_inputs : LossInputs
+            Pre-computed inputs required by *loss_function* (e.g. reference
             coordinates, masks, density maps).
 
         Returns
         -------
         StepParams
-            Shallow copy with *reward* and *reward_inputs* set.
+            Shallow copy with *loss_function* and *loss_inputs* set.
         """
-        return replace(self, reward=reward, reward_inputs=reward_inputs)
+        return replace(self, loss_function=loss_function, loss_inputs=loss_inputs)
 
     def with_reconciler(
         self,
@@ -188,7 +188,7 @@ class SamplerStepOutput(Generic[StateT]):  # noqa: UP046
     r"""Denoised prediction :math:`\hat{x}_\theta` from this step, if available."""
 
     loss: Float[Array, " batch"] | None = None
-    """Loss/reward value from scaler, if guidance was applied."""
+    """Loss value from scaler, if guidance was applied."""
 
     log_proposal_correction: Float[Array, " batch"] | None = None
     r"""Log-ratio of base to guided proposal densities for trajectory-based resampling:
@@ -237,9 +237,9 @@ class Sampler(Protocol[StateT, ModelWrapperT]):
         model_wrapper : FlowModelWrapper | EnergyBasedModelWrapper | StructureModelWrapper
             Model wrapper for performing model evaluations.
         context : StepParams
-            Step metadata (time, learning rate, reward/reward_inputs, etc.)
+            Step metadata (time, learning rate, loss/loss_inputs, etc.)
         scaler : StepScalerProtocol | None
-            Optional step scaler to modify sampler step using reward from context.
+            Optional step scaler to modify sampler step using loss from context.
         features : GenerativeModelInput | None
             Additional model features/inputs, if any.
 
@@ -247,7 +247,7 @@ class Sampler(Protocol[StateT, ModelWrapperT]):
         -------
         SamplerStepOutput[StateT]
             Output containing updated state, and optionally the denoised prediction, and
-            reward/loss.
+            loss.
         """
         ...
 

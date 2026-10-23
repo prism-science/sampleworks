@@ -26,7 +26,7 @@ from sampleworks.synthetic.synthetic_utils import (
     atomarray_to_gemmi,
     BatchRowForMTZ,
     load_batch_csv,
-    load_structure_for_synthetic_reward,
+    load_structure_for_synthetic_loss,
     resolve_crystal_metadata,
     resolve_mtz_column,
     resolve_parallel_jobs,
@@ -86,7 +86,7 @@ def _build_rs_dataset_for_one_label(
         Structure-factor calculator holding the requested ASU amplitudes and phases.
     label : str
         Mtz column suffix. The resulted column names are ``F{label}``/``SIGF{label}``/
-        ``PHIF{label}``. The mtz column names should match what the structure-factor reward
+        ``PHIF{label}``. The mtz column names should match what the structure-factor loss
         later reads. In this script, we use ``"protein"`` and ``"total"`` as the labels.
     structure_factor_column : str
         SFcalculator attribute name passed to ``prepare_dataset`` (the amplitudes to emit).
@@ -152,7 +152,7 @@ def process_amplitudes_to_dataset(
         is False, which uses Phenix convention (1 = test, 0 = working).
     sigma_f_scale: float
         Scale factor to make a fake sigma column from the structure factor amplitude
-        values so that SFcalculator can load the output MTZ file as synthetic reward
+        values so that SFcalculator can load the output MTZ file as synthetic loss
         without errors. The actual sigma values only matter when computing R-factor.
     output_path: Path | None
         If provided, write the dataset to this MTZ file path.
@@ -165,7 +165,7 @@ def process_amplitudes_to_dataset(
     """
     # One dataset per label. Labels are free-form column suffixes (F{label}/SIGF{label}/
     # PHIF{label}). User should supply the resulted column names when using the mtz for
-    # structure-factor reward. In this script, we use "protein" and "total" (for protein
+    # structure-factor loss. In this script, we use "protein" and "total" (for protein
     # and bulk solvent) as the labels.
     # All sets share the same HKL index, so this is just a column-wise concat.
     dataset: rs.DataSet | None = None
@@ -263,7 +263,7 @@ def _process_single_row(
         Optional isotropic B-factor assigned to every retained atom.
     """
     structure_path = base_dir / row.filename
-    atom_array = load_structure_for_synthetic_reward(
+    atom_array = load_structure_for_synthetic_loss(
         structure_path,
         occupancy_mode=occupancy_mode,
         occupancy_values=row.occupancy_values,

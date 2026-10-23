@@ -609,19 +609,19 @@ class TestAlignmentReverseDiffusion:
         assert config.alignment_reverse_diffusion is False
 
 
-class TestRewardSelection:
-    """--reward-type picks a reward and brings that reward's options with it."""
+class TestLossSelection:
+    """--loss-type picks a loss and brings that loss's options with it."""
 
     MODEL_ARGS = ["--model", "boltz2", "--guidance-type", "pure_guidance"]
     STRUCTURE_ARGS = ["--protein", "1VME", "--structure", "test.cif"]
 
-    def test_density_is_the_default_reward(self):
-        """Every command line written before rewards were selectable still means density."""
+    def test_density_is_the_default_loss(self):
+        """Every command line written before losses were selectable still means density."""
         config = GuidanceConfig.from_cli(self.MODEL_ARGS + COMMON_ARGS)
 
-        assert list(config.reward_config) == ["real_space_density"]
+        assert list(config.loss_config) == ["real_space_density"]
         # Defaults are written out, so the run records what it actually used.
-        assert config.reward_config["real_space_density"]["reward_options"] == {
+        assert config.loss_config["real_space_density"]["loss_options"] == {
             "density": "test.ccp4",
             "resolution": 1.8,
             "loss_order": 2,
@@ -641,12 +641,12 @@ class TestRewardSelection:
             True,
         )
 
-    def test_structure_factor_reward_takes_its_own_options(self):
+    def test_structure_factor_loss_takes_its_own_options(self):
         config = GuidanceConfig.from_cli(
             self.MODEL_ARGS
             + self.STRUCTURE_ARGS
             + [
-                "--reward-type",
+                "--loss-type",
                 "structure_factor",
                 "--mtzfile",
                 "1vme.mtz",
@@ -659,20 +659,20 @@ class TestRewardSelection:
             ]
         )
 
-        assert list(config.reward_config) == ["structure_factor"]
-        options = config.reward_config["structure_factor"]["reward_options"]
+        assert list(config.loss_config) == ["structure_factor"]
+        options = config.loss_config["structure_factor"]["loss_options"]
         assert options["mtzfile"] == "1vme.mtz"
         assert options["expcolumns"] == ["FP", "SIGFP"]
         assert options["bulk_solvent"] == "combined"
         assert options["normalize_amplitude"] is True
         assert options["batch_partition"] == 10  # defaulted, and recorded as such
 
-    def test_diffuse_bragg_reward_takes_its_own_options(self):
+    def test_diffuse_bragg_loss_takes_its_own_options(self):
         config = GuidanceConfig.from_cli(
             self.MODEL_ARGS
             + self.STRUCTURE_ARGS
             + [
-                "--reward-type",
+                "--loss-type",
                 "diffuse_bragg",
                 "--bragg-target",
                 "bragg.mtz",
@@ -683,20 +683,20 @@ class TestRewardSelection:
             ]
         )
 
-        assert list(config.reward_config) == ["diffuse_bragg"]
-        options = config.reward_config["diffuse_bragg"]["reward_options"]
+        assert list(config.loss_config) == ["diffuse_bragg"]
+        options = config.loss_config["diffuse_bragg"]["loss_options"]
         assert options["bragg_target"] == "bragg.mtz"
         assert options["diffuse_target"] == "diffuse.mtz"
         assert options["bragg_weight"] == 0.3
         assert options["normalize"] is True  # defaulted, and recorded as such
 
-    def test_options_of_another_reward_are_rejected(self):
-        """--density means nothing to the structure-factor reward, so it must not be accepted."""
+    def test_options_of_another_loss_are_rejected(self):
+        """--density means nothing to the structure-factor loss, so it must not be accepted."""
         argv = (
             self.MODEL_ARGS
             + self.STRUCTURE_ARGS
             + [
-                "--reward-type",
+                "--loss-type",
                 "structure_factor",
                 "--mtzfile",
                 "1vme.mtz",
@@ -708,19 +708,19 @@ class TestRewardSelection:
         with pytest.raises(SystemExit):
             GuidanceConfig.from_cli(argv)
 
-    def test_an_unknown_reward_type_is_rejected(self):
-        argv = self.MODEL_ARGS + COMMON_ARGS + ["--reward-type", "diffuse_scattering"]
+    def test_an_unknown_loss_type_is_rejected(self):
+        argv = self.MODEL_ARGS + COMMON_ARGS + ["--loss-type", "diffuse_scattering"]
 
         with pytest.raises(SystemExit):
             GuidanceConfig.from_cli(argv)
 
-    def test_a_reward_missing_a_required_input_fails_before_anything_is_loaded(self):
-        argv = self.MODEL_ARGS + self.STRUCTURE_ARGS + ["--reward-type", "structure_factor"]
+    def test_a_loss_missing_a_required_input_fails_before_anything_is_loaded(self):
+        argv = self.MODEL_ARGS + self.STRUCTURE_ARGS + ["--loss-type", "structure_factor"]
 
         with pytest.raises(SystemExit):
             GuidanceConfig.from_cli(argv)
 
-    def test_help_lists_the_selected_reward_s_options(self):
+    def test_help_lists_the_selected_loss_s_options(self):
         result = subprocess.run(
             [
                 sys.executable,
@@ -730,7 +730,7 @@ class TestRewardSelection:
                 "boltz1",
                 "--guidance-type",
                 "pure_guidance",
-                "--reward-type",
+                "--loss-type",
                 "structure_factor",
                 "--help",
             ],
@@ -742,8 +742,8 @@ class TestRewardSelection:
         assert b"--density" not in result.stdout
 
 
-class TestRewardConfigFile:
-    """--reward-config is the same configuration, from a file, and the only way to compose."""
+class TestLossConfigFile:
+    """--loss-config is the same configuration, from a file, and the only way to compose."""
 
     BASE = [
         "--model",
@@ -757,7 +757,7 @@ class TestRewardConfigFile:
     ]
 
     def write_config(self, tmp_path, text: str) -> str:
-        config_file = tmp_path / "rewards.yaml"
+        config_file = tmp_path / "losses.yaml"
         config_file.write_text(text)
         return str(config_file)
 
@@ -765,11 +765,11 @@ class TestRewardConfigFile:
         from_file = GuidanceConfig.from_cli(
             self.BASE
             + [
-                "--reward-config",
+                "--loss-config",
                 self.write_config(
                     tmp_path,
                     "real_space_density:\n"
-                    "  reward_options:\n"
+                    "  loss_options:\n"
                     "    density: test.ccp4\n"
                     "    resolution: 1.8\n"
                     "    loss_order: 1\n",
@@ -780,42 +780,42 @@ class TestRewardConfigFile:
             self.BASE + ["--density", "test.ccp4", "--resolution", "1.8", "--loss-order", "1"]
         )
 
-        assert from_file.reward_config == from_flags.reward_config
+        assert from_file.loss_config == from_flags.loss_config
 
-    def test_several_weighted_rewards_can_be_configured(self, tmp_path):
+    def test_several_weighted_losses_can_be_configured(self, tmp_path):
         config = GuidanceConfig.from_cli(
             self.BASE
             + [
-                "--reward-config",
+                "--loss-config",
                 self.write_config(
                     tmp_path,
                     "real_space_density:\n"
                     "  weight: 0.4\n"
-                    "  reward_options: {density: test.ccp4, resolution: 1.8}\n"
+                    "  loss_options: {density: test.ccp4, resolution: 1.8}\n"
                     "structure_factor:\n"
                     "  weight: 0.6\n"
-                    "  reward_options: {mtzfile: test.mtz}\n",
+                    "  loss_options: {mtzfile: test.mtz}\n",
                 ),
             ]
         )
 
-        assert config.resolved_reward_config().resolved_weights() == (0.4, 0.6)
+        assert config.resolved_loss_config().resolved_weights() == (0.4, 0.6)
         assert config.density == "test.ccp4"  # the density term still mirrors out
 
-    def test_a_config_file_and_a_reward_type_together_are_rejected(self, tmp_path):
+    def test_a_config_file_and_a_loss_type_together_are_rejected(self, tmp_path):
         argv = self.BASE + [
-            "--reward-config",
+            "--loss-config",
             self.write_config(tmp_path, "real_space_density: {}\n"),
-            "--reward-type",
+            "--loss-type",
             "real_space_density",
         ]
 
         with pytest.raises(SystemExit):
             GuidanceConfig.from_cli(argv)
 
-    def test_per_reward_flags_are_not_accepted_alongside_a_config_file(self, tmp_path):
+    def test_per_loss_flags_are_not_accepted_alongside_a_config_file(self, tmp_path):
         argv = self.BASE + [
-            "--reward-config",
+            "--loss-config",
             self.write_config(tmp_path, "real_space_density: {}\n"),
             "--loss-order",
             "1",
@@ -826,8 +826,8 @@ class TestRewardConfigFile:
 
     def test_a_broken_config_file_is_a_usage_error(self, tmp_path):
         argv = self.BASE + [
-            "--reward-config",
-            self.write_config(tmp_path, "real_space_density:\n  reward_options: {looss: 1}\n"),
+            "--loss-config",
+            self.write_config(tmp_path, "real_space_density:\n  loss_options: {looss: 1}\n"),
         ]
 
         with pytest.raises(SystemExit):

@@ -4,7 +4,7 @@ The latents are the *single* representation ``s`` and the *pair* representation 
 the model's *conditioning* -- the bundle of inputs ``featurize`` produces and hands to the ``step``
 (denoise) call, a (frozen) dataclass on which ``s`` and ``z`` are named attributes. This module lets
 inference-time latent optimization (IT-opt) read those attributes and swap them out, so the scaler
-in ``core/scalers/latent_optimization.py`` can optimize them against an experimental reward. See
+in ``core/scalers/latent_optimization.py`` can optimize them against an experimental loss. See
 ``docs/IT_OPT_DESIGN.md``.
 
 What each piece is for

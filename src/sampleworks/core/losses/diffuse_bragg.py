@@ -1,8 +1,8 @@
-"""Combined Bragg + diffuse reward, scored through the lunus.sf engine.
+"""Combined Bragg + diffuse loss, scored through the lunus.sf engine.
 
 One forward pass gives both observables: ``structure_factors_batch`` returns
 ``F`` per configuration, and ``mean_and_diffuse`` reduces that to ``<F>`` (Bragg)
-and ``<|F|²> − |<F>|²`` (diffuse). Scoring them in one reward rather than two
+and ``<|F|²> − |<F>|²`` (diffuse). Scoring them in one loss rather than two
 avoids paying for the grid evaluation and FFT twice.
 
 Each term keeps its own reflection list. Bragg data are indexed on the crystal
@@ -21,7 +21,7 @@ The two terms are combined convexly, ``bragg_weight`` running from 1.0 (pure
 Bragg) to 0.0 (pure diffuse). Each term is ``||s·calc − obs||² / ||obs||²`` with
 ``s`` the least-squares scale (``fit_scale``) and the denominator the
 normalization (``normalize``); with both on, a term is ``1 − cos²(calc, obs)``
-and lies in [0, 1]. This is the structure-factor reward's MSE divided by the
+and lies in [0, 1]. This is the structure-factor loss's MSE divided by the
 mean squared target. The division is what lets ``bragg_weight`` mix the terms:
 a Bragg residual is an L2 on amplitudes and a diffuse residual an L2 on
 intensities, so their raw magnitudes differ by orders of magnitude and an
@@ -55,9 +55,9 @@ from loguru import logger
 from lunus.sf import mean_and_diffuse
 from lunus.sf.symmetry_torch import supercell_factors
 from sampleworks.core.forward_models.xray import lunus_sf
-from sampleworks.core.rewards.options import DiffuseBraggOptions
-from sampleworks.core.rewards.protocol import RewardInputs
-from sampleworks.core.rewards.registry import RewardBuildContext
+from sampleworks.core.losses.options import DiffuseBraggOptions
+from sampleworks.core.losses.protocol import LossInputs
+from sampleworks.core.losses.registry import LossBuildContext
 from sampleworks.synthetic.synthetic_utils import resolve_mtz_column
 
 
@@ -65,26 +65,26 @@ if TYPE_CHECKING:
     from lunus.sf import IsotropicBackground
 
 
-# Bulk-solvent treatment, named as in StructureFactorRewardFunction. lunus builds
+# Bulk-solvent treatment, named as in StructureFactorLossFunction. lunus builds
 # its mask per configuration, so there is no "combined" mode here.
 _BULK_SOLVENT_MODES = ("off", "per_conformer")
 # Taper width for an explicit solvent cutoff, in the cutoff's own units (e/A^3; the
 # mask thresholds blurred density), as in generate_synthetic_sf_lunus. The cutoff
 # itself is calibrated by default; see prepare().
 DEFAULT_SOLVENT_TAPER_WIDTH = 0.10
-# Retained-reflection thresholds, as in StructureFactorRewardFunction: the fraction
+# Retained-reflection thresholds, as in StructureFactorLossFunction: the fraction
 # catches an R-free convention mismatch, the count a reflection set too small to guide.
 _MIN_RETAINED_REFLECTION_FRACTION = 0.75
 _MIN_RETAINED_REFLECTIONS = 5_000
 
 
-class DiffuseBraggRewardFunction:
+class DiffuseBraggLossFunction:
     """Score an ensemble against Bragg amplitudes and anisotropic diffuse data.
 
-    Construction is two-phase, like ``StructureFactorRewardFunction``: the
+    Construction is two-phase, like ``StructureFactorLossFunction``: the
     targets and configuration are read in ``__init__``, but the scattering
     kernels, grid and symmetry operations need the model topology and so are
-    built in :meth:`prepare` from the ``RewardInputs``, which the caller must
+    built in :meth:`prepare` from the ``LossInputs``, which the caller must
     invoke before the first evaluation.
 
     Parameters
@@ -126,7 +126,7 @@ class DiffuseBraggRewardFunction:
     bulk_solvent
         ``"off"`` (default) scores ``|Fprotein|``; ``"per_conformer"`` adds a
         bulk-solvent contribution from a mask built on each configuration's own
-        density, giving ``|Ftotal|``. Named as in ``StructureFactorRewardFunction``;
+        density, giving ``|Ftotal|``. Named as in ``StructureFactorLossFunction``;
         lunus has no single-mask ``"combined"`` mode.
     solvent_cutoff, solvent_taper_width
         Density below which a voxel is solvent, and the width of the mask's smooth
@@ -151,7 +151,7 @@ class DiffuseBraggRewardFunction:
     Attributes
     ----------
     current_time
-        Diffusion time for a callable ``bragg_weight``. ``RewardFunctionProtocol``
+        Diffusion time for a callable ``bragg_weight``. ``LossFunctionProtocol``
         carries no ``t``, so nothing in the sampling loop sets this today;
         annealing the mixture needs a caller that does.
     """
@@ -324,7 +324,7 @@ class DiffuseBraggRewardFunction:
                     raise NotImplementedError(
                         f"The diffuse target is indexed on a {factors} supercell of the "
                         f"Bragg cell, i.e. at fractional hkl. Evaluating the model there "
-                        "needs its own supercell grid, which this reward does not build "
+                        "needs its own supercell grid, which this loss does not build "
                         "yet (#493); supply a diffuse target indexed on the Bragg cell."
                     )
 
@@ -442,7 +442,7 @@ class DiffuseBraggRewardFunction:
     def _working_set_mask(self, dataset: rs.DataSet, column: str) -> np.ndarray:
         """Mask over the finite rows of ``column`` that are not in the R-free test set.
 
-        Mirrors ``StructureFactorRewardFunction._build_reflection_mask``: raise if
+        Mirrors ``StructureFactorLossFunction._build_reflection_mask``: raise if
         nothing remains, warn if the retained fraction or count is suspiciously low,
         since a low fraction usually means ``test_set_value`` has the wrong convention.
 
@@ -490,7 +490,7 @@ class DiffuseBraggRewardFunction:
             )
         return keep
 
-    def prepare(self, reward_inputs: RewardInputs, *, device: torch.device | str = "cpu") -> None:
+    def prepare(self, loss_inputs: LossInputs, *, device: torch.device | str = "cpu") -> None:
         """Build the scattering setup and the anisotropic transform on ``device``.
 
         Must be called with the inputs built for the sampled coordinates — model
@@ -498,7 +498,7 @@ class DiffuseBraggRewardFunction:
         mismatch — since their atom ordering fixes the columns of every
         coordinate tensor passed to :meth:`__call__`.
 
-        The topology comes from :meth:`RewardInputs.to_atom_array`, which carries
+        The topology comes from :meth:`LossInputs.to_atom_array`, which carries
         the model atom identities together with the reconciled coordinates and
         B-factors ``__call__`` will see. The B-factors matter here and not only
         there: :func:`lunus_sf.build_setup` bakes them into the scattering
@@ -506,9 +506,9 @@ class DiffuseBraggRewardFunction:
 
         Parameters
         ----------
-        reward_inputs
+        loss_inputs
             Inputs for the sampled coordinates, as returned by
-            ``SampleworksProcessedStructure.to_reward_inputs``. Needs an
+            ``SampleworksProcessedStructure.to_loss_inputs``. Needs an
             ``atom_array`` to take the topology from.
         device
             Torch device to build on. Every tensor built here is allocated on it,
@@ -517,19 +517,17 @@ class DiffuseBraggRewardFunction:
         Raises
         ------
         ValueError
-            If ``reward_inputs`` carries no atom array.
+            If ``loss_inputs`` carries no atom array.
         """
         device = torch.device(device)
-        if reward_inputs.atom_array is None:
+        if loss_inputs.atom_array is None:
             raise ValueError(
-                "DiffuseBraggRewardFunction.prepare() needs reward_inputs.atom_array "
+                "DiffuseBraggLossFunction.prepare() needs loss_inputs.atom_array "
                 "for the topology required to build the scattering kernels."
             )
         # <|F|^2> - |<F>|^2 is identically zero for one configuration, so the
         # diffuse term then contributes a constant and no gradient.
-        n_configs = (
-            reward_inputs.input_coords.shape[0] if reward_inputs.input_coords.ndim == 3 else 1
-        )
+        n_configs = loss_inputs.input_coords.shape[0] if loss_inputs.input_coords.ndim == 3 else 1
         if self._scores_diffuse and n_configs < 2:
             logger.warning(
                 "The diffuse term is weighted but the ensemble has one configuration, "
@@ -538,7 +536,7 @@ class DiffuseBraggRewardFunction:
                 "Bragg alone."
             )
         self.setup = lunus_sf.build_setup(
-            reward_inputs.to_atom_array(),
+            loss_inputs.to_atom_array(),
             self.unit_cell,
             self.space_group.hm,
             self.resolution or self._highest_resolution(),
@@ -557,7 +555,7 @@ class DiffuseBraggRewardFunction:
         # Recalibrated on every prepare(): the matched cutoff belongs to the topology
         # and grid prepared here, and prepare() may be re-run for different inputs.
         if self.bulk_solvent == "per_conformer" and self.solvent_cutoff is None:
-            reference = reward_inputs.to_atom_array()
+            reference = loss_inputs.to_atom_array()
             target = lunus_sf.geometric_solvent_fraction(
                 reference, reference.coord, self.unit_cell, self.space_group, self.setup.grid_shape
             )
@@ -600,7 +598,7 @@ class DiffuseBraggRewardFunction:
             self._isotropic_background_subtractor = isotropic_background
 
         logger.info(
-            f"Prepared DiffuseBraggRewardFunction: {len(self._hkl)} reflections evaluated, "
+            f"Prepared DiffuseBraggLossFunction: {len(self._hkl)} reflections evaluated, "
             f"bragg_weight={self.bragg_weight}, normalize={self.normalize}, "
             f"fit_scale={self.fit_scale}"
         )
@@ -627,8 +625,8 @@ class DiffuseBraggRewardFunction:
         if self.current_time is None:
             raise RuntimeError(
                 "bragg_weight is a callable of the diffusion time, but current_time "
-                "was never set. RewardFunctionProtocol carries no t, so a caller "
-                "must set reward.current_time before each evaluation."
+                "was never set. LossFunctionProtocol carries no t, so a caller "
+                "must set loss.current_time before each evaluation."
             )
         weight = float(weight_of_time(self.current_time))
         if not 0.0 <= weight <= 1.0:
@@ -684,9 +682,9 @@ class DiffuseBraggRewardFunction:
         kernels built by :meth:`prepare`, which is also why B-factors cannot vary
         per configuration here.
 
-        ``occupancies`` arrive as ``1/N`` from ``RewardInputs`` because the sum-based
-        rewards add ``F`` over configurations and need the ``1/N`` to get the
-        ensemble mean. This reward takes the mean and variance itself in
+        ``occupancies`` arrive as ``1/N`` from ``LossInputs`` because the sum-based
+        losses add ``F`` over configurations and need the ``1/N`` to get the
+        ensemble mean. This loss takes the mean and variance itself in
         ``mean_and_diffuse``, so it needs each configuration's ``F`` at full
         occupancy and multiplies the ``1/N`` back out. Left in place it would scale
         both moments by ``1/N²`` and shrink the diffuse term toward zero, which
@@ -698,8 +696,8 @@ class DiffuseBraggRewardFunction:
         """
         if self.setup is None:
             raise RuntimeError(
-                "DiffuseBraggRewardFunction.prepare() must be called with the model "
-                "atom array before the reward is evaluated."
+                "DiffuseBraggLossFunction.prepare() must be called with the model "
+                "atom array before the loss is evaluated."
             )
 
         n_configs = coordinates.shape[0]
@@ -738,25 +736,25 @@ class DiffuseBraggRewardFunction:
         return total
 
 
-def build_diffuse_bragg_reward(
-    options: DiffuseBraggOptions, context: RewardBuildContext
-) -> DiffuseBraggRewardFunction:
-    """Build the combined Bragg + diffuse reward from its configured options.
+def build_diffuse_bragg_loss(
+    options: DiffuseBraggOptions, context: LossBuildContext
+) -> DiffuseBraggLossFunction:
+    """Build the combined Bragg + diffuse loss from its configured options.
 
-    Like the structure-factor reward this one binds to the model topology in
-    :meth:`DiffuseBraggRewardFunction.prepare`, so ``context`` is unused.
+    Like the structure-factor loss this one binds to the model topology in
+    :meth:`DiffuseBraggLossFunction.prepare`, so ``context`` is unused.
 
     Parameters
     ----------
     options
-        Reward options; see :class:`~sampleworks.core.rewards.options.DiffuseBraggOptions`.
+        Loss options; see :class:`~sampleworks.core.losses.options.DiffuseBraggOptions`.
     context
         Run-level inputs. Unused here, kept for a uniform builder signature.
 
     Returns
     -------
-    DiffuseBraggRewardFunction
-        Reward scoring the ensemble against the MTZ targets.
+    DiffuseBraggLossFunction
+        Loss scoring the ensemble against the MTZ targets.
 
     Raises
     ------
@@ -771,16 +769,16 @@ def build_diffuse_bragg_reward(
         )
     if options.bragg_weight > 0.0 and options.bragg_target is None:
         raise ValueError(
-            "The diffuse_bragg reward needs a Bragg target unless --bragg-weight is 0. "
-            "Pass --bragg-target, or set reward_options.bragg_target in a --reward-config file."
+            "The diffuse_bragg loss needs a Bragg target unless --bragg-weight is 0. "
+            "Pass --bragg-target, or set loss_options.bragg_target in a --loss-config file."
         )
     if options.bragg_weight < 1.0 and options.diffuse_target is None:
         raise ValueError(
-            "The diffuse_bragg reward needs a diffuse target unless --bragg-weight is 1. "
-            "Pass --diffuse-target, or set reward_options.diffuse_target in a --reward-config file."
+            "The diffuse_bragg loss needs a diffuse target unless --bragg-weight is 1. "
+            "Pass --diffuse-target, or set loss_options.diffuse_target in a --loss-config file."
         )
 
-    return DiffuseBraggRewardFunction(
+    return DiffuseBraggLossFunction(
         bragg_target=options.bragg_target,
         diffuse_target=options.diffuse_target,
         bragg_weight=options.bragg_weight,

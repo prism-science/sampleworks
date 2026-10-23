@@ -25,8 +25,8 @@ from biotite.structure import (
 from biotite.structure.io.pdbx import CIFFile, set_structure
 from loguru import logger
 
-from sampleworks.core.rewards.config import build_reward
-from sampleworks.core.rewards.registry import RewardBuildContext
+from sampleworks.core.losses.config import build_loss
+from sampleworks.core.losses.registry import LossBuildContext
 from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
 from sampleworks.core.scalers.fk_steering import FKSteering
 from sampleworks.core.scalers.latent_optimization import LatentOptimization  # IT-opt wiring (added)
@@ -180,14 +180,14 @@ def relabel_model_residues(
     struct_atom_array: AtomArray,
     reconciler: AtomReconciler,
 ) -> AtomArray:
-    """Give the model topology the input's residue labels and the B-factors the reward scored.
+    """Give the model topology the input's residue labels and the B-factors the loss scored.
 
     Chain, residue number and insertion code come from the input for every model residue with a
     matched atom. Residues the input lacks (termini or gaps predicted under a sequence override)
     take the chain and numbering of the nearest matched residue in the same model chain,
     continuing consecutively. Everything else (atoms, order, names, elements, occupancy) stays
     the model's, except ``b_factor`` on matched atoms, which is the input's, as in
-    ``SampleworksProcessedStructure.to_reward_inputs``.
+    ``SampleworksProcessedStructure.to_loss_inputs``.
 
     Parameters
     ----------
@@ -457,9 +457,9 @@ def get_model_and_device(
 def load_guidance_structure(structure_path: str | Path) -> dict[str, Any]:
     """Parse the input structure for a guidance run.
 
-    Reward-agnostic: every reward in a run scores the same structure, so it is
-    loaded once here and handed to the reward builders through
-    :class:`~sampleworks.core.rewards.registry.RewardBuildContext`.
+    Loss-agnostic: every loss in a run scores the same structure, so it is
+    loaded once here and handed to the loss builders through
+    :class:`~sampleworks.core.losses.registry.LossBuildContext`.
 
     Parameters
     ----------
@@ -666,11 +666,11 @@ def _three_state_resolver(value: str | bool | None, default: bool) -> bool:
 def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, device):
     """Run one configured guidance trajectory and save its outputs."""
     structure = load_guidance_structure(args.structure)
-    logger.info("Creating reward function")
-    reward_function = build_reward(
-        args.resolved_reward_config(),
+    logger.info("Creating loss function")
+    loss_function = build_loss(
+        args.resolved_loss_config(),
         # device comes from the global context, not the args object.
-        RewardBuildContext(structure=structure, device=device),
+        LossBuildContext(structure=structure, device=device),
     )
 
     # Determine model type from wrapper class name
@@ -798,7 +798,7 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
             model=model_wrapper,
             sampler=sampler,
             step_scaler=step_scaler,
-            reward=reward_function,
+            loss_function=loss_function,
         )
 
         refined_structure = result.structure
@@ -830,7 +830,7 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
             model=model_wrapper,
             sampler=sampler,
             step_scaler=step_scaler,
-            reward=reward_function,
+            loss_function=loss_function,
             num_particles=args.num_particles,
         )
 
@@ -843,7 +843,7 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
     # This branch belongs to _run_guidance() and is the entry point for latent optimization. Whereas
     # pure guidance and FK steering steer the atomic coordinates, latent optimization instead
     # optimizes the frozen model's cached trunk latents (the single representation s and/or the pair
-    # representation z) against the reward, then samples with those latents held fixed. We read the
+    # representation z) against the loss, then samples with those latents held fixed. We read the
     # knobs off the config as the other branches do and hand the optimize-then-sample loop to
     # LatentOptimization.
     elif guidance_type == GuidanceType.LATENT_OPT:
@@ -904,7 +904,7 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
             model=model_wrapper,
             sampler=sampler,
             step_scaler=step_scaler,
-            reward=reward_function,
+            loss_function=loss_function,
         )
 
         refined_structure = result.structure

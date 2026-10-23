@@ -6,7 +6,7 @@ import torch
 from loguru import logger
 from tqdm import tqdm
 
-from sampleworks.core.rewards.protocol import prepare_reward_if_needed, RewardFunctionProtocol
+from sampleworks.core.losses.protocol import LossFunctionProtocol, prepare_loss_if_needed
 from sampleworks.core.samplers.protocol import TrajectorySampler
 from sampleworks.core.scalers.protocol import GuidanceOutput, StepScalerProtocol
 from sampleworks.models.protocol import FlowModelWrapper
@@ -49,7 +49,7 @@ class PureGuidance:
         model: FlowModelWrapper,
         sampler: TrajectorySampler,
         step_scaler: StepScalerProtocol,
-        reward: RewardFunctionProtocol,
+        loss_function: LossFunctionProtocol,
         num_particles: int = 1,
     ) -> GuidanceOutput:
         """Samples an ensemble using pure guidance.
@@ -65,8 +65,8 @@ class PureGuidance:
             Sampler to use for the diffusion trajectory.
         step_scaler : StepScalerProtocol
             StepScalerProtocol to use for guidance scaling.
-        reward : RewardFunctionProtocol
-            Reward function to use for guidance.
+        loss_function : LossFunctionProtocol
+            Loss function to use for guidance.
         num_particles : int (optional)
             Number of particles to sample in parallel. For PureGuidance, this is ignored since
             no reweighting/resampling is performed.
@@ -88,12 +88,12 @@ class PureGuidance:
         )
 
         reconciler = processed_structure.reconciler.to(coords.device)
-        reward_inputs = processed_structure.to_reward_inputs(device=coords.device)
-        # Two-phase rewards are bound to the same inputs every step hands to `reward`: model
+        loss_inputs = processed_structure.to_loss_inputs(device=coords.device)
+        # Two-phase losses are bound to the same inputs every step hands to `loss_function`: model
         # atom order, the structure's B-factors on the common atoms, and the reconciled
         # reference coordinates. `processed_structure` (a frozen dataclass) and its atom
         # arrays are never written to.
-        prepare_reward_if_needed(reward, reward_inputs, device=coords.device)
+        prepare_loss_if_needed(loss_function, loss_inputs, device=coords.device)
 
         trajectory_denoised: list[torch.Tensor] = []
         trajectory_next_step: list[torch.Tensor] = []
@@ -115,7 +115,7 @@ class PureGuidance:
             apply_guidance = i >= self.guidance_start
 
             if apply_guidance:
-                context = context.with_reward(reward, reward_inputs)
+                context = context.with_loss(loss_function, loss_inputs)
 
             context = context.with_reconciler(
                 reconciler=reconciler,

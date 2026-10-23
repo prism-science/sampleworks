@@ -1,9 +1,9 @@
-"""Which atom array the reward tensors and the prepare hook both follow.
+"""Which atom array the loss tensors and the prepare hook both follow.
 
-``SampleworksProcessedStructure.reward_atom_array`` is the single expression of
-a choice two callers depend on: ``to_reward_inputs`` builds the reward tensors
-from it, and the trajectory scalers pass it to ``prepare_reward_if_needed``. If
-those two ever disagreed, a reward would be prepared for one atom ordering and
+``SampleworksProcessedStructure.loss_atom_array`` is the single expression of
+a choice two callers depend on: ``to_loss_inputs`` builds the loss tensors
+from it, and the trajectory scalers pass it to ``prepare_loss_if_needed``. If
+those two ever disagreed, a loss would be prepared for one atom ordering and
 scored on another — and no shape check would catch it, because the model and
 structure arrays can have the same length. The property exists so there is only
 one answer; these pin what it is.
@@ -56,7 +56,7 @@ def test_prefers_the_model_array_when_the_model_exposes_one():
 
     processed = _processed(structure_array, model_array)
 
-    assert processed.reward_atom_array is model_array
+    assert processed.loss_atom_array is model_array
 
 
 def test_falls_back_to_the_structure_array_when_the_model_has_none():
@@ -65,15 +65,15 @@ def test_falls_back_to_the_structure_array_when_the_model_has_none():
 
     processed = _processed(structure_array, None)
 
-    assert processed.reward_atom_array is structure_array
+    assert processed.loss_atom_array is structure_array
 
 
-def test_reward_inputs_are_built_from_the_same_array():
+def test_loss_inputs_are_built_from_the_same_array():
     """The whole point of the property: one choice, not two that can drift."""
     structure_array = _atom_array(4, element="C")
     model_array = _atom_array(4, element="N")
     processed = _processed(structure_array, model_array)
 
-    reward_inputs = processed.to_reward_inputs()
+    loss_inputs = processed.to_loss_inputs()
 
-    assert reward_inputs.elements.shape[-1] == len(processed.reward_atom_array)
+    assert loss_inputs.elements.shape[-1] == len(processed.loss_atom_array)

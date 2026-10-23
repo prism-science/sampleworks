@@ -821,7 +821,7 @@ def parse_args() -> argparse.Namespace:
         help="Log RF3 chiral gradient magnitudes at each denoising step",
     )
 
-    # Reward/Loss function arguments
+    # Loss function arguments
     parser.add_argument("--loss-order", type=int, default=2, help="L1 (1) or L2 (2) loss")
 
     # Output arguments

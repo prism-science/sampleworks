@@ -1,7 +1,7 @@
 """
 Protocols for scalers. Two levels of abstraction - step-level intervention and trajectory-level
 intervention. Examples of the first include training-free guidance, DPS, DMAP, simple gradient steps
-toward reward, etc. The second level includes methods that do resampling or modify the sampling
+down the loss, etc. The second level includes methods that do resampling or modify the sampling
 trajectory itself, such as sequential Monte Carlo methods, Feynman-Kaç Steering, DriftLite.
 """
 
@@ -24,7 +24,7 @@ from sampleworks.utils.framework_utils import Array
 
 
 if TYPE_CHECKING:
-    from sampleworks.core.rewards.protocol import RewardFunctionProtocol
+    from sampleworks.core.losses.protocol import LossFunctionProtocol
     from sampleworks.core.samplers.protocol import StepParams, TrajectorySampler
 
 
@@ -53,7 +53,7 @@ class StepScalerProtocol(Protocol[ModelWrapperT]):
     """Protocol for guidance that modifies the model output.
 
     StepScalers operate on a per-step basis, computing guidance directions
-    from the reward function gradient. Reward function and inputs are
+    from the loss function gradient. Loss function and inputs are
     obtained from StepParams.
     """
 
@@ -64,14 +64,14 @@ class StepScalerProtocol(Protocol[ModelWrapperT]):
         *,
         model: ModelWrapperT | None = None,
     ) -> tuple[ModelOutputT, Float[Array, " batch"]]:
-        r"""Compute guidance direction and reward value.
+        r"""Compute guidance direction and loss value.
 
         Parameters
         ----------
         state
             Current model output (e.g., :math:`\hat{x}_\theta` prediction).
         context
-            Step context containing t, dt, and reward/reward_inputs.
+            Step context containing t, dt, and loss/loss_inputs.
         model
             Optional model wrapper for noise-space guidance requiring
             backprop through model.
@@ -79,7 +79,7 @@ class StepScalerProtocol(Protocol[ModelWrapperT]):
         Returns
         -------
         tuple[ModelOutputT, Float[Array, " batch"]]
-            Guidance direction tensor and the scalar reward/loss value.
+            Guidance direction tensor and the scalar loss value.
         """
         ...
 
@@ -103,7 +103,7 @@ class TrajectoryScalerProtocol(Protocol):
         model: FlowModelWrapper,
         sampler: TrajectorySampler,
         step_scaler: StepScalerProtocol[FlowModelWrapper],
-        reward: RewardFunctionProtocol,
+        loss_function: LossFunctionProtocol,
         num_particles: int = 1,
     ) -> GuidanceOutput:
         """Generate samples using trajectory level scaling methods. Defines the loop around
@@ -119,8 +119,8 @@ class TrajectoryScalerProtocol(Protocol):
             Sampler to use for generating the trajectory, e.g. EDM solver, Annealed Langevin, etc.
         step_scaler: StepScalerProtocol
             StepScalerProtocol defining update rule for per-step guidance.
-        reward: RewardFunctionProtocol
-            Reward function for steering the model.
+        loss_function: LossFunctionProtocol
+            Loss function for steering the model.
         num_particles: int
             Number of particles for trajectory-level methods that require a population.
             Default is 1 (no population)."""

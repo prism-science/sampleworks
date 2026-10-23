@@ -2,7 +2,7 @@
 
 This file consolidates tests for:
 - All wrapper x sampler combinations (parametrized)
-- All step scalers with proper reward context (not mock-only)
+- All step scalers with proper loss context (not mock-only)
 - All trajectory scalers with real implementations
 - Guidance effectiveness ground truth tests
 - Numerical stability throughout trajectories
@@ -15,7 +15,7 @@ Tests are organized from fast (mock-based) to slow (real wrappers).
 
 import pytest
 import torch
-from sampleworks.core.rewards.protocol import RewardInputs
+from sampleworks.core.losses.protocol import LossInputs
 from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
 from sampleworks.core.samplers.protocol import SamplerStepOutput, StepParams
 from sampleworks.core.scalers.protocol import GuidanceOutput
@@ -50,14 +50,14 @@ from tests.mocks import (
     MismatchCase,
     MismatchCaseWrapper,
     MockFlowModelWrapper,
-    MockPreparableRewardFunction,
+    MockPreparableLossFunction,
     MockStepScaler,
 )
-from tests.mocks.rewards import MockGradientRewardFunction
+from tests.mocks.losses import MockGradientLossFunction
 from tests.utils.atom_array_builders import build_test_atom_array
 
 
-def create_step_context_with_reward(
+def create_step_context_with_loss(
     step_index: int,
     state: Tensor,
     device: torch.device,
@@ -68,7 +68,7 @@ def create_step_context_with_reward(
     noise_scale: float = 0.1,
     include_x_t: bool = False,
 ) -> StepParams:
-    """Create StepParams with reward for testing DPS scalers.
+    """Create StepParams with loss for testing DPS scalers.
 
     Parameters
     ----------
@@ -92,11 +92,11 @@ def create_step_context_with_reward(
     Returns
     -------
     StepParams
-        Context with reward and reward_inputs populated.
+        Context with loss and loss_inputs populated.
     """
     batch_size, num_atoms, _ = state.shape
-    reward = MockGradientRewardFunction()
-    reward_inputs = RewardInputs(
+    loss_function = MockGradientLossFunction()
+    loss_inputs = LossInputs(
         elements=torch.ones(batch_size, num_atoms, device=device),
         b_factors=torch.ones(batch_size, num_atoms, device=device) * 20.0,
         occupancies=torch.ones(batch_size, num_atoms, device=device),
@@ -114,8 +114,8 @@ def create_step_context_with_reward(
         t=torch.tensor([t] * batch_size, device=device),
         dt=torch.tensor([dt] * batch_size, device=device),
         noise_scale=torch.tensor([noise_scale] * batch_size, device=device),
-        reward=reward,
-        reward_inputs=reward_inputs,
+        loss_function=loss_function,
+        loss_inputs=loss_inputs,
         metadata=metadata,
     )
 
@@ -237,9 +237,9 @@ class TestStepScalerMatrix:
         assert torch.allclose(strength, torch.zeros(batch_size, device=device))
 
     def test_data_space_dps_gradient_equals_state(self, device: torch.device):
-        """DataSpaceDPSScaler gradient equals state when using MockGradientRewardFunction.
+        """DataSpaceDPSScaler gradient equals state when using MockGradientLossFunction.
 
-        MockGradientRewardFunction computes loss = 0.5 * ||coords||^2,
+        MockGradientLossFunction computes loss = 0.5 * ||coords||^2,
         so grad(loss) w.r.t. coords = coords.
         """
         scaler = DataSpaceDPSScaler(step_size=0.1)
@@ -250,7 +250,7 @@ class TestStepScalerMatrix:
         torch.manual_seed(123)
         state = torch.randn(batch_size, num_atoms, 3, device=device)
 
-        context = create_step_context_with_reward(0, state, device)
+        context = create_step_context_with_loss(0, state, device)
 
         direction, loss = scaler.scale(state, context, model=None)
 
@@ -282,8 +282,8 @@ class TestStepScalerMatrix:
         expected = torch.tensor([step_size] * batch_size, device=device)
         assert torch.allclose(strength, expected)
 
-    def test_data_space_dps_requires_reward_context(self, device: torch.device):
-        """DataSpaceDPSScaler raises error without reward context."""
+    def test_data_space_dps_requires_loss_context(self, device: torch.device):
+        """DataSpaceDPSScaler raises error without loss context."""
         scaler = DataSpaceDPSScaler(step_size=0.1)
         state = torch.randn(2, 10, 3, device=device)
 
@@ -294,7 +294,7 @@ class TestStepScalerMatrix:
             dt=torch.tensor([-0.1, -0.1], device=device),
         )
 
-        with pytest.raises(ValueError, match="missing reward"):
+        with pytest.raises(ValueError, match="missing loss"):
             scaler.scale(state, context, model=None)
 
     def test_noise_space_dps_requires_x_t_in_metadata(self, device: torch.device):
@@ -304,7 +304,7 @@ class TestStepScalerMatrix:
         num_atoms = 10
         state = torch.randn(batch_size, num_atoms, 3, device=device)
 
-        context = create_step_context_with_reward(0, state, device, include_x_t=False)
+        context = create_step_context_with_loss(0, state, device, include_x_t=False)
 
         with pytest.raises(ValueError, match="x_t"):
             scaler.scale(state, context, model=None)
@@ -323,8 +323,8 @@ class TestStepScalerMatrix:
         x_t = torch.randn(batch_size, num_atoms, 3, device=device, requires_grad=True)
         state = x_t * 0.9 + 0.1
 
-        reward = MockGradientRewardFunction()
-        reward_inputs = RewardInputs(
+        loss_function = MockGradientLossFunction()
+        loss_inputs = LossInputs(
             elements=torch.ones(batch_size, num_atoms, device=device),
             b_factors=torch.ones(batch_size, num_atoms, device=device) * 20.0,
             occupancies=torch.ones(batch_size, num_atoms, device=device),
@@ -336,8 +336,8 @@ class TestStepScalerMatrix:
             t=torch.tensor([0.5] * batch_size, device=device),
             dt=torch.tensor([-0.1] * batch_size, device=device),
             noise_scale=torch.tensor([0.1] * batch_size, device=device),
-            reward=reward,
-            reward_inputs=reward_inputs,
+            loss_function=loss_function,
+            loss_inputs=loss_inputs,
             metadata={"x_t": x_t},
         )
 
@@ -365,8 +365,8 @@ class TestStepScalerMatrix:
         if scaler_type == StepScalers.NOISE_SPACE_DPS:
             x_t = torch.randn(batch_size, num_atoms, 3, device=device, requires_grad=True)
             state = x_t * 0.9 + 0.1
-            reward = MockGradientRewardFunction()
-            reward_inputs = RewardInputs(
+            loss_function = MockGradientLossFunction()
+            loss_inputs = LossInputs(
                 elements=torch.ones(batch_size, num_atoms, device=device),
                 b_factors=torch.ones(batch_size, num_atoms, device=device) * 20.0,
                 occupancies=torch.ones(batch_size, num_atoms, device=device),
@@ -378,14 +378,14 @@ class TestStepScalerMatrix:
                 t=torch.tensor([0.5] * batch_size, device=device),
                 dt=torch.tensor([-0.1] * batch_size, device=device),
                 noise_scale=torch.tensor([0.1] * batch_size, device=device),
-                reward=reward,
-                reward_inputs=reward_inputs,
+                loss_function=loss_function,
+                loss_inputs=loss_inputs,
                 metadata={"x_t": x_t},
             )
         else:
             state = torch.randn(batch_size, num_atoms, 3, device=device)
-            if info.requires_reward:
-                context = create_step_context_with_reward(0, state, device)
+            if info.requires_loss:
+                context = create_step_context_with_loss(0, state, device)
             else:
                 context = StepParams(
                     step_index=0,
@@ -525,7 +525,7 @@ class TestTrajectoryScalerMatrixMock:
         mock_wrapper: MockFlowModelWrapper,
         mock_structure: dict,
         mock_step_scaler: MockStepScaler,
-        mock_gradient_reward: MockGradientRewardFunction,
+        mock_gradient_loss: MockGradientLossFunction,
     ):
         """TrajectoryScaler.sample() initializes from the prior and returns valid output."""
         sampler = create_sampler_from_type(sampler_type, device=device)
@@ -543,7 +543,7 @@ class TestTrajectoryScalerMatrixMock:
             model=mock_wrapper,
             sampler=sampler,
             step_scaler=mock_step_scaler,
-            reward=mock_gradient_reward,
+            loss_function=mock_gradient_loss,
             num_particles=1,
         )
 
@@ -567,7 +567,7 @@ class TestTrajectoryScalerMatrixMock:
         mock_wrapper: MockFlowModelWrapper,
         mock_structure: dict,
         mock_step_scaler: MockStepScaler,
-        mock_gradient_reward: MockGradientRewardFunction,
+        mock_gradient_loss: MockGradientLossFunction,
     ):
         """TrajectoryScaler handles multiple particles correctly."""
         sampler = create_sampler_from_type(TrajectorySamplers.AF3EDM, device=device)
@@ -584,7 +584,7 @@ class TestTrajectoryScalerMatrixMock:
             model=mock_wrapper,
             sampler=sampler,
             step_scaler=mock_step_scaler,
-            reward=mock_gradient_reward,
+            loss_function=mock_gradient_loss,
             num_particles=num_particles,
         )
 
@@ -595,16 +595,16 @@ class TestTrajectoryScalerMatrixMock:
     @pytest.mark.parametrize(
         "trajectory_scaler_type", get_all_trajectory_scalers(), ids=lambda s: s.value
     )
-    def test_preparable_reward_is_prepared_with_model_topology_before_first_call(
+    def test_preparable_loss_is_prepared_with_model_topology_before_first_call(
         self,
         trajectory_scaler_type: TrajectoryScalers,
         device: torch.device,
     ):
-        """Two-phase rewards are prepared with model-topology reward inputs before any evaluation.
+        """Two-phase losses are prepared with model-topology loss inputs before any evaluation.
 
-        The model and the structure deliberately have different atom counts. A reward
+        The model and the structure deliberately have different atom counts. A loss
         prepared against the input structure would bind the wrong atom ordering, which
-        is how the structure-factor reward silently scores the wrong thing. The inputs
+        is how the structure-factor loss silently scores the wrong thing. The inputs
         handed to ``prepare`` carry the model atom array as their topology.
         """
 
@@ -624,7 +624,7 @@ class TestTrajectoryScalerMatrixMock:
         wrapper = MismatchCaseWrapper(case, device=device)
         structure = {"asym_unit": struct_atom_array, "metadata": {"id": "mismatch"}}
 
-        reward = MockPreparableRewardFunction()
+        loss_function = MockPreparableLossFunction()
         sampler = AF3EDMSampler(
             EDMSamplerConfig(device=device, augmentation=False, align_to_input=False)
         )
@@ -638,20 +638,20 @@ class TestTrajectoryScalerMatrixMock:
             structure=structure,
             model=wrapper,
             sampler=sampler,
-            # A real step scaler, so the reward is actually evaluated and the
+            # A real step scaler, so the loss is actually evaluated and the
             # before-first-call assertion below has something to be true about.
             step_scaler=DataSpaceDPSScaler(step_size=0.1),
-            reward=reward,
+            loss_function=loss_function,
             num_particles=1,
         )
 
-        assert reward.prepared_atom_counts == [case.n_model]
-        (prepared,) = reward.prepared_inputs
+        assert loss_function.prepared_atom_counts == [case.n_model]
+        (prepared,) = loss_function.prepared_inputs
         assert prepared.atom_array is not None
         assert prepared.atom_array.array_length() == case.n_model
         assert list(prepared.atom_array.atom_name) == list(case.model_atom_array.atom_name)
-        assert reward.calls > 0
-        assert reward.calls_before_prepare == 0
+        assert loss_function.calls > 0
+        assert loss_function.calls_before_prepare == 0
 
 
 class TestPartialDiffusion:
@@ -668,7 +668,7 @@ class TestPartialDiffusion:
         device: torch.device,
         mock_wrapper: MockFlowModelWrapper,
         mock_structure: dict,
-        mock_gradient_reward: MockGradientRewardFunction,
+        mock_gradient_loss: MockGradientLossFunction,
         mock_step_scaler: MockStepScaler,
     ):
         """t_start=0.5 should produce trajectory of length num_steps/2."""
@@ -686,7 +686,7 @@ class TestPartialDiffusion:
             model=mock_wrapper,
             sampler=sampler,
             step_scaler=mock_step_scaler,
-            reward=mock_gradient_reward,
+            loss_function=mock_gradient_loss,
             num_particles=1,
         )
 
@@ -704,7 +704,7 @@ class TestPartialDiffusion:
         device: torch.device,
         mock_wrapper: MockFlowModelWrapper,
         mock_structure: dict,
-        mock_gradient_reward: MockGradientRewardFunction,
+        mock_gradient_loss: MockGradientLossFunction,
         mock_step_scaler: MockStepScaler,
     ):
         """Full trajectory (t_start=0) should be longer than partial (t_start=0.5)."""
@@ -729,7 +729,7 @@ class TestPartialDiffusion:
             model=mock_wrapper,
             sampler=sampler,
             step_scaler=mock_step_scaler,
-            reward=mock_gradient_reward,
+            loss_function=mock_gradient_loss,
             num_particles=1,
         )
         partial_result = partial_scaler.sample(
@@ -737,7 +737,7 @@ class TestPartialDiffusion:
             model=mock_wrapper,
             sampler=sampler,
             step_scaler=mock_step_scaler,
-            reward=mock_gradient_reward,
+            loss_function=mock_gradient_loss,
             num_particles=1,
         )
 
@@ -757,7 +757,7 @@ class TestGuidanceEffectivenessMock:
         mock_wrapper: MockFlowModelWrapper,
         mock_structure: dict,
         mock_step_scaler: MockStepScaler,
-        mock_gradient_reward: MockGradientRewardFunction,
+        mock_gradient_loss: MockGradientLossFunction,
     ):
         """All trajectory scalers complete with valid output."""
         sampler = AF3EDMSampler(
@@ -775,7 +775,7 @@ class TestGuidanceEffectivenessMock:
             model=mock_wrapper,
             sampler=sampler,
             step_scaler=mock_step_scaler,
-            reward=mock_gradient_reward,
+            loss_function=mock_gradient_loss,
             num_particles=2,
         )
 
@@ -822,7 +822,7 @@ class TestNumericalStabilityMock:
         mock_wrapper: MockFlowModelWrapper,
         mock_structure: dict,
         mock_step_scaler: MockStepScaler,
-        mock_gradient_reward: MockGradientRewardFunction,
+        mock_gradient_loss: MockGradientLossFunction,
     ):
         """Guidance application produces finite values throughout."""
         from sampleworks.core.scalers.pure_guidance import PureGuidance
@@ -841,7 +841,7 @@ class TestNumericalStabilityMock:
             model=mock_wrapper,
             sampler=sampler,
             step_scaler=mock_step_scaler,
-            reward=mock_gradient_reward,
+            loss_function=mock_gradient_loss,
         )
 
         assert torch.isfinite(torch.as_tensor(result.final_state)).all()
@@ -1123,7 +1123,7 @@ class TestRealTrajectoryScalerMatrix:
         temp_output_dir,
         request,
         mock_step_scaler: MockStepScaler,
-        mock_gradient_reward: MockGradientRewardFunction,
+        mock_gradient_loss: MockGradientLossFunction,
     ):
         """TrajectoryScaler.sample() returns valid GuidanceOutput with real wrapper."""
         wrapper = request.getfixturevalue(get_fixture_name_for_wrapper_type(wrapper_type))
@@ -1145,7 +1145,7 @@ class TestRealTrajectoryScalerMatrix:
             model=wrapper,
             sampler=sampler,
             step_scaler=mock_step_scaler,
-            reward=mock_gradient_reward,
+            loss_function=mock_gradient_loss,
             num_particles=1,
         )
 
@@ -1161,27 +1161,27 @@ class TestRealTrajectoryScalerMatrix:
 @pytest.mark.parametrize("wrapper_type", get_slow_wrappers(), ids=lambda w: w.value)
 @pytest.mark.parametrize("structure_fixture", STRUCTURES, ids=lambda s: s.replace("structure_", ""))
 class TestRealWrapperPreprocessing:
-    """process_structure_to_trajectory_input feeds properly into to_reward_inputs with real wrappers
+    """process_structure_to_trajectory_input feeds properly into to_loss_inputs with real wrappers
 
-    Verifies that featurization and preprocessing produce reward_inputs whose
+    Verifies that featurization and preprocessing produce loss_inputs whose
     atom dimension matches the state dimension for every wrapper by structure
     combination.  This catches model-specific NaN coordinate or occupancy
     issues (e.g., RF3 on 5I09) that only surface with real featurization.
     """
 
-    def test_reward_inputs_are_valid(
+    def test_loss_inputs_are_valid(
         self,
         wrapper_type: StructurePredictor,
         structure_fixture: str,
         temp_output_dir,
         request,
     ):
-        """reward_inputs atom count equals the model state atom count.
+        """loss_inputs atom count equals the model state atom count.
 
         Wrappers must ensure model_atom_array has valid coordinates and
-        occupancy for all atoms.  ``RewardInputs.from_atom_array`` uses
+        occupancy for all atoms.  ``LossInputs.from_atom_array`` uses
         all atoms without masking, so any NaN or zero-occupancy atoms
-        would produce invalid reward tensors and a dimension mismatch
+        would produce invalid loss tensors and a dimension mismatch
         in the step scalers.
         """
         wrapper = request.getfixturevalue(get_fixture_name_for_wrapper_type(wrapper_type))
@@ -1198,20 +1198,20 @@ class TestRealWrapperPreprocessing:
             features=features,
             ensemble_size=1,
         )
-        reward_inputs = processed.to_reward_inputs(device=device)
+        loss_inputs = processed.to_loss_inputs(device=device)
 
         n_state = state.shape[-2]
-        n_reward = reward_inputs.elements.shape[-1]
-        assert n_state == n_reward, (
-            f"State atom count ({n_state}) != reward atom count ({n_reward}). "
+        n_loss = loss_inputs.elements.shape[-1]
+        assert n_state == n_loss, (
+            f"State atom count ({n_state}) != loss atom count ({n_loss}). "
             f"wrapper={wrapper_type.value}, structure={structure_fixture}"
         )
-        assert torch.isfinite(reward_inputs.input_coords).all(), (
-            f"Non-finite reward coordinates for "
+        assert torch.isfinite(loss_inputs.input_coords).all(), (
+            f"Non-finite loss coordinates for "
             f"wrapper={wrapper_type.value}, structure={structure_fixture}"
         )
-        assert torch.all(reward_inputs.occupancies > 0), (
-            f"Non-positive reward occupancies for "
+        assert torch.all(loss_inputs.occupancies > 0), (
+            f"Non-positive loss occupancies for "
             f"wrapper={wrapper_type.value}, structure={structure_fixture}"
         )
 

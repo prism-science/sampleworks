@@ -26,7 +26,7 @@ from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
 from sampleworks.core.samplers.protocol import StepParams
 from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.guidance_constants import (
-    Rewards,
+    Losses,
     StepScalers,
     StructurePredictor,
     TrajectorySamplers,
@@ -42,7 +42,7 @@ from sampleworks.utils.structure_utils import SampleworksProcessedStructure
 from sampleworks.utils.torch_utils import try_gpu
 
 from tests.mocks import MockFlowModelWrapper, MockStepScaler
-from tests.mocks.rewards import MockGradientRewardFunction
+from tests.mocks.losses import MockGradientLossFunction
 
 
 @pytest.fixture
@@ -118,8 +118,8 @@ class ComponentInfo:
         Whether this component needs model checkpoints.
     is_trajectory_sampler
         For samplers, whether it implements TrajectorySampler.
-    requires_reward
-        For scalers, whether it requires a reward function.
+    requires_loss
+        For scalers, whether it requires a loss function.
     default_kwargs
         Default kwargs for instantiation in tests.
     config_class_path
@@ -139,7 +139,7 @@ class ComponentInfo:
     module_path: str
     requires_checkpoint: bool = False
     is_trajectory_sampler: bool = False
-    requires_reward: bool = False
+    requires_loss: bool = False
     default_kwargs: tuple[tuple[str, Any], ...] = ()
     config_class_path: str = ""
     annotate_fn_path: str = ""
@@ -205,18 +205,18 @@ STEP_SCALER_REGISTRY: dict[StepScalers, ComponentInfo] = {
     StepScalers.NO_SCALING: ComponentInfo(
         name="no_scaling",
         module_path="sampleworks.core.scalers.step_scalers.NoScalingScaler",
-        requires_reward=False,
+        requires_loss=False,
     ),
     StepScalers.DATA_SPACE_DPS: ComponentInfo(
         name="data_space_dps",
         module_path="sampleworks.core.scalers.step_scalers.DataSpaceDPSScaler",
-        requires_reward=True,
+        requires_loss=True,
         default_kwargs=(("step_size", 0.1),),
     ),
     StepScalers.NOISE_SPACE_DPS: ComponentInfo(
         name="noise_space_dps",
         module_path="sampleworks.core.scalers.step_scalers.NoiseSpaceDPSScaler",
-        requires_reward=True,
+        requires_loss=True,
         default_kwargs=(("step_size", 0.1),),
     ),
 }
@@ -236,10 +236,10 @@ TRAJECTORY_SCALER_REGISTRY: dict[TrajectoryScalers, ComponentInfo] = {
 }
 
 
-REWARD_REGISTRY: dict[Rewards, ComponentInfo] = {
-    Rewards.REAL_SPACE_DENSITY: ComponentInfo(
+LOSS_REGISTRY: dict[Losses, ComponentInfo] = {
+    Losses.REAL_SPACE_DENSITY: ComponentInfo(
         name="real_space_density",
-        module_path="sampleworks.core.rewards.real_space_density.RealSpaceRewardFunction",
+        module_path="sampleworks.core.losses.real_space_density.RealSpaceLossFunction",
         requires_checkpoint=True,
     ),
 }
@@ -312,12 +312,12 @@ def create_trajectory_scaler_from_type(
     return create_component_from_info(info, **extra_kwargs)
 
 
-def create_reward_from_type(
-    reward_type: Rewards,
+def create_loss_from_type(
+    loss_type: Losses,
     **extra_kwargs: Any,
 ) -> Any:
-    """Create reward from Rewards enum."""
-    info = REWARD_REGISTRY[reward_type]
+    """Create loss from Losses enum."""
+    info = LOSS_REGISTRY[loss_type]
     return create_component_from_info(info, **extra_kwargs)
 
 
@@ -369,9 +369,9 @@ def get_all_trajectory_scalers() -> list[TrajectoryScalers]:
     return list(TRAJECTORY_SCALER_REGISTRY.keys())
 
 
-def get_all_rewards() -> list[Rewards]:
-    """Get all reward types from the registry."""
-    return list(REWARD_REGISTRY.keys())
+def get_all_losses() -> list[Losses]:
+    """Get all loss types from the registry."""
+    return list(LOSS_REGISTRY.keys())
 
 
 def get_slow_wrappers() -> list[StructurePredictor]:
@@ -1147,7 +1147,7 @@ def mock_trajectory_context() -> StepParams:
 
 
 # ============================================================================
-# Mock scaler and reward fixtures
+# Mock scaler and loss fixtures
 # ============================================================================
 
 
@@ -1158,9 +1158,9 @@ def mock_step_scaler() -> MockStepScaler:
 
 
 @pytest.fixture
-def mock_gradient_reward() -> MockGradientRewardFunction:
-    """MockGradientRewardFunction for guidance tests."""
-    return MockGradientRewardFunction(gradient_scale=1.0)
+def mock_gradient_loss() -> MockGradientLossFunction:
+    """MockGradientLossFunction for guidance tests."""
+    return MockGradientLossFunction(gradient_scale=1.0)
 
 
 # ============================================================================

@@ -15,7 +15,7 @@ A frozen structure predictor (Protenix / RF3 / Boltz) turns a sequence into cach
 latents — the **single** representation `s` and the **pair** representation `z` — and a diffusion
 module decodes those latents into coordinates. IT-opt treats the model as a differentiable sampler
 and **optimizes `s` and `z` themselves** (not the coordinates, not the weights) against an
-experimental reward evaluated on the *denoised* structure. No model weights are trained.
+experimental loss evaluated on the *denoised* structure. No model weights are trained.
 
 It is a `TrajectoryScalerProtocol`, a peer of `PureGuidance` and `FKSteering`, living in
 [core/scalers/latent_optimization.py](../src/sampleworks/core/scalers/latent_optimization.py). It is
@@ -35,13 +35,13 @@ for each outer round (a round = one full traversal of the schedule, fresh prior 
     optimizer = Adam([s, z])                      # ONE persistent Adam per round
     for each diffusion step:
         x̂₀   = differentiable denoise(x_t, s, z)  # ONE forward, run under autograd
-        loss  = reward(x̂₀) + anchor(s, z) + bond_geometry(x̂₀)   # both penalties off at weight 0
+        loss  = loss_function(x̂₀) + anchor(s, z) + bond_geometry(x̂₀)   # both penalties off at weight 0
         loss.backward();  clip s and z INDEPENDENTLY;  optimizer.step()
         x_t   = step_output.state.detach()         # advance; coordinate graph cut here
 final clean sampling pass with the optimized latents  ->  saved ensemble
 ```
 
-The gradient that matters is `∂reward(x̂₀)/∂latent` through **one** denoiser forward. Because the
+The gradient that matters is `∂loss(x̂₀)/∂latent` through **one** denoiser forward. Because the
 coordinate state is detached every step (`coords = step_output.state.detach()`), the gradient never
 flows through the coordinate recursion — it is a greedy, per-step latent gradient, **not**
 backprop-through-sampling. (Unrolling the full sampler is intractable: the EDM sampler re-noises and
@@ -52,9 +52,9 @@ detaches each step, and a true unroll is O(steps·N²·d) memory.)
 | Component | File | What it is |
 |---|---|---|
 | `LatentOptimization` | [core/scalers/latent_optimization.py](../src/sampleworks/core/scalers/latent_optimization.py) | The scaler / entry point. Owns the loop, the ensemble, and the final sampling pass. |
-| `LatentAnchor` | same file | `Σ wᵢ·mean((latentᵢ − baselineᵢ)²)` — mean-squared drift from the baseline latents. Regularizer, added to the loss directly (not a reward). |
+| `LatentAnchor` | same file | `Σ wᵢ·mean((latentᵢ − baselineᵢ)²)` — mean-squared drift from the baseline latents. Regularizer added to the data loss in `_latent_optimizer_step`; not a `LossFunctionProtocol`, since its input is latents rather than coordinates (#363). |
 | `_GradEnablingScaler` | same file | Minimal `StepScalerProtocol` that only turns autograd on (§4). |
-| `BondGeometryReward` | [core/rewards/geometry.py](../src/sampleworks/core/rewards/geometry.py) | Bond-length + steric-clash hinges on `x̂₀`. Built only when `bond_length_weight > 0`. Bounded hinges (not the reference's exploding `exp(relu(...))`). |
+| `BondGeometryLoss` | [core/losses/geometry.py](../src/sampleworks/core/losses/geometry.py) | Bond-length + steric-clash hinges on `x̂₀`. Built only when `bond_length_weight > 0`. Bounded hinges (not the reference's exploding `exp(relu(...))`). |
 | `AttrLatentIO` / `LatentIO` | [models/latent_adapter.py](../src/sampleworks/models/latent_adapter.py) | Reads/writes `s`/`z` by attribute name; writes via `dataclasses.replace` (honors `frozen=True, slots=True`). The only model-specific knowledge is a pair of attribute names. |
 | CLI wiring | [utils/guidance_script_utils.py](../src/sampleworks/utils/guidance_script_utils.py) (`_run_guidance`), [utils/guidance_script_arguments.py](../src/sampleworks/utils/guidance_script_arguments.py) (`add_latent_opt_args`), [utils/guidance_constants.py](../src/sampleworks/utils/guidance_constants.py) (`GuidanceType.LATENT_OPT`) | Builds the scaler from CLI flags. |
 
@@ -75,7 +75,7 @@ LatentOptimization(
 ```
 
 - `ensemble_size` structures are sampled in parallel, each with its **own** `s`/`z` leaf, so members
-  can diverge under the reward instead of collapsing onto one solution.
+  can diverge under the loss instead of collapsing onto one solution.
 - `guidance_t_start` is a fraction in `[0,1]`; stored as `guidance_start = int(guidance_t_start*num_steps)`.
   Everything before it is plain frozen-latent diffusion.
 - `outer_steps` resample rounds, fresh prior noise each. **Constructor default `1`; CLI default `2`.**
@@ -107,7 +107,7 @@ autograd on. `requires_gradients` is duck-typed (read via `getattr`, not declare
 The sampler does **not** re-detach `state`/`denoised` — the scaler loop detaches between iterations.
 
 The denoised `x̂₀` is frame-aligned to the experimental reference by the sampler (via the
-`AtomReconciler` + `alignment_reference`) *before* the reward sees it, so reward functions can assume
+`AtomReconciler` + `alignment_reference`) *before* the loss sees it, so loss functions can assume
 pre-aligned coordinates.
 
 ## 5. Per-model gradient readiness
@@ -148,8 +148,8 @@ rounds; an outer resample loop; an anchor to the trunk baseline; a final clean s
 - Bounded geometry hinges instead of the reference's exploding `exp(relu(...))` clash term; no
   hardcoded save-step.
 
-**Deliberate deviations:** the objective is a pluggable `RewardFunctionProtocol` (v1:
-`RealSpaceRewardFunction`, density fit) rather than backbone-RMSD; the anchor is mean-squared rather
+**Deliberate deviations:** the objective is a pluggable `LossFunctionProtocol` (v1:
+`RealSpaceLossFunction`, density fit) rather than backbone-RMSD; the anchor is mean-squared rather
 than the reference's Frobenius norm (shape-agnostic, so `w_s`/`w_z` are comparable).
 
 **Invariants worth stating:**
@@ -159,7 +159,7 @@ than the reference's Frobenius norm (shape-agnostic, so `w_s`/`w_z` are comparab
   posterior over latents. Sampling the latent instead is tracked in
   [#419](https://github.com/prism-science/sampleworks/issues/419).
 - **On-manifold discipline.** Pushing `z` hard buys density fit with broken geometry; the anchor and
-  `BondGeometryReward` are the counter-pressure. Efficacy must be judged on held-out fit against
+  `BondGeometryLoss` are the counter-pressure. Efficacy must be judged on held-out fit against
   matched-compute baselines, not train-set loss (see [IT_OPT_TESTING.md](IT_OPT_TESTING.md)).
 
 ## 7. Running it

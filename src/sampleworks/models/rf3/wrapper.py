@@ -84,7 +84,7 @@ class RF3Config:
     disable_chiral_features : bool
         If True, zero out chiral_centers in features dict so the chiral gradient
         feature contributes nothing to the atom single representation during
-        diffusion. Useful during guidance where reward gradients may push
+        diffusion. Useful during guidance where loss gradients may push
         coordinates into out-of-distribution chiral configurations. Default is False.
     track_chiral_features : bool
         If True, log the chiral gradient L2 norm at each denoising step. The
@@ -558,7 +558,7 @@ class RF3Wrapper:
         # InferenceInput.from_atom_array. RF3 operates on these atoms (they're
         # in atom_to_token_map), so we need to place these atoms in the
         # structure so they participate in guidance and don't get
-        # masked out in reward functions. We follow atomworks convention of placing
+        # masked out in loss functions. We follow atomworks convention of placing
         # an unresolved atom on (1) the representative atom for the token, or (2)
         # the center atom for the token, or (3) the closest neighboring token in
         # the chain's sequence (defaulting to left token when both are present).

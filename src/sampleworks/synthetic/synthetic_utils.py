@@ -235,7 +235,7 @@ def assign_occupancies(
     return result
 
 
-def load_structure_for_synthetic_reward(
+def load_structure_for_synthetic_loss(
     structure_path: Path,
     occupancy_mode: str,
     occupancy_values: list[float],
@@ -246,7 +246,7 @@ def load_structure_for_synthetic_reward(
     b_factor: float | None = None,
     model: int = 0,
 ) -> AtomArray | None:
-    """Load and prepare a structure for synthetic reward generation.
+    """Load and prepare a structure for synthetic loss generation.
 
     Handles loading, optional atom selection, stripping of unwanted atom classes,
     occupancy assignment, and removal of zero-occupancy atoms. Returns None on load

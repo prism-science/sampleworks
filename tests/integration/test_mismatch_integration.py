@@ -11,7 +11,7 @@ import pytest
 import torch
 from atomworks.io.transforms.atom_array import ensure_atom_array_stack
 from biotite.structure import AtomArray
-from sampleworks.core.rewards.protocol import RewardInputs
+from sampleworks.core.losses.protocol import LossInputs
 from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
 from sampleworks.core.samplers.protocol import StepParams
 from sampleworks.core.scalers.fk_steering import FKSteering
@@ -192,8 +192,8 @@ def _build_real_case(
     )
 
 
-def _model_space_reward_inputs(n_model: int, batch: int = 1) -> RewardInputs:
-    """Construct model-space reward inputs for DPS tests.
+def _model_space_loss_inputs(n_model: int, batch: int = 1) -> LossInputs:
+    """Construct model-space loss inputs for DPS tests.
 
     Parameters
     ----------
@@ -204,10 +204,10 @@ def _model_space_reward_inputs(n_model: int, batch: int = 1) -> RewardInputs:
 
     Returns
     -------
-    RewardInputs
-        Reward input bundle in model space.
+    LossInputs
+        Loss input bundle in model space.
     """
-    return RewardInputs(
+    return LossInputs(
         elements=torch.ones(batch, n_model),
         b_factors=torch.ones(batch, n_model) * 20.0,
         occupancies=torch.ones(batch, n_model),
@@ -637,21 +637,21 @@ class TestPreprocessingPipeline:
             ),
         )
 
-    def test_reward_inputs_atom_count(self, mismatch_case: MismatchCase):
-        """Reward input tensors all have model atom count."""
+    def test_loss_inputs_atom_count(self, mismatch_case: MismatchCase):
+        """Loss input tensors all have model atom count."""
         wrapper = MismatchCaseWrapper(mismatch_case)
         structure = {
             "asym_unit": mismatch_case.struct_atom_array.copy(),
             "metadata": {"id": mismatch_case.id},
         }
         processed, _ = _preprocess(wrapper, structure)
-        reward_inputs = processed.to_reward_inputs(device="cpu")
+        loss_inputs = processed.to_loss_inputs(device="cpu")
 
         n_model = mismatch_case.n_model
-        assert reward_inputs.elements.shape[-1] == n_model
-        assert reward_inputs.b_factors.shape[-1] == n_model
-        assert reward_inputs.occupancies.shape[-1] == n_model
-        assert reward_inputs.input_coords.shape[-2] == n_model
+        assert loss_inputs.elements.shape[-1] == n_model
+        assert loss_inputs.b_factors.shape[-1] == n_model
+        assert loss_inputs.occupancies.shape[-1] == n_model
+        assert loss_inputs.input_coords.shape[-2] == n_model
 
     def test_b_factor_override(self, mismatch_case: MismatchCase):
         """Structure B-factors override model template values on common atoms."""
@@ -674,24 +674,24 @@ class TestPreprocessingPipeline:
         }
 
         processed, _ = _preprocess(wrapper, structure)
-        reward_inputs = processed.to_reward_inputs(device="cpu")
+        loss_inputs = processed.to_loss_inputs(device="cpu")
         reconciler = processed.reconciler
 
         expected_common_b_factors = torch.as_tensor(
             struct_b_factors[reconciler.struct_indices.detach().cpu().numpy()],
-            dtype=reward_inputs.b_factors.dtype,
+            dtype=loss_inputs.b_factors.dtype,
         )
         torch.testing.assert_close(
-            reward_inputs.b_factors[0, reconciler.model_indices],
+            loss_inputs.b_factors[0, reconciler.model_indices],
             expected_common_b_factors,
         )
 
     def test_to_atom_array_has_model_topology_and_reconciled_values(
         self, mismatch_case: MismatchCase
     ):
-        """The array a reward's ``prepare()`` rebuilds combines both sides of the mismatch.
+        """The array a loss's ``prepare()`` rebuilds combines both sides of the mismatch.
 
-        Topology comes from the model atom array, coordinates and B-factors from the reward
+        Topology comes from the model atom array, coordinates and B-factors from the loss
         inputs (the structure's values on common atoms, see ``test_b_factor_override``), and
         occupancy from neither. The model atom array itself is read, never written.
         """
@@ -710,15 +710,15 @@ class TestPreprocessingPipeline:
         structure = {"asym_unit": struct_atom_array.copy(), "metadata": {"id": case.id}}
 
         processed, _ = _preprocess(MismatchCaseWrapper(case), structure)
-        reward_inputs = processed.to_reward_inputs(device="cpu")
-        assert reward_inputs.atom_array is processed.reward_atom_array
-        template_b_factors = processed.reward_atom_array.b_factor.copy()
-        template_coords = processed.reward_atom_array.coord.copy()
-        assert not np.allclose(template_b_factors, reward_inputs.b_factors[0].numpy()), (
-            "setup failed to make the template and the reward inputs disagree"
+        loss_inputs = processed.to_loss_inputs(device="cpu")
+        assert loss_inputs.atom_array is processed.loss_atom_array
+        template_b_factors = processed.loss_atom_array.b_factor.copy()
+        template_coords = processed.loss_atom_array.coord.copy()
+        assert not np.allclose(template_b_factors, loss_inputs.b_factors[0].numpy()), (
+            "setup failed to make the template and the loss inputs disagree"
         )
 
-        prepared = reward_inputs.to_atom_array()
+        prepared = loss_inputs.to_atom_array()
 
         assert prepared.array_length() == mismatch_case.n_model
         for category in ["atom_name", "res_id", "chain_id", "element"]:
@@ -727,12 +727,12 @@ class TestPreprocessingPipeline:
                 mismatch_case.model_atom_array.get_annotation(category),
                 err_msg=f"annotation {category!r} should come from the model atom array",
             )
-        np.testing.assert_allclose(prepared.coord, reward_inputs.input_coords[0].numpy())
-        np.testing.assert_allclose(prepared.b_factor, reward_inputs.b_factors[0].numpy())
+        np.testing.assert_allclose(prepared.coord, loss_inputs.input_coords[0].numpy())
+        np.testing.assert_allclose(prepared.b_factor, loss_inputs.b_factors[0].numpy())
         np.testing.assert_allclose(prepared.occupancy, np.ones(mismatch_case.n_model))
         # The model atom array is left as it was: nothing is written back into it.
-        np.testing.assert_array_equal(processed.reward_atom_array.b_factor, template_b_factors)
-        np.testing.assert_array_equal(processed.reward_atom_array.coord, template_coords)
+        np.testing.assert_array_equal(processed.loss_atom_array.b_factor, template_b_factors)
+        np.testing.assert_array_equal(processed.loss_atom_array.coord, template_coords)
 
 
 class TestSamplerStep:
@@ -755,11 +755,11 @@ class TestSamplerStep:
         reconciler: AtomReconciler,
         reference: torch.Tensor,
         *,
-        reward=None,
-        reward_inputs: RewardInputs | None = None,
+        loss_function=None,
+        loss_inputs: LossInputs | None = None,
         t: float = 1.0,
     ) -> StepParams:
-        """Build deterministic step context with optional reward payload."""
+        """Build deterministic step context with optional loss payload."""
         context = StepParams(
             step_index=0,
             total_steps=5,
@@ -768,8 +768,8 @@ class TestSamplerStep:
             noise_scale=torch.tensor([0.0]),
         ).with_reconciler(reconciler, reference)
 
-        if reward is not None and reward_inputs is not None:
-            context = context.with_reward(reward, reward_inputs)
+        if loss_function is not None and loss_inputs is not None:
+            context = context.with_loss(loss_function, loss_inputs)
         return context
 
     def test_output_preserves_model_space(
@@ -829,17 +829,17 @@ class TestSamplerStep:
 
         assert rmsd_aligned.item() < rmsd_unaligned.item()
 
-    def test_dps_guidance_steps_down_the_reward_gradient(
+    def test_dps_guidance_steps_down_the_loss_gradient(
         self,
         mismatch_case: MismatchCase,
         sampler: AF3EDMSampler,
-        mock_gradient_reward,
+        mock_gradient_loss,
     ):
-        r"""A guided step shifts the state down the reward gradient by the DPS step size.
+        r"""A guided step shifts the state down the loss gradient by the DPS step size.
 
         With ``noise_scale=0`` and no augmentation, both runs share :math:`\hat{x}_0`.
         Their Euler updates differ only by :math:`s\,dt\,w\,g\,\lVert\delta\rVert/t`.
-        For ``MockGradientRewardFunction``, :math:`L(x)=\tfrac12\lVert x\rVert^2`, so
+        For ``MockGradientLossFunction``, :math:`L(x)=\tfrac12\lVert x\rVert^2`, so
         :math:`g=\nabla L(\hat{x}_0)=\hat{x}_0`. Choosing :math:`t\ne1` exposes the
         :math:`1/t` factor.
         """
@@ -852,13 +852,13 @@ class TestSamplerStep:
 
         features = wrapper.featurize({"asym_unit": mismatch_case.struct_atom_array.copy()})
         state = torch.randn(1, mismatch_case.n_model, 3)
-        reward_inputs = _model_space_reward_inputs(mismatch_case.n_model)
+        loss_inputs = _model_space_loss_inputs(mismatch_case.n_model)
         t = 2.0
         context = self._context_with_reference(
             reconciler,
             reference,
-            reward=mock_gradient_reward,
-            reward_inputs=reward_inputs,
+            loss_function=mock_gradient_loss,
+            loss_inputs=loss_inputs,
             t=t,
         )
         step_size = 0.1
@@ -878,9 +878,9 @@ class TestSamplerStep:
 
         # (1, n_model, 3), aligned to the reference frame
         x_hat_0 = baseline.denoised
-        reward_gradient = x_hat_0
+        loss_gradient = x_hat_0
         torch.testing.assert_close(
-            torch.as_tensor(guided.loss), mock_gradient_reward(coordinates=x_hat_0)
+            torch.as_tensor(guided.loss), mock_gradient_loss(coordinates=x_hat_0)
         )
 
         # (1, n_model, 3); the unguided update is x + s * dt * delta with delta = (x - x_hat_0) / t,
@@ -891,14 +891,14 @@ class TestSamplerStep:
 
         shift = guided.state - baseline.state
         cosine = torch.nn.functional.cosine_similarity(
-            shift.flatten(), reward_gradient.flatten(), dim=0
+            shift.flatten(), loss_gradient.flatten(), dim=0
         )
         assert cosine.item() < -0.999, (
-            f"guidance must move the state against the reward gradient, got cosine {cosine:.4f}"
+            f"guidance must move the state against the loss gradient, got cosine {cosine:.4f}"
         )
 
         expected_shift = (
-            step_scale * dt * step_size * torch.linalg.norm(diffusion_delta) * reward_gradient / t
+            step_scale * dt * step_size * torch.linalg.norm(diffusion_delta) * loss_gradient / t
         )
         torch.testing.assert_close(shift, expected_shift, rtol=1e-4, atol=1e-6)
 
@@ -928,7 +928,7 @@ class TestTrajectoryScalers:
         self,
         case: MismatchCase,
         scaler_type: str,
-        reward,
+        loss_function,
         device: str = "cpu",
     ) -> Any:
         """Execute a trajectory scaler run for one case and return GuidanceOutput."""
@@ -947,7 +947,7 @@ class TestTrajectoryScalers:
                 model=wrapper,
                 sampler=sampler,
                 step_scaler=step_scaler,
-                reward=reward,
+                loss_function=loss_function,
             )
 
         if scaler_type == "fk_steering":
@@ -962,7 +962,7 @@ class TestTrajectoryScalers:
                 model=wrapper,
                 sampler=sampler,
                 step_scaler=step_scaler,
-                reward=reward,
+                loss_function=loss_function,
                 num_particles=2,
             )
 
@@ -973,10 +973,10 @@ class TestTrajectoryScalers:
         self,
         mismatch_case: MismatchCase,
         scaler_type: str,
-        mock_gradient_reward,
+        mock_gradient_loss,
     ):
         """Final states from trajectory scalers stay in model atom space."""
-        result = self._run_scaler(mismatch_case, scaler_type, mock_gradient_reward)
+        result = self._run_scaler(mismatch_case, scaler_type, mock_gradient_loss)
         assert result.final_state.shape[-2] == mismatch_case.n_model
 
     @pytest.mark.parametrize("scaler_type", ["pure_guidance", "fk_steering"])
@@ -984,10 +984,10 @@ class TestTrajectoryScalers:
         self,
         mismatch_case: MismatchCase,
         scaler_type: str,
-        mock_gradient_reward,
+        mock_gradient_loss,
     ):
         """Metadata carries the canonical reconciliation inputs only for mismatches."""
-        result = self._run_scaler(mismatch_case, scaler_type, mock_gradient_reward)
+        result = self._run_scaler(mismatch_case, scaler_type, mock_gradient_loss)
         metadata = result.metadata or {}
 
         if mismatch_case.expected_has_mismatch:
@@ -1013,12 +1013,12 @@ class TestTrajectoryScalers:
         self,
         mismatch_case_catalog: dict[str, MismatchCase],
         scaler_type: str,
-        mock_gradient_reward,
+        mock_gradient_loss,
     ):
         """Metadata retains the canonical CPU reconciler during CUDA sampling."""
         case = mismatch_case_catalog["from_2yl0"]
 
-        result = self._run_scaler(case, scaler_type, mock_gradient_reward, device="cuda")
+        result = self._run_scaler(case, scaler_type, mock_gradient_loss, device="cuda")
 
         metadata = result.metadata or {}
         reconciler = metadata.get("reconciler")
@@ -1032,18 +1032,18 @@ class TestTrajectoryScalers:
         self,
         mismatch_case: MismatchCase,
         scaler_type: str,
-        mock_gradient_reward,
+        mock_gradient_loss,
     ):
         """All trajectory tensors preserve the model atom dimension."""
-        result = self._run_scaler(mismatch_case, scaler_type, mock_gradient_reward)
+        result = self._run_scaler(mismatch_case, scaler_type, mock_gradient_loss)
         assert result.trajectory is not None
 
         for step_tensor in result.trajectory:
             assert step_tensor.shape[-2] == mismatch_case.n_model
 
-    def test_fk_trajectory_4d(self, mismatch_case: MismatchCase, mock_gradient_reward):
+    def test_fk_trajectory_4d(self, mismatch_case: MismatchCase, mock_gradient_loss):
         """FK steering trajectories remain 4D (particles, ensemble, atoms, xyz)."""
-        result = self._run_scaler(mismatch_case, "fk_steering", mock_gradient_reward)
+        result = self._run_scaler(mismatch_case, "fk_steering", mock_gradient_loss)
         assert result.trajectory is not None
 
         for step_tensor in result.trajectory:
@@ -1056,20 +1056,20 @@ class TestTrajectoryScalers:
 
 
 class TestShapeGuard:
-    """Step scalers reject mismatched state/reward_inputs shapes."""
+    """Step scalers reject mismatched state/loss_inputs shapes."""
 
     def test_data_space_dps_rejects_wrong_atom_count(
         self,
         mock_trajectory_context,
-        mock_gradient_reward,
+        mock_gradient_loss,
     ):
-        """DataSpaceDPS raises when state and reward atom counts differ."""
-        n_state, n_reward = 8, 5
-        context = mock_trajectory_context.with_reward(
-            mock_gradient_reward,
-            _model_space_reward_inputs(n_reward),
+        """DataSpaceDPS raises when state and loss atom counts differ."""
+        n_state, n_loss = 8, 5
+        context = mock_trajectory_context.with_loss(
+            mock_gradient_loss,
+            _model_space_loss_inputs(n_loss),
         )
-        with pytest.raises(ValueError, match="State atom count.*!=.*reward_inputs atom count"):
+        with pytest.raises(ValueError, match="State atom count.*!=.*loss_inputs atom count"):
             DataSpaceDPSScaler(step_size=0.1).scale(
                 torch.randn(1, n_state, 3, requires_grad=True),
                 context,
@@ -1078,17 +1078,17 @@ class TestShapeGuard:
     def test_noise_space_dps_rejects_wrong_atom_count(
         self,
         mock_trajectory_context,
-        mock_gradient_reward,
+        mock_gradient_loss,
     ):
-        """NoiseSpaceDPS raises when state and reward atom counts differ."""
-        n_state, n_reward = 8, 5
+        """NoiseSpaceDPS raises when state and loss atom counts differ."""
+        n_state, n_loss = 8, 5
         x_t = torch.randn(1, n_state, 3, requires_grad=True)
-        context = mock_trajectory_context.with_reward(
-            mock_gradient_reward,
-            _model_space_reward_inputs(n_reward),
+        context = mock_trajectory_context.with_loss(
+            mock_gradient_loss,
+            _model_space_loss_inputs(n_loss),
         ).with_metadata({"x_t": x_t})
 
-        with pytest.raises(ValueError, match="State atom count.*!=.*reward_inputs atom count"):
+        with pytest.raises(ValueError, match="State atom count.*!=.*loss_inputs atom count"):
             NoiseSpaceDPSScaler(step_size=0.1).scale(torch.randn(1, n_state, 3), context)
 
 

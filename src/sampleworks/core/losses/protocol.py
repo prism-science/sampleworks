@@ -15,10 +15,10 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class RewardInputs:
-    """Extracted inputs for reward function computation.
+class LossInputs:
+    """Extracted inputs for loss function computation.
 
-    Contains all the information needed to call a RewardFunctionProtocol,
+    Contains all the information needed to call a LossFunctionProtocol,
     extracted from an atom array. This allows the caller to extract inputs
     once and pass them to scale() methods without redundant extraction.
 
@@ -32,7 +32,7 @@ class RewardInputs:
     altloc). It is never mutated, and its own ``coord``, ``b_factor`` and
     ``occupancy`` are not authoritative; the tensors are. :meth:`to_atom_array`
     combines the two for a forward model that needs an ``AtomArray`` (see
-    :class:`PreparableRewardFunctionProtocol`).
+    :class:`PreparableLossFunctionProtocol`).
     """
 
     elements: Int[torch.Tensor, "*batch n_atoms"]
@@ -48,8 +48,8 @@ class RewardInputs:
         ensemble_size: int,
         num_particles: int = 1,
         device: torch.device | str = "cpu",
-    ) -> RewardInputs:
-        """Construct RewardInputs from a Biotite AtomArray.
+    ) -> LossInputs:
+        """Construct LossInputs from a Biotite AtomArray.
 
         The atom array must contain only valid atoms (finite coordinates,
         non-negative occupancy).  Callers are responsible for filtering
@@ -69,8 +69,8 @@ class RewardInputs:
 
         Returns
         -------
-        RewardInputs
-            Dataclass containing all inputs needed for reward function computation,
+        LossInputs
+            Dataclass containing all inputs needed for loss function computation,
             with ``atom_array`` set to the topology they were built from (the first
             model of an ``AtomArrayStack``).
         """
@@ -82,7 +82,7 @@ class RewardInputs:
         if np.any(np.isnan(atom_array.b_factor)):
             raise ValueError(
                 "Atom array contains NaN B-factors. Wrappers must replace NaN "
-                "B-factors before constructing RewardInputs (e.g., with a default of 20.0)."
+                "B-factors before constructing LossInputs (e.g., with a default of 20.0)."
             )
         if np.any(np.isnan(atom_array.coord)):
             raise ValueError("Atom array contains NaN coordinates.")
@@ -155,7 +155,7 @@ class RewardInputs:
     def to_atom_array(self, template: AtomArray | None = None) -> AtomArray:
         """Build the single-conformer reference atom array these inputs describe.
 
-        For a reward's ``prepare()``. A forward model that fixes its topology up
+        For a loss's ``prepare()``. A forward model that fixes its topology up
         front (SFcalculator, for one) needs an ``AtomArray`` carrying the model
         atom identities *and* the reconciled reference coordinates and B-factors
         that ``__call__`` will see, not the model template's placeholders.
@@ -188,13 +188,13 @@ class RewardInputs:
             template = self.atom_array
         if template is None:
             raise ValueError(
-                "These RewardInputs carry no atom array; pass `template` or build them with "
-                "RewardInputs.from_atom_array."
+                "These LossInputs carry no atom array; pass `template` or build them with "
+                "LossInputs.from_atom_array."
             )
         n_atoms = self.b_factors.shape[-1]
         if template.array_length() != n_atoms:
             raise ValueError(
-                f"template has {template.array_length()} atoms, but these RewardInputs "
+                f"template has {template.array_length()} atoms, but these LossInputs "
                 f"describe {n_atoms}; pass the atom array the inputs were built from."
             )
 
@@ -219,10 +219,10 @@ class RewardInputs:
 
 
 @runtime_checkable
-class RewardFunctionProtocol(Protocol):
-    """Protocol for reward functions used in guided sampling.
+class LossFunctionProtocol(Protocol):
+    """Protocol for loss functions used in guided sampling.
 
-    Any callable that computes a scalar reward from atomic coordinates
+    Any callable that computes a scalar loss from atomic coordinates
     and properties can implement this protocol.
 
     Sign convention: the returned scalar is **minimized**. Lower is better, so
@@ -230,7 +230,7 @@ class RewardFunctionProtocol(Protocol):
     a score to maximize must negate itself. Guidance backpropagates the value as
     a loss and Feynman-Kac steering selects particles with ``argmin``, so a
     sign-inverted term steers away from the data rather than towards it. Weighted
-    combinations (:class:`~sampleworks.core.rewards.composite.CompositeReward`)
+    combinations (:class:`~sampleworks.core.losses.composite.CompositeLoss`)
     are only meaningful when every term agrees on this.
     """
 
@@ -243,7 +243,7 @@ class RewardFunctionProtocol(Protocol):
         unique_combinations: torch.Tensor | None = None,
         inverse_indices: torch.Tensor | None = None,
     ) -> Float[torch.Tensor, ""]:
-        """Compute reward value from atomic coordinates and properties.
+        """Compute loss value from atomic coordinates and properties.
 
         Parameters
         ----------
@@ -265,77 +265,77 @@ class RewardFunctionProtocol(Protocol):
         Returns
         -------
         Float[torch.Tensor, ""]
-            Scalar reward value
+            Scalar loss value
         """
         ...
 
 
 @runtime_checkable
-class PreparableRewardFunctionProtocol(RewardFunctionProtocol, Protocol):
-    """Protocol for reward functions that must be bound to their reward inputs first.
+class PreparableLossFunctionProtocol(LossFunctionProtocol, Protocol):
+    """Protocol for loss functions that must be bound to their loss inputs first.
 
-    A reward whose forward model depends on the atom ordering itself — element
+    A loss whose forward model depends on the atom ordering itself — element
     symbols, residue identity, a unit cell — cannot be fully built from the input
     file: the generative model may add, drop or reorder atoms relative to the
-    deposited structure (see ``utils/atom_reconciler.py``). Such rewards are
+    deposited structure (see ``utils/atom_reconciler.py``). Such losses are
     constructed in two phases: ``__init__`` takes the up-front configuration, and
-    :meth:`prepare` binds the reward to the :class:`RewardInputs` once sampling has
+    :meth:`prepare` binds the loss to the :class:`LossInputs` once sampling has
     built them. Those are the same inputs every subsequent ``__call__`` is fed, so
-    what the reward is prepared against and what it scores cannot diverge. Their
-    ``atom_array`` carries the model topology; :meth:`RewardInputs.to_atom_array`
+    what the loss is prepared against and what it scores cannot diverge. Their
+    ``atom_array`` carries the model topology; :meth:`LossInputs.to_atom_array`
     rebuilds a reference ``AtomArray`` (model identities, reconciled coordinates
     and B-factors) for forward models that need one.
     """
 
-    def prepare(self, reward_inputs: RewardInputs, *, device: torch.device | str = "cpu") -> None:
-        """Bind this reward to the inputs its ``__call__`` will receive.
+    def prepare(self, loss_inputs: LossInputs, *, device: torch.device | str = "cpu") -> None:
+        """Bind this loss to the inputs its ``__call__`` will receive.
 
-        Mutates the reward in place and returns nothing. Implementations must be
-        re-runnable, so a caller can prepare the same reward again for different
-        inputs or a different device, and must not write to ``reward_inputs`` or
+        Mutates the loss in place and returns nothing. Implementations must be
+        re-runnable, so a caller can prepare the same loss again for different
+        inputs or a different device, and must not write to ``loss_inputs`` or
         its ``atom_array``.
 
         Parameters
         ----------
-        reward_inputs
+        loss_inputs
             Inputs built for the sampled coordinates (model atom space), as
-            returned by ``SampleworksProcessedStructure.to_reward_inputs``.
+            returned by ``SampleworksProcessedStructure.to_loss_inputs``.
         device
             PyTorch device the prepared state is placed on.
         """
         ...
 
 
-def prepare_reward_if_needed(
-    reward: RewardFunctionProtocol,
-    reward_inputs: RewardInputs,
+def prepare_loss_if_needed(
+    loss_function: LossFunctionProtocol,
+    loss_inputs: LossInputs,
     *,
     device: torch.device | str = "cpu",
 ) -> None:
-    """Prepare ``reward`` against ``reward_inputs`` when it asks to be prepared.
+    """Prepare ``loss_function`` against ``loss_inputs`` when it asks to be prepared.
 
-    Rewards that do not implement :class:`PreparableRewardFunctionProtocol` are
+    Losses that do not implement :class:`PreparableLossFunctionProtocol` are
     left untouched, so callers can apply this unconditionally.
 
     Parameters
     ----------
-    reward
-        Reward function about to be used for guidance.
-    reward_inputs
-        Inputs the reward's ``__call__`` will be fed; ``reward_inputs.atom_array``
+    loss
+        Loss function about to be used for guidance.
+    loss_inputs
+        Inputs the loss's ``__call__`` will be fed; ``loss_inputs.atom_array``
         is the model-order topology the coordinates follow.
     device
-        PyTorch device the reward's prepared state is placed on.
+        PyTorch device the loss's prepared state is placed on.
     """
-    if isinstance(reward, PreparableRewardFunctionProtocol):
-        reward.prepare(reward_inputs, device=device)
+    if isinstance(loss_function, PreparableLossFunctionProtocol):
+        loss_function.prepare(loss_inputs, device=device)
 
 
 @runtime_checkable
-class PrecomputableRewardFunctionProtocol(RewardFunctionProtocol, Protocol):
-    """Protocol for reward functions with precomputation for vmap compatibility.
+class PrecomputableLossFunctionProtocol(LossFunctionProtocol, Protocol):
+    """Protocol for loss functions with precomputation for vmap compatibility.
 
-    Extends RewardFunctionProtocol with a method to precompute unique
+    Extends LossFunctionProtocol with a method to precompute unique
     (element, b_factor) combinations, avoiding dynamic shapes in vmap contexts.
     """
 

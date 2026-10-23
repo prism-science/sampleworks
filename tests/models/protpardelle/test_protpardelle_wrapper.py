@@ -297,10 +297,10 @@ class TestFeaturize:
             coords_at_observed_slots.numpy(), observed.coord, rtol=0, atol=1e-4
         )
 
-    def test_override_template_builds_reward_inputs(
+    def test_override_template_builds_loss_inputs(
         self, protpardelle_wrapper, structure_5i09_density, seq_5i09_deposited
     ):
-        """Unobserved template atoms get finite defaults so reward inputs can be built.
+        """Unobserved template atoms get finite defaults so loss inputs can be built.
 
         Parameters
         ----------
@@ -324,9 +324,9 @@ class TestFeaturize:
 
         prior = protpardelle_wrapper.initialize_from_prior(1, features=features)
         processed = process_structure_to_trajectory_input(annotated, prior, features, 1)
-        reward_inputs = processed.to_reward_inputs()
-        assert reward_inputs.b_factors.shape[-1] == len(template)
-        assert torch.isfinite(reward_inputs.b_factors).all()
+        loss_inputs = processed.to_loss_inputs()
+        assert loss_inputs.b_factors.shape[-1] == len(template)
+        assert torch.isfinite(loss_inputs.b_factors).all()
 
     def test_returns_generative_model_input(self, protpardelle_wrapper):
         structure = _protein_structure(SEQ_A)

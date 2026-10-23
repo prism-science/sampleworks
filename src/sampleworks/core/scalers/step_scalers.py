@@ -18,14 +18,14 @@ def _raise_value_error_if_atom_count_mismatch(
     state: Float[Tensor, "*batch atoms 3"],
     context: StepParams,
 ) -> None:
-    """Raise ValueError if state and reward_inputs have different atom counts."""
-    assert context.reward_inputs is not None
+    """Raise ValueError if state and loss_inputs have different atom counts."""
+    assert context.loss_inputs is not None
     n_state_atoms = state.shape[-2]
-    n_reward_atoms = context.reward_inputs.elements.shape[-1]
-    if n_state_atoms != n_reward_atoms:
+    n_loss_atoms = context.loss_inputs.elements.shape[-1]
+    if n_state_atoms != n_loss_atoms:
         raise ValueError(
-            f"State atom count ({n_state_atoms}) != reward_inputs atom count ({n_reward_atoms}). "
-            "Ensure reward_inputs are built with the correct number of atoms when a mismatch "
+            f"State atom count ({n_state_atoms}) != loss_inputs atom count ({n_loss_atoms}). "
+            "Ensure loss_inputs are built with the correct number of atoms when a mismatch "
             "exists."
         )
 
@@ -66,20 +66,20 @@ class DataSpaceDPSScaler:
         *,
         model: FlowModelWrapper | None = None,
     ) -> tuple[Float[Tensor, "*batch atoms 3"], Float[Tensor, " batch"]]:
-        if context.reward is None or context.reward_inputs is None:
+        if context.loss_function is None or context.loss_inputs is None:
             raise ValueError(
-                "StepParams missing reward/reward_inputs. "
-                "Use context.with_reward() before calling scale()."
+                "StepParams missing loss_function/loss_inputs. "
+                "Use context.with_loss() before calling scale()."
             )
 
         _raise_value_error_if_atom_count_mismatch(state, context)
 
         x0_for_grad = state.detach().requires_grad_(True)
-        loss = context.reward(
+        loss = context.loss_function(
             coordinates=x0_for_grad,
-            elements=context.reward_inputs.elements,
-            b_factors=context.reward_inputs.b_factors,
-            occupancies=context.reward_inputs.occupancies,
+            elements=context.loss_inputs.elements,
+            b_factors=context.loss_inputs.b_factors,
+            occupancies=context.loss_inputs.occupancies,
         )
         loss.backward()
 
@@ -120,8 +120,8 @@ class NoiseSpaceDPSScaler:
         *,
         model: FlowModelWrapper | None = None,
     ) -> tuple[Float[Tensor, "*batch atoms 3"], Float[Tensor, " batch"]]:
-        if context.reward is None or context.reward_inputs is None:
-            raise ValueError("StepParams missing reward/reward_inputs")
+        if context.loss_function is None or context.loss_inputs is None:
+            raise ValueError("StepParams missing loss_function/loss_inputs")
 
         if context.metadata is None or "x_t" not in context.metadata:
             raise ValueError(
@@ -134,11 +134,11 @@ class NoiseSpaceDPSScaler:
 
         _raise_value_error_if_atom_count_mismatch(state, context)
 
-        loss = context.reward(
+        loss = context.loss_function(
             coordinates=state,  # x0_pred, connected to x_t via model
-            elements=context.reward_inputs.elements,
-            b_factors=context.reward_inputs.b_factors,
-            occupancies=context.reward_inputs.occupancies,
+            elements=context.loss_inputs.elements,
+            b_factors=context.loss_inputs.b_factors,
+            occupancies=context.loss_inputs.occupancies,
         )
 
         # Use loss.backward() instead of torch.autograd.grad() to work with

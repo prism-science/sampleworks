@@ -16,7 +16,7 @@ from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.volume im
     Resolution,
     XMap,
 )
-from sampleworks.core.rewards.real_space_density import (
+from sampleworks.core.losses.real_space_density import (
     extract_density_inputs_from_atomarray,
     setup_scattering_params,
 )

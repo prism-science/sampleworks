@@ -286,7 +286,7 @@ class BoltzConditioning:
     diffusion_conditioning : dict[str, Tensor] | None
         Additional diffusion conditioning (Boltz2 only).
     true_atom_array : AtomArray | None
-        Original structure's atom array (occupancy-filtered) for reward computation.
+        Original structure's atom array (occupancy-filtered) for loss computation.
         Boltz's internal atom representation may differ from this due to padding, etc.
     model_atom_array : AtomArray | None
         The AtomArray of the atoms the model actually operates on for the current

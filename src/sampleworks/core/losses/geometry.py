@@ -1,6 +1,6 @@
 """Coordinate-space bond-geometry regularizer for inference-time latent optimization (IT-opt).
 
-When the density reward is optimized aggressively, the latent update can distort the denoised
+When the density loss is optimized aggressively, the latent update can distort the denoised
 structure -- stretching covalent bonds and driving non-bonded atoms into steric clashes -- to buy a
 little density fit. That is the overshoot observed on high-baseline targets (e.g. 1VME, where
 z-optimization raised clashes while dropping RSCC). This module adds a differentiable penalty on the
@@ -48,22 +48,21 @@ def _covalent_radius(element: str) -> float:
 
 
 # TODO(#420): this loss has no test coverage.
-# TODO(#363): widen __call__ to RewardFunctionProtocol so this composes with the other rewards.
-class BondGeometryReward:
+# TODO(#363): widen __call__ to LossFunctionProtocol so this composes with the other losses.
+class BondGeometryLoss:
     """Penalize distorted bonds and steric clashes in the denoised structure.
 
     The topology (which atoms are bonded, their ideal bond lengths, the per-atom-pair collision
     distances, and which pairs to score for clashes) is read once from ``atom_array`` at
     construction, so each step is just cheap tensor ops on the coords. ``atom_array`` MUST be the
-    atom set whose ordering matches the coordinate tensor the reward sees -- the *model* atom array,
+    atom set whose ordering matches the coordinate tensor the loss sees -- the *model* atom array,
     not the deposited structure -- or the bond indices will not line up with the coordinates.
 
-    Despite the ``Reward`` name (the module's convention), this is a penalty: it is added to,
-    and minimized as part of, ``LatentOptimization``'s loss.
+    This is a penalty: it is added to, and minimized as part of, ``LatentOptimization``'s loss.
 
-    Note: this does not satisfy ``RewardFunctionProtocol``. ``__call__`` takes only ``coords``,
+    Note: this does not satisfy ``LossFunctionProtocol``. ``__call__`` takes only ``coords``,
     not the protocol's per-atom ``elements``/``b_factors``/``occupancies``, so the planned
-    redefinition of the rewards interface will have to admit penalties of this shape.
+    redefinition of the losses interface will have to admit penalties of this shape.
     """
 
     def __init__(

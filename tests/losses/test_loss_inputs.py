@@ -1,8 +1,8 @@
-"""Tests for RewardInputs.
+"""Tests for LossInputs.
 
 ``from_atom_array`` must reject atom arrays with NaN B-factors, NaN coordinates, and
 invalid occupancies, and keep the topology it was built from. ``to_atom_array`` must
-rebuild the reference array a reward's ``prepare()`` needs without touching that
+rebuild the reference array a loss's ``prepare()`` needs without touching that
 topology.
 """
 
@@ -12,18 +12,18 @@ import numpy as np
 import pytest
 import torch
 from biotite.structure import array, Atom, AtomArray, stack
-from sampleworks.core.rewards.protocol import RewardInputs
+from sampleworks.core.losses.protocol import LossInputs
 
 
-class TestRewardInputsFromAtomArray:
-    """Validate that RewardInputs.from_atom_array rejects invalid atom arrays."""
+class TestLossInputsFromAtomArray:
+    """Validate that LossInputs.from_atom_array rejects invalid atom arrays."""
 
     def test_nan_b_factors_from_missing_atoms_rejected(self, atom_array_1vme_with_missing_atoms):
         """
-        RewardInputs rejects the raw atom array from add_missing_atoms.
+        LossInputs rejects the raw atom array from add_missing_atoms.
         """
         with pytest.raises(ValueError, match="NaN B-factors"):
-            RewardInputs.from_atom_array(atom_array_1vme_with_missing_atoms, ensemble_size=1)
+            LossInputs.from_atom_array(atom_array_1vme_with_missing_atoms, ensemble_size=1)
 
     def test_cleaned_missing_atoms_accepted(self, atom_array_1vme_with_missing_atoms):
         """After applying the same fixes as the RF3 wrapper, the atom array passes."""
@@ -53,11 +53,11 @@ class TestRewardInputsFromAtomArray:
             b_factors[nan_b_mask] = 20.0
             aa.set_annotation("b_factor", b_factors)
 
-        reward_inputs = RewardInputs.from_atom_array(aa, ensemble_size=1)
-        assert reward_inputs.b_factors.shape[-1] == len(aa)
+        loss_inputs = LossInputs.from_atom_array(aa, ensemble_size=1)
+        assert loss_inputs.b_factors.shape[-1] == len(aa)
 
     def test_nan_coordinates_rejected(self, structure_1vme):
-        """NaN coordinates must be caught before constructing reward tensors."""
+        """NaN coordinates must be caught before constructing loss tensors."""
         atom_array = structure_1vme["asym_unit"].copy()
         # Fix any pre-existing NaN b_factors so the coordinate check passes
         b_factors = np.nan_to_num(atom_array.b_factor, nan=20.0)
@@ -67,7 +67,7 @@ class TestRewardInputsFromAtomArray:
         atom_array.coord = coords
 
         with pytest.raises(ValueError, match="NaN coordinates"):
-            RewardInputs.from_atom_array(atom_array, ensemble_size=1)
+            LossInputs.from_atom_array(atom_array, ensemble_size=1)
 
 
 @pytest.fixture
@@ -118,37 +118,37 @@ def toy_atom_array() -> AtomArray:
     return array(atoms)
 
 
-class TestRewardInputsTopology:
+class TestLossInputsTopology:
     """``from_atom_array`` keeps the atom array the tensors were built from."""
 
     def test_topology_is_the_source_array(self, toy_atom_array):
         """The stored topology is the very array passed in, not a copy."""
-        reward_inputs = RewardInputs.from_atom_array(toy_atom_array, ensemble_size=2)
+        loss_inputs = LossInputs.from_atom_array(toy_atom_array, ensemble_size=2)
 
-        assert reward_inputs.atom_array is toy_atom_array
+        assert loss_inputs.atom_array is toy_atom_array
 
     def test_stack_input_keeps_its_first_model(self, toy_atom_array):
         """An ``AtomArrayStack`` shares one topology, represented by its first model."""
-        reward_inputs = RewardInputs.from_atom_array(stack([toy_atom_array]), ensemble_size=1)
+        loss_inputs = LossInputs.from_atom_array(stack([toy_atom_array]), ensemble_size=1)
 
-        assert isinstance(reward_inputs.atom_array, AtomArray)
-        assert reward_inputs.atom_array.array_length() == toy_atom_array.array_length()
+        assert isinstance(loss_inputs.atom_array, AtomArray)
+        assert loss_inputs.atom_array.array_length() == toy_atom_array.array_length()
 
     def test_tensor_only_construction_has_no_topology(self):
         """Building the dataclass directly, as tests do, leaves ``atom_array`` unset."""
         n_atoms = 3
-        reward_inputs = RewardInputs(
+        loss_inputs = LossInputs(
             elements=torch.zeros(1, n_atoms, dtype=torch.long),
             b_factors=torch.full((1, n_atoms), 20.0),
             occupancies=torch.ones(1, n_atoms),
             input_coords=torch.zeros(1, n_atoms, 3),
         )
 
-        assert reward_inputs.atom_array is None
+        assert loss_inputs.atom_array is None
 
 
-class TestRewardInputsToAtomArray:
-    """Verify the reference atom array handed to a reward's ``prepare()``."""
+class TestLossInputsToAtomArray:
+    """Verify the reference atom array handed to a loss's ``prepare()``."""
 
     @pytest.mark.parametrize("ensemble_size,num_particles", [(1, 1), (4, 1), (4, 2)])
     def test_round_trip_preserves_coords_b_factors_and_topology(
@@ -159,11 +159,11 @@ class TestRewardInputsToAtomArray:
         Occupancy is the exception: the result is a topology, so it is 1.0 everywhere,
         whatever the template held.
         """
-        reward_inputs = RewardInputs.from_atom_array(
+        loss_inputs = LossInputs.from_atom_array(
             toy_atom_array, ensemble_size=ensemble_size, num_particles=num_particles
         )
 
-        result = reward_inputs.to_atom_array()
+        result = loss_inputs.to_atom_array()
 
         assert result is not toy_atom_array
         np.testing.assert_allclose(result.coord, toy_atom_array.coord)
@@ -177,17 +177,17 @@ class TestRewardInputsToAtomArray:
         np.testing.assert_allclose(toy_atom_array.occupancy, [0.5, 0.5, 1.0, 0.25])
 
     def test_reconciled_values_override_the_template(self, toy_atom_array):
-        """Coordinates and B-factors come from the tensors, as ``to_reward_inputs`` sets them.
+        """Coordinates and B-factors come from the tensors, as ``to_loss_inputs`` sets them.
 
         This is the handoff that matters for ``prepare()``: a model template's placeholder
         B-factors and coordinates must not reach a forward model built from this array.
         """
         n_atoms = toy_atom_array.array_length()
-        reward_inputs = RewardInputs.from_atom_array(toy_atom_array, ensemble_size=2)
+        loss_inputs = LossInputs.from_atom_array(toy_atom_array, ensemble_size=2)
         new_b_factors = torch.arange(n_atoms, dtype=torch.float32) + 100.0
         new_coords = torch.arange(n_atoms * 3, dtype=torch.float32).reshape(n_atoms, 3) - 50.0
         reconciled = replace(
-            reward_inputs,
+            loss_inputs,
             b_factors=new_b_factors.expand(2, -1),
             input_coords=new_coords.expand(2, -1, -1),
         )
@@ -201,26 +201,26 @@ class TestRewardInputsToAtomArray:
 
     def test_explicit_template_overrides_the_stored_topology(self, toy_atom_array):
         """A caller may supply the topology array instead of relying on the stored one."""
-        reward_inputs = RewardInputs.from_atom_array(toy_atom_array, ensemble_size=1)
+        loss_inputs = LossInputs.from_atom_array(toy_atom_array, ensemble_size=1)
         template = toy_atom_array.copy()
         template.set_annotation("atom_name", np.array(["X1", "X2", "X3", "X4"]))
 
-        result = reward_inputs.to_atom_array(template)
+        result = loss_inputs.to_atom_array(template)
 
         np.testing.assert_array_equal(result.atom_name, ["X1", "X2", "X3", "X4"])
         np.testing.assert_allclose(result.coord, toy_atom_array.coord)
 
     def test_template_atom_count_mismatch_raises(self, toy_atom_array):
         """A template that does not describe these atoms is rejected."""
-        reward_inputs = RewardInputs.from_atom_array(toy_atom_array, ensemble_size=1)
+        loss_inputs = LossInputs.from_atom_array(toy_atom_array, ensemble_size=1)
 
         with pytest.raises(ValueError, match="atoms"):
-            reward_inputs.to_atom_array(toy_atom_array[:2])
+            loss_inputs.to_atom_array(toy_atom_array[:2])
 
     def test_without_any_topology_raises(self):
         """Tensor-only inputs cannot produce an atom array unless a template is given."""
         n_atoms = 4
-        reward_inputs = RewardInputs(
+        loss_inputs = LossInputs(
             elements=torch.zeros(1, n_atoms, dtype=torch.long),
             b_factors=torch.full((1, n_atoms), 20.0),
             occupancies=torch.ones(1, n_atoms),
@@ -228,4 +228,4 @@ class TestRewardInputsToAtomArray:
         )
 
         with pytest.raises(ValueError, match="no atom array"):
-            reward_inputs.to_atom_array()
+            loss_inputs.to_atom_array()

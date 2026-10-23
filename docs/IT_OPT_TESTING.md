@@ -43,28 +43,18 @@ pixi run -e protenix-dev python -m pytest tests/models/test_latent_adapter.py -q
 
 <!-- TODO(#422): make this a GPU test once we can run checkpoint-dependent tests in CI. -->
 
-Needs no reward; confirms precondition (a). Inject a `requires_grad` leaf as `z_trunk` (or
+Needs no loss; confirms precondition (a). Inject a `requires_grad` leaf as `z_trunk` (or
 `s_trunk`), run one differentiable denoiser forward, and check the leaf received a gradient:
 
 ```python
 import torch
-from sampleworks.utils.guidance_script_utils import (
-    get_model_and_device,
-    get_reward_function_and_structure,
-)
+from sampleworks.utils.guidance_script_utils import get_model_and_device, load_guidance_structure
 from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
 from sampleworks.models.latent_adapter import AttrLatentIO
 from sampleworks.models.protocol import GenerativeModelInput
 
 device, model = get_model_and_device("cuda:0", "<protenix.ckpt>", "protenix")
-reward, structure = get_reward_function_and_structure(
-    density="<map.ccp4>",
-    device=device,
-    em=False,
-    loss_order=2,
-    resolution=1.8,
-    structure_path="<structure.cif>",
-)
+structure = load_guidance_structure("<structure.cif>")
 
 feats = model.featurize(structure)  # trunk pass
 io = AttrLatentIO(single_attr="s_trunk", pair_attr="z_trunk")
@@ -97,7 +87,12 @@ print("z_leaf.grad abs-sum:", None if z_leaf.grad is None else z_leaf.grad.abs()
 ### Level 1 — A tiny end-to-end run
 
 ```python
+from sampleworks.core.losses.config import LossConfig, build_loss
+from sampleworks.core.losses.registry import LossBuildContext
 from sampleworks.core.scalers.latent_optimization import LatentOptimization
+
+loss_config = LossConfig.single("real_space_density", density="<map.ccp4>", resolution=1.8)
+loss = build_loss(loss_config, LossBuildContext(structure=structure, device=device))
 
 itopt = LatentOptimization(
     ensemble_size=1,
@@ -111,7 +106,7 @@ itopt = LatentOptimization(
     single_attr="s_trunk",
     pair_attr="z_trunk",
 )
-out = itopt.sample(structure, model, sampler, step_scaler=None, reward=reward)
+out = itopt.sample(structure, model, sampler, step_scaler=None, loss_function=loss)
 opt = out.metadata["optimization_losses"][0]  # per-step data losses, round 0
 print("first→last opt loss:", opt[0], "→", opt[-1])
 ```
@@ -134,7 +129,7 @@ Raise `num_steps` (→200), `outer_steps` (→2–4), `ensemble_size`; turn on `
 | Loss drops but structures degrade | Latent drifted off-manifold. | Raise `anchor_weight_*`; fewer steps/rounds; raise `bond_length_weight`. |
 | NaNs | Augmentation/churn stochasticity, or bf16 latents. | `EDMSamplerConfig(augmentation=False)`; keep latents float32; lower LR. |
 | `ValueError: no optimizable latent on the conditioning` | Wrong attr names (Boltz `"s"`/`"z"` on Protenix). | Use `s_trunk`/`z_trunk`. |
-| `ValueError: State atom count != reward_inputs atom count` | Reward built from a different atom set than the model's. | Use the same structure/density the CLI takes. |
+| `ValueError: State atom count != loss_inputs atom count` | Loss built from a different atom set than the model's. | Use the same structure/density the CLI takes. |
 
 Cheap instrumentation (one line each in `_latent_optimizer_step`): the pre-clip grad norm (is the clip
 biting?) and the anchor's `mean((Δs)²)`, `mean((Δz)²)` (how far the latents drifted).

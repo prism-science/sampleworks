@@ -1,6 +1,6 @@
-"""Reward-specific pytest fixtures.
+"""Loss-specific pytest fixtures.
 
-Fixtures here are scoped to the reward test suite (`tests/rewards/`) so they don't
+Fixtures here are scoped to the loss test suite (`tests/losses/`) so they don't
 pollute the global fixture namespace. They depend on cross-cutting fixtures defined in
 the parent `tests/conftest.py` (`device`, `resources_dir`, `density_map_1vme`), which
 pytest resolves up the conftest hierarchy automatically.
@@ -9,7 +9,7 @@ pytest resolves up the conftest hierarchy automatically.
 `tests/utils/test_density_utils.py` also consumes it; a fixture lives at the lowest
 common ancestor of everything that uses it.
 
-The reward families get their target data differently. The density fixtures read
+The loss families get their target data differently. The density fixtures read
 committed files (a carved .ccp4 and its matching recentered cif). The SF fixtures
 generate their (cif, mtz) pair per session via `generate_synthetic_sf.py`. The
 diffuse_bragg fixtures run `generate_synthetic_sf_lunus.py`'s row processor on 1vme
@@ -35,9 +35,9 @@ if TYPE_CHECKING:
     from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.volume import (
         XMap,
     )
-    from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
-    from sampleworks.core.rewards.real_space_density import RealSpaceRewardFunction
-    from sampleworks.core.rewards.structure_factor import StructureFactorRewardFunction
+    from sampleworks.core.losses.diffuse_bragg import DiffuseBraggLossFunction
+    from sampleworks.core.losses.real_space_density import RealSpaceLossFunction
+    from sampleworks.core.losses.structure_factor import StructureFactorLossFunction
 
 
 @pytest.fixture(scope="session")
@@ -49,17 +49,15 @@ def structure_1vme_density(resources_dir: Path) -> dict:
 
 
 @pytest.fixture(scope="session")
-def reward_function_1vme(
-    density_map_1vme: "XMap", device: torch.device
-) -> "RealSpaceRewardFunction":
-    """Real-space density reward from the carved 1vme map, in X-ray (non-EM) mode."""
-    from sampleworks.core.rewards.real_space_density import (
-        RealSpaceRewardFunction,
+def loss_function_1vme(density_map_1vme: "XMap", device: torch.device) -> "RealSpaceLossFunction":
+    """Real-space density loss from the carved 1vme map, in X-ray (non-EM) mode."""
+    from sampleworks.core.losses.real_space_density import (
+        RealSpaceLossFunction,
         setup_scattering_params,
     )
 
     params = setup_scattering_params(em_mode=False, device=device)
-    rf = RealSpaceRewardFunction(density_map_1vme, params, torch.tensor([1], device=device))
+    rf = RealSpaceLossFunction(density_map_1vme, params, torch.tensor([1], device=device))
     return rf
 
 
@@ -170,11 +168,11 @@ def structure_1vme_sf(sf_1vme_cif_and_mtz_paths: tuple[Path, Path]) -> AtomArray
 def test_coordinates_1vme_sf(
     structure_1vme_sf: AtomArray, device: torch.device
 ) -> tuple[Float[Tensor, "n_atoms 3"], AtomArray]:
-    """Atomic coordinates and the atom array (asym_unit) which for the SF reward is the
+    """Atomic coordinates and the atom array (asym_unit) which for the SF loss is the
     same atom array as the structure_1vme_sf.
 
-    Exists for the ``_REWARD_BUNDLES`` mapping in ``test_reward_function_contract.py``,
-    which resolves one ``(coords, atom_array)`` fixture per reward so every reward is
+    Exists for the ``_LOSS_BUNDLES`` mapping in ``test_loss_function_contract.py``,
+    which resolves one ``(coords, atom_array)`` fixture per loss so every loss is
     exercised through the same shape. SF-specific tests that need only the atom array take
     ``structure_1vme_sf`` directly.
     """
@@ -184,27 +182,27 @@ def test_coordinates_1vme_sf(
 
 
 @pytest.fixture(scope="session")
-def reward_function_1vme_sf(
+def loss_function_1vme_sf(
     mtz_path_1vme: Path,
     structure_1vme_sf: AtomArray,
     device: torch.device,
-) -> "StructureFactorRewardFunction":
-    """Structure factor reward (|Fprotein| only) prepared using the 1vme structure's topology."""
-    from sampleworks.core.rewards.protocol import RewardInputs
-    from sampleworks.core.rewards.structure_factor import StructureFactorRewardFunction
+) -> "StructureFactorLossFunction":
+    """Structure factor loss (|Fprotein| only) prepared using the 1vme structure's topology."""
+    from sampleworks.core.losses.protocol import LossInputs
+    from sampleworks.core.losses.structure_factor import StructureFactorLossFunction
 
     # normalize_amplitude=True scores normalized E-values (|Ec| vs sfc.Eo), which are
     # unit-variance per resolution shell, so the MSE can be tested on an absolute scale.
-    reward_function = StructureFactorRewardFunction(
+    loss_function = StructureFactorLossFunction(
         mtz_path_1vme,
         expcolumns=["Fprotein", "SIGFprotein"],
         normalize_amplitude=True,
     )
-    reward_function.prepare(
-        RewardInputs.from_atom_array(structure_1vme_sf, ensemble_size=1, device=device),
+    loss_function.prepare(
+        LossInputs.from_atom_array(structure_1vme_sf, ensemble_size=1, device=device),
         device=device,
     )
-    return reward_function
+    return loss_function
 
 
 # ---------------------------------------------------------------------------
@@ -371,64 +369,64 @@ def diffuse_bragg_targets(
 
 
 @pytest.fixture(scope="session")
-def diffuse_bragg_rewards(
+def diffuse_bragg_losses(
     diffuse_bragg_ensemble: tuple[AtomArray, np.ndarray],
     diffuse_bragg_targets: DiffuseBraggTargets,
-) -> dict[float, "DiffuseBraggRewardFunction"]:
-    """Prepared rewards on CPU, keyed by ``bragg_weight``: 1.0, 0.5 and 0.0.
+) -> dict[float, "DiffuseBraggLossFunction"]:
+    """Prepared losses on CPU, keyed by ``bragg_weight``: 1.0, 0.5 and 0.0.
 
     The pure terms are built with only the target they need, so constructing this
     fixture is itself the check that a zero weight does not require its target.
     """
-    from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
-    from sampleworks.core.rewards.protocol import RewardInputs
+    from sampleworks.core.losses.diffuse_bragg import DiffuseBraggLossFunction
+    from sampleworks.core.losses.protocol import LossInputs
 
     atom_array, _ = diffuse_bragg_ensemble
     targets = diffuse_bragg_targets
-    rewards = {
-        1.0: DiffuseBraggRewardFunction(bragg_target=targets.bragg, bragg_weight=1.0),
-        0.5: DiffuseBraggRewardFunction(
+    losses = {
+        1.0: DiffuseBraggLossFunction(bragg_target=targets.bragg, bragg_weight=1.0),
+        0.5: DiffuseBraggLossFunction(
             bragg_target=targets.bragg, diffuse_target=targets.diffuse, bragg_weight=0.5
         ),
-        0.0: DiffuseBraggRewardFunction(diffuse_target=targets.diffuse, bragg_weight=0.0),
+        0.0: DiffuseBraggLossFunction(diffuse_target=targets.diffuse, bragg_weight=0.0),
     }
-    inputs = RewardInputs.from_atom_array(atom_array, ensemble_size=1)
-    for reward in rewards.values():
-        reward.prepare(inputs, device="cpu")
-    return rewards
+    inputs = LossInputs.from_atom_array(atom_array, ensemble_size=1)
+    for loss in losses.values():
+        loss.prepare(inputs, device="cpu")
+    return losses
 
 
 @pytest.fixture(scope="session")
 def test_coordinates_1vme_diffuse_bragg(
     diffuse_bragg_single_model: AtomArray, device: torch.device
 ) -> tuple[Float[Tensor, "n_atoms 3"], AtomArray]:
-    """The single-model coordinates and topology, for ``_REWARD_BUNDLES``."""
+    """The single-model coordinates and topology, for ``_LOSS_BUNDLES``."""
     coords = torch.as_tensor(diffuse_bragg_single_model.coord, dtype=torch.float32, device=device)
     return coords, diffuse_bragg_single_model
 
 
 @pytest.fixture(scope="session")
-def reward_function_1vme_diffuse_bragg(
+def loss_function_1vme_diffuse_bragg(
     diffuse_bragg_targets: DiffuseBraggTargets,
     diffuse_bragg_single_model: AtomArray,
     device: torch.device,
-) -> "DiffuseBraggRewardFunction":
-    """Pure-Bragg reward on the single-model target, prepared on ``device``.
+) -> "DiffuseBraggLossFunction":
+    """Pure-Bragg loss on the single-model target, prepared on ``device``.
 
     Bragg alone because the contract scores one conformer, for which the diffuse
     term is identically zero; the ensemble-valued behaviour is tested in
-    ``test_diffuse_bragg_reward.py``. Prepared through ``prepare_reward_if_needed``,
+    ``test_diffuse_bragg_loss.py``. Prepared through ``prepare_loss_if_needed``,
     the hook the scalers use, so the hook's signature is exercised too.
     """
-    from sampleworks.core.rewards.diffuse_bragg import DiffuseBraggRewardFunction
-    from sampleworks.core.rewards.protocol import prepare_reward_if_needed, RewardInputs
+    from sampleworks.core.losses.diffuse_bragg import DiffuseBraggLossFunction
+    from sampleworks.core.losses.protocol import LossInputs, prepare_loss_if_needed
 
-    reward = DiffuseBraggRewardFunction(
+    loss = DiffuseBraggLossFunction(
         bragg_target=diffuse_bragg_targets.bragg_single, bragg_weight=1.0
     )
-    prepare_reward_if_needed(
-        reward,
-        RewardInputs.from_atom_array(diffuse_bragg_single_model, ensemble_size=1, device=device),
+    prepare_loss_if_needed(
+        loss,
+        LossInputs.from_atom_array(diffuse_bragg_single_model, ensemble_size=1, device=device),
         device=device,
     )
-    return reward
+    return loss

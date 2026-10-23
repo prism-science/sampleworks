@@ -18,8 +18,8 @@ from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.sf import
 from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.volume import (
     XMap,
 )
-from sampleworks.core.rewards.options import RealSpaceDensityOptions
-from sampleworks.core.rewards.registry import RewardBuildContext
+from sampleworks.core.losses.options import RealSpaceDensityOptions
+from sampleworks.core.losses.registry import LossBuildContext
 from sampleworks.utils.elements import elements_to_scattering_indices
 from sampleworks.utils.torch_utils import try_gpu
 
@@ -267,7 +267,7 @@ def extract_density_inputs_from_atomarray(
     return coords_tensor, elements_tensor, b_factors_tensor, occupancies_tensor
 
 
-class RealSpaceRewardFunction:
+class RealSpaceLossFunction:
     def __init__(
         self,
         xmap: XMap,
@@ -277,7 +277,7 @@ class RealSpaceRewardFunction:
         loss_order: int = 2,
         device: torch.device | None = None,
     ):
-        """Hardcoded reward function for now, L1 or L2 reward for fitting real space
+        """Hardcoded loss function for now, L1 or L2 loss for fitting real space
         electron density.
 
         TODO: decide whether these should take in structure or take in
@@ -338,7 +338,7 @@ class RealSpaceRewardFunction:
         unique_combinations, inverse_indices = torch.unique(combined, dim=0, return_inverse=True)
         return unique_combinations.to(device), inverse_indices.to(device)
 
-    def structure_to_reward_input(
+    def structure_to_loss_input(
         self, structure: dict
     ) -> dict[str, Float[torch.Tensor, "..."] | Int[torch.Tensor, "..."]]:
         coordinates, elements, b_factors, occupancies = extract_density_inputs_from_atomarray(
@@ -361,7 +361,7 @@ class RealSpaceRewardFunction:
         unique_combinations: torch.Tensor | None = None,
         inverse_indices: torch.Tensor | None = None,
     ) -> Float[torch.Tensor, ""]:
-        """Pure function for computing reward. Call .backward() on this to get gradients
+        """Pure function for computing loss. Call .backward() on this to get gradients
         w.r.t. input.
 
         Parameters
@@ -382,7 +382,7 @@ class RealSpaceRewardFunction:
         Returns
         -------
         torch.Tensor
-            Reward value
+            Loss value
         """
         density: torch.Tensor = self.transformer(
             coordinates=coordinates,
@@ -396,23 +396,23 @@ class RealSpaceRewardFunction:
         return self.loss(density, self.transformer.xmap.array)
 
 
-def build_real_space_density_reward(
-    options: RealSpaceDensityOptions, context: RewardBuildContext
-) -> RealSpaceRewardFunction:
-    """Build the real-space density reward from its configured options.
+def build_real_space_density_loss(
+    options: RealSpaceDensityOptions, context: LossBuildContext
+) -> RealSpaceLossFunction:
+    """Build the real-space density loss from its configured options.
 
     Parameters
     ----------
     options
-        Density reward options: map path, resolution, loss order, and which
+        Density loss options: map path, resolution, loss order, and which
         scattering factors to use.
     context
         Run-level inputs; the parsed input structure and the target device.
 
     Returns
     -------
-    RealSpaceRewardFunction
-        Reward scoring the model against the given map.
+    RealSpaceLossFunction
+        Loss scoring the model against the given map.
 
     Raises
     ------
@@ -421,13 +421,13 @@ def build_real_space_density_reward(
     """
     if options.density is None:
         raise ValueError(
-            "The real_space_density reward needs a density map. Pass --density, or set "
-            "reward_options.density in a --reward-config file."
+            "The real_space_density loss needs a density map. Pass --density, or set "
+            "loss_options.density in a --loss-config file."
         )
     if options.resolution is None:
         raise ValueError(
-            "The real_space_density reward needs a map resolution. Pass --resolution, or "
-            "set reward_options.resolution in a --reward-config file."
+            "The real_space_density loss needs a map resolution. Pass --resolution, or "
+            "set loss_options.resolution in a --loss-config file."
         )
 
     device = torch.device(context.device) if isinstance(context.device, str) else context.device
@@ -444,7 +444,7 @@ def build_real_space_density_reward(
     selection_mask = atom_array.occupancy > 0
     logger.info(f"Selected {selection_mask.sum()} atoms with occupancy > 0")
 
-    return RealSpaceRewardFunction(
+    return RealSpaceLossFunction(
         xmap,
         scattering_params,
         selection_mask,
