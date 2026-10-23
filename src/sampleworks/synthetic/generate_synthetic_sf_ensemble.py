@@ -33,9 +33,12 @@ import argparse
 import sys
 import traceback
 from pathlib import Path
+from typing import cast
 
 import gemmi
 import numpy as np
+import reciprocalspaceship as rs
+import reciprocalspaceship.utils
 import torch
 from loguru import logger
 from SFC_Torch import SFcalculator
@@ -44,13 +47,12 @@ from SFC_Torch.io import PDBParser
 from sampleworks.synthetic.generate_synthetic_sf import (
     BatchRowForMTZ,
     load_batch_csv,
-    process_amplitudes_to_dataset,
-    write_sf_input_structure,
 )
 from sampleworks.synthetic.synthetic_utils import (
     atomarray_to_gemmi,
     load_structure_for_synthetic_loss,
     resolve_crystal_metadata,
+    resolve_mtz_column,
     resolve_parallel_jobs,
 )
 from sampleworks.utils.torch_utils import try_gpu
@@ -58,6 +60,176 @@ from sampleworks.utils.torch_utils import try_gpu
 
 # Same modes as the structure-factor loss's ``bulk_solvent`` option.
 BULK_SOLVENT_MODES = ("off", "combined", "per_conformer")
+
+
+def write_sf_input_structure(
+    gemmi_structure: gemmi.Structure, structure_path: Path, output_dir: Path
+) -> Path:
+    """Save the structure that structure factors were computed from.
+
+    Parameters
+    ----------
+    gemmi_structure
+        Processed structure passed to SFcalculator.
+    structure_path
+        Source structure path whose stem names the output.
+    output_dir
+        Directory in which to write ``<source_stem>_sf_input.cif``.
+
+    Returns
+    -------
+    Path
+        Written mmCIF path.
+
+    Notes
+    -----
+    This function creates ``output_dir`` and writes a file.
+    """
+    output_path = output_dir / f"{structure_path.stem}_sf_input.cif"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    gemmi_structure.make_mmcif_document().write_file(str(output_path))
+    logger.info(f"Saved processed structure to {output_path}")
+    return output_path
+
+
+def _build_rs_dataset_for_one_label(
+    sfc: SFcalculator,
+    label: str,
+    structure_factor_column: str,
+    miller_index_column: str,
+    sigma_f_scale: float,
+) -> rs.DataSet:
+    """Build an rs.DataSet that contains only one set of F / SIGF / PHIF columns.
+
+    ``sfc.prepare_dataset`` returns an amplitude column and a phase column (degrees)
+    for the given ``structure_factor_column`` attribute. We auto-detect those by MTZ
+    dtype (rather than assuming the unexposed ``FMODEL`` / ``PHIFMODEL`` names),
+    rename them to ``F{label}`` / ``PHIF{label}``, and synthesize a ``SIGF{label}``
+    column so several structure-factor sets (e.g. protein and total) can coexist in
+    one MTZ.
+
+    Parameters
+    ----------
+    sfc : SFcalculator
+        Structure-factor calculator holding the requested ASU amplitudes and phases.
+    label : str
+        Mtz column suffix. The resulted column names are ``F{label}``/``SIGF{label}``/
+        ``PHIF{label}``. The mtz column names should match what the structure-factor reward
+        later reads. In this script, we use ``"protein"`` and ``"total"`` as the labels.
+    structure_factor_column : str
+        SFcalculator attribute name passed to ``prepare_dataset`` (the amplitudes to emit).
+    miller_index_column : str
+        SFcalculator attribute name holding the Miller indices for ``prepare_dataset``.
+    sigma_f_scale : float
+        Multiplier used to synthesize the ``SIGF{label}`` column from the amplitudes.
+
+    Returns
+    -------
+    rs.DataSet
+        Dataset with columns ``F{label}``, ``SIGF{label}``, ``PHIF{label}`` (in that order).
+    """
+    dataset: rs.DataSet = sfc.prepare_dataset(miller_index_column, structure_factor_column)
+    amplitude_column = resolve_mtz_column(dataset, rs.StructureFactorAmplitudeDtype())
+    phase_column = resolve_mtz_column(dataset, rs.PhaseDtype())
+    logger.debug(
+        f"Auto-detected amplitude column: {amplitude_column}, "
+        f"phase column: {phase_column} for {label}"
+    )
+    f_col, phi_col, sig_col = f"F{label}", f"PHIF{label}", f"SIGF{label}"
+    # rs.DataSet.rename returns a DataSet at runtime, but the stub types it as DataFrame.
+    dataset = cast(
+        rs.DataSet,
+        dataset.rename(columns={amplitude_column: f_col, phase_column: phi_col}),
+    )
+    dataset[sig_col] = (dataset[f_col] * sigma_f_scale).astype(rs.StandardDeviationDtype())
+    return dataset[[f_col, sig_col, phi_col]]
+
+
+def process_amplitudes_to_dataset(
+    sfc: SFcalculator,
+    structure_factor_columns: dict[str, str],
+    test_fraction: float = 0.05,
+    seed: int | None = None,
+    miller_index_column: str = "Hasu_array",
+    ccp4_convention: bool = False,
+    sigma_f_scale: float = 0.2,
+    output_path: Path | None = None,
+) -> rs.DataSet:
+    """Build an rs.DataSet from SFcalculator outputs, optionally writing it as MTZ.
+
+    Parameters
+    ----------
+    sfc: SFcalculator
+        SFcalculator instance
+    structure_factor_columns: dict[str, str]
+        Mapping of ``label -> SFcalculator attribute``. Label must match the pattern of
+        SFcalculator attribute ``F{label}_asu`` (e.g. ``protein`` ->  ``Fprotein_asu``).
+        One structure-factor set (``F{label}``/``SIGF{label}``/``PHIF{label}``) is
+        emitted per label, and multiple labels are merged into one MTZ sharing the same
+        HKL list (``miller_index_column``). For example, ``{"protein": "Fprotein_asu",
+        "total": "Ftotal_asu"}`` produces ``Fprotein``/``SIGFprotein``/``PHIFprotein``/
+        ``Ftotal``/``SIGFtotal``/``PHIFtotal`` and optionallyan R-free flag column.
+    test_fraction: float
+        Fraction of reflections to mark as R-free test set (0 disables)
+    seed: int | None
+        Optional seed for reproducible R-free flag assignment
+    miller_index_column: str
+        Attribute name in SFcalculator for hkl indices
+    ccp4_convention: bool
+        If True, use CCP4 convention for R-free flag assignment. Default
+        is False, which uses Phenix convention (1 = test, 0 = working).
+    sigma_f_scale: float
+        Scale factor to make a fake sigma column from the structure factor amplitude
+        values so that SFcalculator can load the output MTZ file as synthetic reward
+        without errors. The actual sigma values only matter when computing R-factor.
+    output_path: Path | None
+        If provided, write the dataset to this MTZ file path.
+
+    Returns
+    -------
+    rs.DataSet
+        Dataset with structure factor amplitudes, dummy sigma column(s), phases,
+        and optionally R-free flags.
+    """
+    # One dataset per label. Labels are free-form column suffixes (F{label}/SIGF{label}/
+    # PHIF{label}). User should supply the resulted column names when using the mtz for
+    # structure-factor reward. In this script, we use "protein" and "total" (for protein
+    # and bulk solvent) as the labels.
+    # All sets share the same HKL index, so this is just a column-wise concat.
+    dataset: rs.DataSet | None = None
+    for label, attribute in structure_factor_columns.items():
+        ds = _build_rs_dataset_for_one_label(
+            sfc, label, attribute, miller_index_column, sigma_f_scale
+        )
+        if dataset is None:
+            dataset = ds
+        else:
+            collisions = dataset.columns.intersection(ds.columns).tolist()
+            if collisions:
+                raise ValueError(
+                    f"Structure-factor label {label!r} would overwrite already-populated "
+                    f"column(s) {collisions} in the merged dataset. Ensure each label maps "
+                    "to a distinct set of column names."
+                )
+            dataset[ds.columns] = ds  # graft the remaining columns on (index-aligned)
+    if dataset is None:  # loop never ran -> the mapping was empty
+        raise ValueError(
+            "structure_factor_columns must contain at least one "
+            "'label -> SFcalculator attribute' entry (e.g. {'protein': 'Fprotein_asu'}), "
+            f"got {structure_factor_columns!r}."
+        )
+    if test_fraction > 0:
+        dataset = rs.utils.add_rfree(
+            dataset,
+            ccp4_convention=ccp4_convention,
+            fraction=test_fraction,
+            seed=seed,
+        )
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        dataset.write_mtz(str(output_path))
+        logger.info(f"Saved structure factors to {output_path}")
+    return dataset
 
 
 def compute_ensemble_structure_factors(
