@@ -13,6 +13,7 @@ from biotite.structure.io.pdbx.cif import CIFColumn, CIFFile
 from sampleworks.utils.atom_array_utils import save_structure_to_cif
 from sampleworks.utils.cif_utils import (
     add_category_to_cif,
+    find_consecutive_residues,
     renumber_atom_site_ids,
     resolve_mixed_hetatm_atom_altlocs,
 )
@@ -442,3 +443,41 @@ def test_renumber_atom_site_ids_makes_repeated_ids_unique():
     renumber_atom_site_ids(cif_file)
 
     assert cif_file.block["atom_site"]["id"] == CIFColumn([1, 2, 3])
+
+
+# The spans the find_consecutive_residues docstring gives for RCSB PDB entry 5SOP.
+_5SOP_SPANS = [
+    ("A", 3, 6, {"A", "B"}),
+    ("A", 10, 12, {"A", "B"}),
+    ("A", 20, 26, {"A", "B"}),
+    ("A", 28, 31, {"A", "B"}),
+    ("A", 38, 38, {"A", "B"}),
+    ("A", 42, 42, {"A", "B"}),
+    ("A", 44, 59, {"A", "B"}),
+    ("A", 87, 88, {"A", "B"}),
+    ("A", 97, 108, {"A", "B"}),
+    ("A", 113, 113, {"A", "B"}),
+    ("A", 125, 137, {"A", "B", "C"}),
+    ("A", 138, 141, {"A", "B"}),
+    ("A", 155, 169, {"A", "B"}),
+]
+
+
+def test_find_consecutive_residues_matches_its_5sop_docstring_example():
+    """Residues carrying the altlocs of the docstring's 5SOP spans come back as those spans."""
+    altlocs = {"A": [], "B": [], "C": []}
+    for chain, start, end, members in _5SOP_SPANS:
+        for altloc_id in members:
+            altlocs[altloc_id].extend((chain, res_id) for res_id in range(start, end + 1))
+
+    assert list(find_consecutive_residues(altlocs)) == _5SOP_SPANS
+
+
+def test_find_consecutive_residues_keeps_a_chain_with_one_altloc_residue():
+    """A chain whose only altloc residue is a single residue yields that residue as a span.
+
+    In 7DMS, chain A residue 5 is the only residue with alternates (issue #501).
+    """
+    altlocs = {"A": [("A", 5)], "B": [("A", 5)]}
+
+    assert list(find_consecutive_residues(altlocs)) == [("A", 5, 5, {"A", "B"})]

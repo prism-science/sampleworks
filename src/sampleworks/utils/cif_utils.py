@@ -182,7 +182,6 @@ def find_consecutive_residues(
             continue
 
         start = all_res_ids[0]
-        next_res_id = None
         current_membership = {k for k in chain_altlocs if start in chain_altlocs[k]}
         start = start if len(current_membership) > 1 else None
         for current_res_id, next_res_id in itertools.pairwise(all_res_ids):
@@ -193,8 +192,10 @@ def find_consecutive_residues(
 
                 start = next_res_id if len(res_membership) > 1 else None
                 current_membership = res_membership if len(res_membership) > 1 else None
-        if start is not None and next_res_id:
-            yield chain, start, next_res_id, current_membership
+        # Close the open span at the chain's last altloc residue. When the chain has only
+        # one altloc residue the pairwise loop never runs, so the end cannot come from it.
+        if start is not None:
+            yield chain, start, all_res_ids[-1], current_membership
 
 
 def resolve_mixed_hetatm_atom_altlocs(cif_path: Path | str) -> Path:
