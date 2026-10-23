@@ -1,37 +1,43 @@
-"""Generate synthetic structure factors from a multi-model ensemble, one model at a time.
+"""Generate synthetic structure factor amplitudes via SFcalculator-torch.
 
-The PDBFixer-based synthetic data pipeline writes each altloc conformer as a separate model
-of one multi-model file, every model a complete copy of the protein. The other script
-`generate_synthetic_sf.py`` computes a structure's structure factor in a single pass from a
-single-model structure with altlocs. The total number of atoms in that case is N_blank_altloc
-+ N_conformer * N_non_blank_altloc. In contrast, the multi-model file consists of N_conformer
-*(N_blank_altloc + N_non_blank_altloc) atoms. This can easily exhaust memory usage as SFC
-holds an ``[N_atom, N_HKL]`` tensor of per-atom plus several intermediates of that shape.
+Accepts two kinds of input, told apart by the number of models in the file:
 
-This script instead computes Fprotein from one model at a time and sums the results
-weighted by each model's population, so only one model's ``[N_atom, N_HKL]`` tensors are
-alive at once. Every model must have the same atoms in the same order.
+- **Multi-conformer** (one model with at least 2 altloc IDs): the altloc conformers share
+  one model, so the structure factors are computed in a single pass. ``--occupancy-mode``
+  and ``--occupancy-values`` set the altloc occupancies.
+- **Multi-model** (the PDBFixer-based preprocessing pipeline): each conformer is a
+  complete copy of the protein in its own model. ``--occupancy-values`` represents population
+  of the conformation (i.e. occupancy of a model rather than of an atom).
+  ``--occupancy-mode default`` is ill-posed and refused in this case.
+
+A multi-model file holds N_conformer * (N_blank_altloc + N_non_blank_altloc) atoms, against
+N_blank_altloc + N_conformer * N_non_blank_altloc for the equivalent multi-conformer model.
+SFC holds an ``[N_atom, N_HKL]`` tensor of per-atom structure factors plus several
+intermediates of that shape, so merging the models would easily exhaust memory. Fprotein
+is instead computed from one model at a time and summed weighted by population (each model's
+occupancy), so only one model's ``[N_atom, N_HKL]`` tensors are alive at once.
 
 Bulk solvent is optional (``--bulk-solvent``), with the same modes as the structure-factor
 loss. The bulk solvent masks are built from Fprotein rather than directly from atoms:
 ``combined`` builds one bulk solvent mask from the population-weighted Fprotein sum, and
 ``per_conformer`` builds one bulk solvent mask per model and takes the population-weighted
 mean of the bulk solvent structure factors. Either mode writes Ftotal/SIGFtotal/PHIFtotal
-columns (at default unrefined SFcalculator scales) beside the Fprotein columns in the MTZ.
+columns (at default unrefined SFcalculator scales) beside the Fprotein/SIGFprotein/
+PHIFprotein columns in the MTZ. The SIGF columns hold dummy values, and an R-free flag
+column is optionally added. For a single model the two solvent modes are equivalent.
 
-The command-line interface mirrors ``generate_synthetic_sf.py``, including CSV batch mode,
-with ``--occupancy-values`` (or the ``occupancy_values`` CSV column) giving one population
-per model.
-
-The processed ensemble (after filtering and B-factor override) can optionally be saved as
-``<input_stem>_sf_input.cif`` beside the MTZ, one model per conformer at occupancy 1.0 so
-each model is a standalone structure; the populations are recorded only in the occupancy
-values.
+Each structure can be optionally overridden with unit cell, space group, atom selection,
+and a flat isotropic B-factor, and the processed structure can be saved as
+``<input_stem>_sf_input.cif`` beside the MTZ. A saved multi-model file keeps one model
+per conformer with every atom at occupancy 1.0, so each model is a standalone structure.
+The per-model occupancies (conformer population) are not written into it, because biotite
+holds one occupancy annotation shared by all models in an ``AtomArrayStack``.
 """
 
 import argparse
 import sys
 import traceback
+from functools import partial
 from pathlib import Path
 from typing import cast
 
@@ -40,21 +46,22 @@ import numpy as np
 import reciprocalspaceship as rs
 import reciprocalspaceship.utils
 import torch
+from biotite.structure import AtomArray
 from loguru import logger
 from SFC_Torch import SFcalculator
 from SFC_Torch.io import PDBParser
 
-from sampleworks.synthetic.generate_synthetic_sf import (
-    BatchRowForMTZ,
-    load_batch_csv,
-)
 from sampleworks.synthetic.synthetic_utils import (
     atomarray_to_gemmi,
+    BatchRowForMTZ,
+    resolve_occupancy_values,
+    load_batch_csv,
     load_structure_for_synthetic_loss,
     resolve_crystal_metadata,
     resolve_mtz_column,
     resolve_parallel_jobs,
 )
+from sampleworks.utils.atom_array_utils import detect_altlocs
 from sampleworks.utils.torch_utils import try_gpu
 
 
@@ -115,7 +122,7 @@ def _build_rs_dataset_for_one_label(
         Structure-factor calculator holding the requested ASU amplitudes and phases.
     label : str
         Mtz column suffix. The resulted column names are ``F{label}``/``SIGF{label}``/
-        ``PHIF{label}``. The mtz column names should match what the structure-factor reward
+        ``PHIF{label}``. The mtz column names should match what the structure-factor loss
         later reads. In this script, we use ``"protein"`` and ``"total"`` as the labels.
     structure_factor_column : str
         SFcalculator attribute name passed to ``prepare_dataset`` (the amplitudes to emit).
@@ -181,7 +188,7 @@ def process_amplitudes_to_dataset(
         is False, which uses Phenix convention (1 = test, 0 = working).
     sigma_f_scale: float
         Scale factor to make a fake sigma column from the structure factor amplitude
-        values so that SFcalculator can load the output MTZ file as synthetic reward
+        values so that SFcalculator can load the output MTZ file as synthetic loss
         without errors. The actual sigma values only matter when computing R-factor.
     output_path: Path | None
         If provided, write the dataset to this MTZ file path.
@@ -194,7 +201,7 @@ def process_amplitudes_to_dataset(
     """
     # One dataset per label. Labels are free-form column suffixes (F{label}/SIGF{label}/
     # PHIF{label}). User should supply the resulted column names when using the mtz for
-    # structure-factor reward. In this script, we use "protein" and "total" (for protein
+    # structure-factor loss. In this script, we use "protein" and "total" (for protein
     # and bulk solvent) as the labels.
     # All sets share the same HKL index, so this is just a column-wise concat.
     dataset: rs.DataSet | None = None
@@ -233,40 +240,27 @@ def process_amplitudes_to_dataset(
     return dataset
 
 
-def compute_ensemble_structure_factors(
+def load_models(
     structure_path: Path,
-    occupancies: list[float],
-    cell: gemmi.UnitCell,
-    space_group: str,
-    resolution: float,
-    scattering_factor_mode: str,
-    device: torch.device,
+    occupancy_mode: str,
+    occupancy_values: list[float],
     strip_hydrogens: bool = False,
     strip_waters: bool = False,
     strip_ligands: bool = False,
     selection: str | None = None,
     b_factor: float | None = None,
-    save_structure_dir: Path | None = None,
-    bulk_solvent: str = "off",
-) -> SFcalculator:
-    """Sum each model's Fprotein onto one reflection list, optionally adding bulk solvent.
+) -> tuple[list[AtomArray], list[float]]:
+    """Load a structure file as models and the population that weights each one.
 
     Parameters
     ----------
     structure_path
-        Multi-model structure file holding one conformer per model.
-    occupancies
-        Population per model, in model order, written over every atom's occupancy.
-    cell
-        Unit cell shared by the ensemble.
-    space_group
-        Hermann-Mauguin space group shared by the ensemble.
-    resolution
-        High-resolution (dmin) limit in Angstroms.
-    scattering_factor_mode
-        SFcalculator mode: "xray" or "cryoem".
-    device
-        Torch device for the calculation.
+        Structure file: one multi-conformer model, or one conformer per model.
+    occupancy_mode
+        'default', 'uniform', or 'custom'. Sets the altloc occupancies of a single model,
+        or the population of each model of a multi-model file, where 'default' is refused.
+    occupancy_values
+        Altloc occupancies (single model) or one population per model (multi-model).
     strip_hydrogens
         If True, remove hydrogen atoms from every model.
     strip_waters
@@ -277,12 +271,110 @@ def compute_ensemble_structure_factors(
         Optional atom selection applied to every model.
     b_factor
         Isotropic B-factor written over every atom, or None to keep the file's values.
-    save_structure_dir
-        Optional directory in which to save the processed ensemble as mmCIF, one model
-        per conformer at occupancy 1.0 so each model is a standalone structure.
+
+    Returns
+    -------
+    tuple[list[AtomArray], list[float]]
+        One atom array per model, and the population weighting each model: ``[1.0]`` for
+        a single model, whose altloc occupancies are on its atoms. Every atom of a
+        multi-model file is at occupancy 1.0.
+
+    Raises
+    ------
+    ValueError
+        If the file has no models or a model cannot be loaded, or, for a multi-model file,
+        the populations cannot be resolved or a model uses more than one non-blank altloc ID.
+    """
+    n_models = len(gemmi.read_structure(str(structure_path)))
+    load_filtered = partial(
+        load_structure_for_synthetic_loss,
+        strip_hydrogens=strip_hydrogens,
+        strip_waters=strip_waters,
+        strip_ligands=strip_ligands,
+        selection=selection,
+        b_factor=b_factor,
+    )
+    if n_models == 0:
+        raise ValueError(f"{structure_path} holds no models.")
+    if n_models == 1:
+        atom_array = load_filtered(structure_path, occupancy_mode, occupancy_values)
+        if atom_array is None:
+            raise ValueError(f"Failed to load {structure_path}")
+        return [atom_array], [1.0]
+
+    if occupancy_values and occupancy_mode != "custom":
+        logger.warning(
+            f"Custom occupancy values provided for {structure_path}, "
+            f"but occupancy_mode is '{occupancy_mode}'. Using 'custom' mode."
+        )
+        occupancy_mode = "custom"
+    if occupancy_mode == "uniform":
+        populations = [1.0 / n_models] * n_models
+    elif occupancy_mode == "custom":
+        if not occupancy_values:
+            raise ValueError(
+                f"occupancy_values required for custom mode: pass one population per model "
+                f"of the {n_models}-model file."
+            )
+        populations = resolve_occupancy_values(occupancy_values, n_models, "models")
+    elif occupancy_mode == "default":
+        raise ValueError(
+            f"Occupancy mode 'default' is not supported for a {n_models}-model file; pass one "
+            "population per model or use 'uniform'."
+        )
+    else:
+        raise ValueError(f"Invalid occupancy mode '{occupancy_mode}'")
+
+    models = []
+    for model in range(n_models):
+        # Keep the file's per-atom occupancies; each model is set to 1.0 below.
+        atom_array = load_filtered(structure_path, "default", [], model=model)
+        if atom_array is None:
+            raise ValueError(f"Failed to load model {model + 1} of {structure_path}")
+        altloc_ids = detect_altlocs(atom_array).altloc_ids
+        if len(altloc_ids) > 1:
+            raise ValueError(
+                f"Model {model + 1} of {structure_path} has altloc IDs {altloc_ids}. A "
+                "multi-model structure is expected to have at most one non-blank altloc ID "
+                "per model for evaluation scripts; it should not have multiple altloc IDs "
+                "that represent distinct conformations."
+            )
+        atom_array.occupancy[:] = 1.0
+        models.append(atom_array)
+    return models, populations
+
+
+def compute_ensemble_structure_factors(
+    models: list[AtomArray],
+    populations: list[float],
+    cell: gemmi.UnitCell,
+    space_group: str,
+    resolution: float,
+    scattering_factor_mode: str,
+    device: torch.device,
+    bulk_solvent: str = "off",
+) -> SFcalculator:
+    """Sum each model's Fprotein onto one reflection list, optionally adding bulk solvent.
+
+    Parameters
+    ----------
+    models
+        One atom array per model, as returned by ``load_models``.
+    populations
+        Population weighting each model, in the same order.
+    cell
+        Unit cell shared by the ensemble.
+    space_group
+        Hermann-Mauguin space group shared by the ensemble.
+    resolution
+        High-resolution (dmin) limit in Angstroms.
+    scattering_factor_mode
+        SFcalculator mode: "xray" or "cryoem".
+    device
+        Torch device for the calculation.
     bulk_solvent
-        ``"off"`` (Fprotein only), ``"combined"`` (one mask from the occupancy-weighted
-        Fprotein sum), or ``"per_conformer"`` (occupancy-weighted mean of per-model
+        ``"off"`` (Fprotein only), ``"combined"`` (one mask from the population-weighted
+        Fprotein sum), or ``"per_conformer"`` (population-weighted mean of per-model
         masks).
 
     Returns
@@ -296,14 +388,13 @@ def compute_ensemble_structure_factors(
     Raises
     ------
     ValueError
-        If ``occupancies`` is empty, a model cannot be loaded, the models do not land on
-        the same reflection list, or ``bulk_solvent`` is not a known mode.
+        If the models do not land on the same reflection list, or ``bulk_solvent``
+        is not a known mode.
 
     Notes
     -----
-    Only one model's ``[N_atom, N_HKL]`` per-atom structure-factor tensors are alive at a
-    time; each model's SFcalculator is released before the next is built. Each model's
-    Fprotein is computed at occupancy 1.0 and weighted by its population afterwards.
+    Only one model's ``[N_atom, N_HKL]`` per-atom structure-factor tensors are alive
+    at a time; each model's SFcalculator is released before the next is built.
 
     The solvent fraction is estimated from model 1's atom positions, as the
     structure-factor loss estimates it from the guidance reference, which is model 1
@@ -313,45 +404,20 @@ def compute_ensemble_structure_factors(
     ``calc_fsolvent_batch``'s default ``PARTITION=10`` (also the loss's default
     ``batch_partition``), the density is normalized over each whole chunk, and the
     solvent cutoff comes from the chunk's first model. Unlike the loss, which
-    weights every conformer's mask by ``1/batch_size``, the masks here are weighted by
-    occupancy; the two agree for uniform occupancies.
+    weights every model's mask by ``1/batch_size``, the masks here are weighted by
+    population; the two agree for uniform populations.
     """
     if bulk_solvent not in BULK_SOLVENT_MODES:
         raise ValueError(f"bulk_solvent must be one of {BULK_SOLVENT_MODES}, got {bulk_solvent!r}")
-    if not occupancies:
-        raise ValueError(f"Need at least one occupancy (one per model) for {structure_path}")
-    model_fproteins = []  # one [n_hkl] complex Fprotein_asu per model, at occupancy 1.0
+    model_fproteins = []  # one [n_hkl] complex Fprotein_asu per model
     reference_hkl = None  # [n_hkl, 3] ASU Miller indices every model must land on
-    saved_structure = None
     reference_solventpct = None  # solvent fraction of model 1, estimated from its atoms
-    for model, occupancy in enumerate(occupancies):
+    for model, (atom_array, population) in enumerate(zip(models, populations, strict=True)):
         sfcalculator = None  # release the previous model's scattering table first
         torch.cuda.empty_cache()
-        atom_array = load_structure_for_synthetic_loss(
-            structure_path,
-            occupancy_mode="default",
-            occupancy_values=[],
-            strip_hydrogens=strip_hydrogens,
-            strip_waters=strip_waters,
-            strip_ligands=strip_ligands,
-            selection=selection,
-            b_factor=b_factor,
-            model=model,
-        )
-        if atom_array is None:
-            raise ValueError(f"Failed to load model {model + 1} of {structure_path}")
-        # Each model stands alone at full occupancy; its population lives in ``occupancies``.
-        atom_array.occupancy[:] = 1.0
-        gemmi_structure = atomarray_to_gemmi(atom_array, cell, space_group)
-        if save_structure_dir is not None:
-            if saved_structure is None:
-                saved_structure = gemmi_structure.clone()
-            else:
-                saved_structure.add_model(gemmi_structure[0])  # copies the model
-                saved_structure[len(saved_structure) - 1].name = str(model + 1)
-        logger.info(f"Model {model + 1}: {len(atom_array)} atoms at population {occupancy:g}")
+        logger.info(f"Model {model + 1}: {len(atom_array)} atoms at population {population:g}")
         sfcalculator = SFcalculator(
-            pdbmodel=PDBParser(gemmi_structure),
+            pdbmodel=PDBParser(atomarray_to_gemmi(atom_array, cell, space_group)),
             mtzdata=None,
             dmin=resolution,
             mode=scattering_factor_mode,
@@ -363,8 +429,8 @@ def compute_ensemble_structure_factors(
             reference_hkl = sfcalculator.Hasu_array
         elif not np.array_equal(reference_hkl, sfcalculator.Hasu_array):
             raise ValueError(
-                f"Model {model + 1} of {structure_path} produced a different reflection "
-                "list than model 1; the models cannot be summed."
+                f"Model {model + 1} produced a different reflection list than model 1; "
+                "the models cannot be summed."
             )
         if model == 0 and bulk_solvent != "off":
             sfcalculator.inspect_data()
@@ -372,11 +438,10 @@ def compute_ensemble_structure_factors(
         sfcalculator.calc_fprotein()
         model_fproteins.append(sfcalculator.Fprotein_asu)
 
-    if save_structure_dir is not None and saved_structure is not None:
-        write_sf_input_structure(saved_structure, structure_path, save_structure_dir)
-    populations = torch.tensor(occupancies, device=sfcalculator.device)[:, None]  # [n_models, 1]
+    # [n_models, 1]
+    population_weights = torch.tensor(populations, device=sfcalculator.device)[:, None]
     fprotein_batch = torch.stack(model_fproteins)  # [n_models, n_hkl] complex
-    sfcalculator.Fprotein_asu = (populations * fprotein_batch).sum(dim=0)
+    sfcalculator.Fprotein_asu = (population_weights * fprotein_batch).sum(dim=0)
     if bulk_solvent == "off":
         sfcalculator.Fmask_asu = torch.zeros_like(sfcalculator.Fprotein_asu)
         return sfcalculator
@@ -388,7 +453,7 @@ def compute_ensemble_structure_factors(
     else:
         sfcalculator.Fprotein_asu_batch = fprotein_batch
         fmask_batch = sfcalculator.calc_fsolvent_batch(Return=True)  # [n_models, n_hkl] complex
-        sfcalculator.Fmask_asu = (populations * fmask_batch).sum(dim=0)
+        sfcalculator.Fmask_asu = (population_weights * fmask_batch).sum(dim=0)
     sfcalculator.init_scales(requires_grad=False)
     sfcalculator.calc_ftotal()  # sets Ftotal_asu
     return sfcalculator
@@ -461,28 +526,32 @@ def _process_single_row(
     structure_path = base_dir / row.filename
     output_path = output_dir / (row.mtzfile or f"{structure_path.stem}_{resolution:.2f}A.mtz")
     try:
-        gemmi_meta = gemmi.read_structure(str(structure_path))
-        if len(row.occupancy_values) != len(gemmi_meta):
-            raise ValueError(
-                f"Expected one occupancy per model, got {len(row.occupancy_values)} for "
-                f"{len(gemmi_meta)} models."
-            )
         cell, space_group = resolve_crystal_metadata(row, structure_path)
         logger.info(f"Cell {cell.parameters}, space group '{space_group}'")
-        sfcalculator = compute_ensemble_structure_factors(
+        models, populations = load_models(
             structure_path,
+            occupancy_mode,
             row.occupancy_values,
-            cell,
-            space_group,
-            resolution,
-            scattering_factor_mode,
-            device,
             strip_hydrogens=strip_hydrogens,
             strip_waters=strip_waters,
             strip_ligands=strip_ligands,
             selection=row.selection,
             b_factor=b_factor,
-            save_structure_dir=output_path.parent if save_structure else None,
+        )
+        if save_structure:
+            saved_structure = atomarray_to_gemmi(models[0], cell, space_group)
+            for model, atom_array in enumerate(models[1:], start=2):
+                saved_structure.add_model(atomarray_to_gemmi(atom_array, cell, space_group)[0])
+                saved_structure[len(saved_structure) - 1].name = str(model)
+            write_sf_input_structure(saved_structure, structure_path, output_path.parent)
+        sfcalculator = compute_ensemble_structure_factors(
+            models,
+            populations,
+            cell,
+            space_group,
+            resolution,
+            scattering_factor_mode,
+            device,
             bulk_solvent=bulk_solvent,
         )
     except Exception as e:
@@ -605,9 +674,8 @@ def parse_args() -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser(
         description=(
-            "Sum Fprotein (and optionally bulk solvent) over the models of a multi-model "
-            "ensemble file and write one synthetic MTZ, without building a merged altloc "
-            "structure"
+            "Generate synthetic structure factor amplitudes from a multi-conformer (altloc) "
+            "structure or a multi-model ensemble"
         )
     )
 
@@ -616,7 +684,7 @@ def parse_args() -> argparse.Namespace:
         "--structure",
         "-s",
         type=Path,
-        help="Multi-model structure file (mmCIF or PDB) with one conformer per model",
+        help="Structure file (mmCIF or PDB): multi-conformer structure or multi-model structure",
     )
     input_group.add_argument("--batch-csv", type=Path, help="Path to CSV file for batch processing")
     input_group.add_argument(
@@ -733,7 +801,10 @@ def parse_args() -> argparse.Namespace:
     )
     output_group.add_argument("--output", "-o", type=Path, help="Output MTZ file path")
     output_group.add_argument(
-        "--output-dir", type=Path, default=Path("."), help="Output directory for batch mode"
+        "--output-dir",
+        type=Path,
+        default=Path("."),
+        help="Directory for outputs, in both single-structure and batch mode",
     )
 
     parallel_group = parser.add_argument_group("Parallelization Options")
@@ -785,7 +856,7 @@ def main() -> None:
         _process_single_row(
             row=row,
             base_dir=args.structure.parent,
-            output_dir=args.output.parent if args.output else Path("."),
+            output_dir=args.output.parent if args.output else args.output_dir,
             resolution=args.resolution,
             scattering_factor_mode=args.scattering_factor_mode,
             test_fraction=args.test_fraction,
