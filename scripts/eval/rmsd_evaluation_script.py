@@ -28,6 +28,7 @@ from sampleworks.eval.grid_search_eval_utils import (
     translate_selection,
 )
 from sampleworks.metrics.rmsd import AllAtomRMSD
+from sampleworks.utils.atom_array_utils import use_author_numbering
 from sampleworks.utils.structure_utils import get_reference_atomarraystack
 
 
@@ -127,7 +128,11 @@ def process_trial_with_selection(
     result: dict[str, str | float | list[float]] = trial.__dict__.copy()
     result["selection"] = selection_string
 
-    predicted_atom_array_stack = ensure_atom_array_stack(load_any(trial.refined_cif_path))
+    predicted_atom_array_stack = ensure_atom_array_stack(
+        use_author_numbering(
+            load_any(trial.refined_cif_path, extra_fields=["auth_seq_id", "auth_asym_id"])
+        )
+    )
     segment_rmsd_matrix = compute_cross_segment_rmsds(
         reference_atom_array_stack,
         predicted_atom_array_stack,
