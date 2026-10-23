@@ -11,7 +11,7 @@ common ancestor of everything that uses it.
 
 The loss families get their target data differently. The density fixtures read
 committed files (a carved .ccp4 and its matching recentered cif). The SF fixtures
-generate their (cif, mtz) pair per session via `generate_synthetic_sf_ensemble.py`. The
+generate their (cif, mtz) pair per session via `generate_synthetic_sf_sfc.py`. The
 diffuse_bragg fixtures run `generate_synthetic_sf_lunus.py`'s row processor on 1vme
 three times: with its altlocs expanded into a two-configuration ensemble (Bragg,
 diffuse and R-free flags), as a single model, and as the ensemble with bulk solvent.
@@ -87,7 +87,7 @@ def sf_1vme_cif_and_mtz_paths(
     """Generate the synthetic SF data and the exact structure used for the generation,
     returns the ``(cif, mtz)`` paths.
 
-    Mirrors the ``--structure`` branch of ``generate_synthetic_sf_ensemble.main()``, so these
+    Mirrors the ``--structure`` branch of ``generate_synthetic_sf_sfc.main()``, so these
     fixtures exercise exactly what the CLI produces. ``--save-structure`` writes back the
     post-selection and occupancy modifed model, which is the structure actually used to
     generate the synthetic SF data.
@@ -97,7 +97,7 @@ def sf_1vme_cif_and_mtz_paths(
     scales. The resulted mtz file carries both Fprotein/SIGFprotein/PHIFprotein and
     Ftotal/SIGFtotal/PHIFtotal.
     """
-    from sampleworks.synthetic.generate_synthetic_sf_ensemble import _process_single_row
+    from sampleworks.synthetic.generate_synthetic_sf_sfc import _process_single_row
     from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ
 
     source_cif = "1vme_final.cif"
@@ -127,7 +127,7 @@ def sf_1vme_cif_and_mtz_paths(
         save_structure=True,
     )
 
-    # Following the default file names in the generate_synthetic_sf_ensemble.py script:
+    # Following the default file names in the generate_synthetic_sf_sfc.py script:
     # `{stem}_{resolution:.2f}A.mtz`, and the saved structure as `{stem}_sf_input.cif`.
     # Ideally we want to modify _process_single_row to return the paths directly in case
     # the naming defaults changed or accept naming parameters.
@@ -139,7 +139,7 @@ def sf_1vme_cif_and_mtz_paths(
     missing = [p.name for p in (cif_path, mtz_path) if not p.exists()]
     if missing:
         raise RuntimeError(
-            f"generate_synthetic_sf_ensemble wrote no {missing} to {output_dir}; see the "
+            f"generate_synthetic_sf_sfc wrote no {missing} to {output_dir}; see the "
             f"generator's logged error for the cause"
         )
     return cif_path, mtz_path

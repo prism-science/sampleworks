@@ -54,11 +54,11 @@ from SFC_Torch.io import PDBParser
 from sampleworks.synthetic.synthetic_utils import (
     atomarray_to_gemmi,
     BatchRowForMTZ,
-    resolve_occupancy_values,
     load_batch_csv,
     load_structure_for_synthetic_loss,
     resolve_crystal_metadata,
     resolve_mtz_column,
+    resolve_occupancy_values,
     resolve_parallel_jobs,
 )
 from sampleworks.utils.atom_array_utils import detect_altlocs

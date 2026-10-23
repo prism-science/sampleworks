@@ -306,7 +306,7 @@ def load_structure_for_synthetic_loss(
         preserve the values from the input structure.
     model
         0-based index of the one model to load from a multi-model file. Callers that
-        need every model (e.g. ``generate_synthetic_sf_ensemble``) call this once per
+        need every model (e.g. ``generate_synthetic_sf_sfc``) call this once per
         model.
 
     Returns

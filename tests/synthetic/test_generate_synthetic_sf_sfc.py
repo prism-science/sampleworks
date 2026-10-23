@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import reciprocalspaceship as rs
 import torch
-from sampleworks.synthetic.generate_synthetic_sf_ensemble import (
+from sampleworks.synthetic.generate_synthetic_sf_sfc import (
     _process_single_row,
     process_batch,
 )
