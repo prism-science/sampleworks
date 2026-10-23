@@ -1,5 +1,6 @@
 from collections.abc import Iterable
 
+import gemmi
 from loguru import logger
 
 from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.sf import (
@@ -66,3 +67,36 @@ def elements_to_scattering_indices(elements: Iterable[str]) -> list[int]:
         Scattering tensor indices, one per input element.
     """
     return [element_to_scattering_idx(e) for e in elements]
+
+
+def covalent_radius(raw: str) -> float:
+    """Return the covalent radius of an element from gemmi.
+
+    gemmi already reads symbols case-insensitively (``'SE'`` is selenium), so
+    the raw symbol is not passed through :func:`normalize_element`, which would
+    also warn about symbols gemmi resolves (e.g. deuterium ``'D'``).
+
+    gemmi resolves a symbol it does not know (e.g. the ``'?'`` placeholder some
+    density inputs carry) to its unknown element instead of raising. That
+    element's 0.50 Å radius is returned with a logged warning: such an atom
+    gets a too-short ideal bond length and a shrunken clash sphere, so bond and
+    clash penalties built from it are unreliable.
+
+    Parameters
+    ----------
+    raw
+        Raw element symbol as found on an ``AtomArray`` (e.g. ``'C'``,
+        ``'SE'``).
+
+    Returns
+    -------
+    float
+        Covalent radius in Å.
+    """
+    element = gemmi.Element(raw)
+    if element.atomic_number == 0:
+        logger.warning(
+            f"Element '{raw}' is not known to gemmi; using its unknown-element "
+            f"covalent radius of {element.covalent_r:.2f} Å."
+        )
+    return float(element.covalent_r)
