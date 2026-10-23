@@ -60,6 +60,7 @@ from sampleworks.utils.torch_utils import try_gpu
 
 # Same modes as the structure-factor loss's ``bulk_solvent`` option.
 BULK_SOLVENT_MODES = ("off", "combined", "per_conformer")
+OCCUPANCY_MODES = ("default", "uniform", "custom")
 
 
 def write_sf_input_structure(
@@ -280,8 +281,8 @@ def compute_ensemble_structure_factors(
         Optional directory in which to save the processed ensemble as mmCIF, one model
         per conformer at occupancy 1.0 so each model is a standalone structure.
     bulk_solvent
-        ``"off"`` (Fprotein only), ``"combined"`` (one mask from the population-weighted
-        Fprotein sum), or ``"per_conformer"`` (population-weighted mean of per-model
+        ``"off"`` (Fprotein only), ``"combined"`` (one mask from the occupancy-weighted
+        Fprotein sum), or ``"per_conformer"`` (occupancy-weighted mean of per-model
         masks).
 
     Returns
@@ -313,7 +314,7 @@ def compute_ensemble_structure_factors(
     ``batch_partition``), the density is normalized over each whole chunk, and the
     solvent cutoff comes from the chunk's first model. Unlike the loss, which
     weights every conformer's mask by ``1/batch_size``, the masks here are weighted by
-    population; the two agree for uniform populations.
+    occupancy; the two agree for uniform occupancies.
     """
     if bulk_solvent not in BULK_SOLVENT_MODES:
         raise ValueError(f"bulk_solvent must be one of {BULK_SOLVENT_MODES}, got {bulk_solvent!r}")
@@ -402,6 +403,7 @@ def _process_single_row(
     test_fraction: float,
     seed: int | None,
     device: torch.device,
+    occupancy_mode: str = "default",
     strip_hydrogens: bool = False,
     strip_waters: bool = False,
     strip_ligands: bool = False,
@@ -417,8 +419,8 @@ def _process_single_row(
     Parameters
     ----------
     row
-        BatchRowForMTZ naming the multi-model file, with one occupancy value per model
-        and optional per-row overrides.
+        BatchRowForMTZ naming the structure file, with optional occupancy values (per
+        altloc for single-model, or per model otherwise) and per-row overrides.
     base_dir
         Base directory for resolving relative structure file paths.
     output_dir
@@ -433,6 +435,8 @@ def _process_single_row(
         Optional seed for reproducible R-free flag assignment.
     device
         PyTorch device for SFcalculator.
+    occupancy_mode
+        'default', 'uniform', or 'custom'; see ``compute_ensemble_structure_factors``.
     strip_hydrogens
         If True, remove hydrogen atoms before computing structure factors.
     strip_waters
@@ -518,6 +522,7 @@ def process_batch(
     seed: int | None,
     device: torch.device,
     n_jobs: int = -1,
+    occupancy_mode: str = "default",
     strip_hydrogens: bool = False,
     strip_waters: bool = False,
     strip_ligands: bool = False,
@@ -547,6 +552,8 @@ def process_batch(
         PyTorch device for computation.
     n_jobs
         Number of parallel jobs. -1 means use all available CPUs.
+    occupancy_mode
+        'default', 'uniform', or 'custom'; see ``compute_ensemble_structure_factors``.
     strip_hydrogens
         If True, remove hydrogen atoms before computing structure factors.
     strip_waters
@@ -576,6 +583,7 @@ def process_batch(
             test_fraction=test_fraction,
             seed=seed,
             device=device,
+            occupancy_mode=occupancy_mode,
             strip_hydrogens=strip_hydrogens,
             strip_waters=strip_waters,
             strip_ligands=strip_ligands,
@@ -627,9 +635,22 @@ def parse_args() -> argparse.Namespace:
 
     occupancy_group = parser.add_argument_group("Occupancy Options")
     occupancy_group.add_argument(
+        "--occupancy-mode",
+        choices=OCCUPANCY_MODES,
+        default="default",
+        help=(
+            "Occupancy assignment mode. One model: altloc occupancies (default keeps the "
+            "file's, uniform gives 1/n_altlocs). Multi-model: model populations (uniform "
+            "gives 1/n_models; default is refused)"
+        ),
+    )
+    occupancy_group.add_argument(
         "--occupancy-values",
         type=str,
-        help="Colon-separated population per model, summing to 1 (e.g., '0.3:0.7')",
+        help=(
+            "Colon-separated values summing to 1 (e.g., '0.3:0.7'): altloc occupancies in "
+            "sorted altloc order for one model, or one occupancy per model"
+        ),
     )
 
     sf_group = parser.add_argument_group("Structure Factor Options")
@@ -742,6 +763,7 @@ def main() -> None:
             seed=args.seed,
             device=device,
             n_jobs=args.n_jobs,
+            occupancy_mode=args.occupancy_mode,
             strip_hydrogens=args.remove_hydrogens,
             strip_waters=args.remove_waters,
             strip_ligands=args.remove_ligands,
@@ -769,6 +791,7 @@ def main() -> None:
             test_fraction=args.test_fraction,
             seed=args.seed,
             device=device,
+            occupancy_mode=args.occupancy_mode,
             strip_hydrogens=args.remove_hydrogens,
             strip_waters=args.remove_waters,
             strip_ligands=args.remove_ligands,
