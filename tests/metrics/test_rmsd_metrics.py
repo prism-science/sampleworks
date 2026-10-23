@@ -4,7 +4,7 @@ Tests for the RMSD metrics.
 
 import numpy as np
 import pytest
-from biotite.structure import rmsd, superimpose
+from biotite.structure import rmsd, stack, superimpose
 from sampleworks.metrics.rmsd import AllAtomRMSD
 from sampleworks.utils.atom_array_utils import filter_to_common_atoms
 
@@ -82,18 +82,31 @@ def test_segment_rmsd_absent_without_selection(altlocA_backbone, altlocB_backbon
     assert not any(k.endswith("_segment_rmsd") for k in result)
 
 
-def test_segment_rmsd_present_with_selection(altlocA_backbone, altlocB_backbone):
-    """segment_rmsd is a list of length N_member and best_of_N_segment_rmsd is its min."""
-    metric = AllAtomRMSD()
-    result = metric.compute(altlocA_backbone, altlocB_backbone, "res_id > 179 and res_id < 190")
+def test_multi_model_rmsds_recover_known_shifts(altlocA_backbone):
+    """Per-model and best-of-N RMSDs recover known rigid shifts of a 3-model ensemble.
 
-    n_member = altlocB_backbone.stack_depth()
-    assert "segment_rmsd" in result
-    assert len(result["segment_rmsd"]) == n_member
+    Each predicted model is the reference translated by a known distance, so without
+    superposition its RMSD is exactly that distance. The shifts are ordered so that the
+    first model is neither the best nor the mean, making ``min`` distinguishable from
+    ``max``, the mean, and ``[0]``.
+    """
+    shifts = np.array([2.0, 0.0, 1.0])
+    direction = np.array([1.0, 2.0, 2.0]) / 3.0
+    reference = altlocA_backbone[0]
+    predicted = stack([reference.copy() for _ in shifts])
+    predicted.coord = reference.coord[None] + shifts[:, None, None] * direction  # (3, atoms, 3)
 
-    key = f"best_of_{n_member}_segment_rmsd"
-    assert key in result
-    assert result[key] == pytest.approx(min(result["segment_rmsd"]))
+    metric = AllAtomRMSD(log_rmsd_for_every_batch=True)
+    result = metric.compute(predicted, altlocA_backbone, "res_id > 179 and res_id < 190")
+
+    np.testing.assert_allclose(result["segment_rmsd"], shifts, atol=1e-5)
+    assert result["best_of_3_segment_rmsd"] == pytest.approx(0.0, abs=1e-5)
+    assert result["best_of_1_rmsd"] == pytest.approx(2.0, abs=1e-5)
+    assert result["best_of_3_rmsd"] == pytest.approx(0.0, abs=1e-5)
+    np.testing.assert_allclose([result[f"all_atom_rmsd_{i}"] for i in range(3)], shifts, atol=1e-5)
+    assert len(result["residue_rmsd_scores"]) == 10
+    for residue, scores in result["residue_rmsd_scores"].items():
+        np.testing.assert_allclose(scores, shifts, atol=1e-5, err_msg=residue)
 
 
 def test_segment_rmsd_matches_hand_computed(altlocA_backbone, altlocB_backbone):
