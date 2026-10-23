@@ -30,6 +30,7 @@ from sampleworks.core.losses.registry import LossBuildContext
 from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
 from sampleworks.core.scalers.fk_steering import FKSteering
 from sampleworks.core.scalers.latent_optimization import LatentOptimization  # IT-opt wiring (added)
+from sampleworks.core.scalers.protocol import StepScalerProtocol
 from sampleworks.core.scalers.pure_guidance import PureGuidance
 from sampleworks.core.scalers.step_scalers import (
     DataSpaceDPSScaler,
@@ -662,6 +663,55 @@ def _three_state_resolver(value: str | bool | None, default: bool) -> bool:
     return bool(value)
 
 
+def _build_step_scaler(args: GuidanceConfig, guidance_type: str) -> StepScalerProtocol:
+    """Build the step scaler that applies gradient-based guidance at each step.
+
+    Parameters
+    ----------
+    args : GuidanceConfig
+        Run configuration. Pure guidance reads ``step_size`` and ``step_scaler_type``
+        from it, FK steering reads ``guidance_weight``.
+    guidance_type : str
+        The run's :class:`GuidanceType`.
+
+    Returns
+    -------
+    StepScalerProtocol
+        The step scaler. FK steering has no ``--step-scaler-type`` and always steers
+        in noise space. Latent optimization steers through the latents and ignores
+        the step scaler, so it gets one that applies no guidance.
+
+    Raises
+    ------
+    ValueError
+        If ``guidance_type`` is unknown, or ``step_scaler_type`` is not one of
+        ``"dataspace"``, ``"noisespace"`` or ``"none"``.
+    """
+    # TODO: unify step_size and guidance_weight, no need for both of them now
+    if guidance_type == GuidanceType.PURE_GUIDANCE:
+        step_size, step_scaler_type = args.step_size, args.step_scaler_type
+    elif guidance_type == GuidanceType.FK_STEERING:
+        step_size, step_scaler_type = args.guidance_weight, "noisespace"
+    elif guidance_type == GuidanceType.LATENT_OPT:
+        return NoScalingScaler()
+    else:
+        raise ValueError(f"Unknown guidance type: {guidance_type}")
+
+    if step_scaler_type == "dataspace":
+        return DataSpaceDPSScaler(
+            step_size=step_size,
+            gradient_normalization=args.gradient_normalization,
+        )
+    if step_scaler_type == "noisespace":
+        return NoiseSpaceDPSScaler(
+            step_size=step_size,
+            gradient_normalization=args.gradient_normalization,
+        )
+    if step_scaler_type == "none":
+        return NoScalingScaler()
+    raise ValueError(f"Invalid step_scaler_type: {step_scaler_type}")
+
+
 # "guidance_type" is also called "scaler" in many places
 def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, device):
     """Run one configured guidance trajectory and save its outputs."""
@@ -682,7 +732,7 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
     # Annotate structure with model-specific configuration (including recycling_steps)
     # See https://github.com/prism-science/sampleworks/issues/192 for a plan to organize this
     # better.
-    recycling_steps = getattr(args, "recycling_steps", None)
+    recycling_steps = args.recycling_steps
     if recycling_steps is not None and recycling_steps <= 0:
         raise ValueError("recycling_steps must be > 0")
     if args.num_diffusion_steps is not None and args.num_diffusion_steps <= 0:
@@ -753,27 +803,7 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
         config=sampler_config,
     )
 
-    # Create step scaler for gradient-based guidance.
-    # TODO: unify this arg, no need for both of them now
-    step_size = getattr(args, "step_size", None)
-    if step_size is None:
-        step_size = getattr(args, "guidance_weight", 0.01)
-
-    step_scaler_type = getattr(args, "step_scaler_type", "noisespace")
-    if step_scaler_type == "dataspace":
-        step_scaler = DataSpaceDPSScaler(
-            step_size=step_size,
-            gradient_normalization=args.gradient_normalization,
-        )
-    elif step_scaler_type == "noisespace":
-        step_scaler = NoiseSpaceDPSScaler(
-            step_size=step_size,
-            gradient_normalization=args.gradient_normalization,
-        )
-    elif step_scaler_type == "none":
-        step_scaler = NoScalingScaler()
-    else:
-        raise ValueError(f"Invalid step_scaler_type: {step_scaler_type}")
+    step_scaler = _build_step_scaler(args, guidance_type)
 
     num_steps = args.num_diffusion_steps
 
@@ -992,14 +1022,18 @@ def get_job_result(
     """Build the serializable result record for a completed guidance job."""
     start_time = epoch_seconds(started_at)
     end_time = epoch_seconds(ended_at)
+    # Only Boltz2 has a sampling method, and only FK steering a guidance weight and
+    # gradient-descent steps; other runs record None and -1 in their place.
+    is_boltz2 = args.model_name == StructurePredictor.BOLTZ_2
+    is_fk_steering = args.guidance_type == GuidanceType.FK_STEERING
     result = JobResult(
         protein=args.protein,
         model_name=args.model_name,
-        method=getattr(args, "method", None),
+        method=args.method if is_boltz2 else None,
         scaler=args.guidance_type,
         ensemble_size=args.ensemble_size,
-        gradient_weight=getattr(args, "guidance_weight", -1.0),
-        gd_steps=getattr(args, "num_gd_steps", -1),
+        gradient_weight=args.guidance_weight if is_fk_steering else -1.0,
+        gd_steps=args.num_gd_steps if is_fk_steering else -1,
         status=status,
         exit_code=exit_code,
         runtime_seconds=round(end_time - start_time, 2),

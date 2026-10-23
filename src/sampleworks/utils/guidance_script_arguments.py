@@ -220,7 +220,7 @@ _DYNAMIC_ATTRS = [
     "guidance_weight",
     "guidance_interval",
     # latent optimization (IT-opt) -- must be listed here or from_cli() drops the parsed
-    # values and _run_guidance()'s getattr(args, ...) always sees the defaults (flags = no-ops).
+    # values and _run_guidance() always sees the defaults (flags = no-ops).
     *_LATENT_OPT_ATTRS,
     # model-specific
     "model_checkpoint",
