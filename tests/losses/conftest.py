@@ -256,8 +256,8 @@ def _generate_lunus_targets(
     the fixtures exercise exactly what the CLI writes. The processor logs and
     returns on failure instead of raising, so the record's status is checked here.
     """
-    from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ
     from sampleworks.synthetic.generate_synthetic_sf_lunus import _process_single_row
+    from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ
 
     record = _process_single_row(
         row=BatchRowForMTZ(filename=DIFFUSE_BRAGG_SOURCE),
@@ -281,8 +281,8 @@ def _generate_lunus_targets(
 def _lunus_configurations(resources_dir: Path, altlocs_as_models: bool) -> AtomArrayStack:
     """1vme as the lunus generator loads it, waters stripped (guidance strips them too)."""
     pytest.importorskip("lunus.sf", reason="lunus[sf] not installed")
-    from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ
     from sampleworks.synthetic.generate_synthetic_sf_lunus import load_configurations
+    from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ
 
     source = resources_dir / "1vme" / DIFFUSE_BRAGG_SOURCE
     if not source.exists():
