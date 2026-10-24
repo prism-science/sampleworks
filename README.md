@@ -88,6 +88,7 @@ pixi run -e boltz sampleworks-guidance \
     --output-dir output/boltz2_pure_guidance \
     --guidance-start 130 \
     --ensemble-size 4 \
+    --gradient-normalization \
     --augmentation \
     --align-to-input
 ```
@@ -155,7 +156,8 @@ readiness table, and [docs/IT_OPT_TESTING.md](docs/IT_OPT_TESTING.md) for how to
 ```bash
 sampleworks-guidance --model boltz2 --guidance-type pure_guidance \
     --protein 1VME --structure 1vme.cif \
-    --loss-type structure_factor --mtzfile 1vme.mtz --bulk-solvent combined
+    --loss-type structure_factor --mtzfile 1vme.mtz --bulk-solvent combined \
+    --gradient-normalization
 ```
 
 To combine losses, or to keep loss settings in version control, describe them in a file
