@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 from atomworks.io.transforms.atom_array import ensure_atom_array_stack
+from atomworks.io.utils.io_utils import load_any
 from biotite.structure import AtomArray
 from sampleworks.core.losses.protocol import LossInputs
 from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
@@ -1096,10 +1097,11 @@ class TestSave:
     """save_everything works with model space atom templates."""
 
     def test_save_with_model_template(self, tmp_path: Path):
-        """Saving succeeds with a model template larger than structure atom count."""
+        """The saved CIF and losses round-trip on a template larger than the structure."""
         n_struct, n_model = 5, 8
         refined = {"asym_unit": build_test_atom_array(n_atoms=n_struct)}
         model_atom_array = build_test_atom_array(n_atoms=n_model, with_occupancy=False)
+        final_state = torch.randn(1, n_model, 3, generator=torch.Generator().manual_seed(0))
 
         args = GuidanceConfig(
             protein="1l63",
@@ -1118,9 +1120,11 @@ class TestSave:
             traj_denoised=[],
             traj_next_step=[],
             scaler_type="pure_guidance",
-            final_state=torch.randn(1, n_model, 3),
+            final_state=final_state,
             model_atom_array=model_atom_array,
         )
 
-        assert (tmp_path / "refined.cif").exists()
-        assert (tmp_path / "losses.txt").exists()
+        saved = ensure_atom_array_stack(load_any(tmp_path / "refined.cif"))
+        assert saved.shape == (1, n_model)
+        np.testing.assert_allclose(saved.coord, final_state.numpy(), atol=1e-3)
+        assert (tmp_path / "losses.txt").read_text() == "step,loss\n0,0.5\n1,0.3\n"
