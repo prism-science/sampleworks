@@ -127,10 +127,17 @@ rf3-dev = {features = ["rf3", "dev", "diffuse"]}
 
 [tool.pixi.feature.boltz]
 platforms = ["linux-64-cuda-12"]
-pypi-dependencies = {"boltz" = "==2.2.1", "cuequivariance-ops-torch-cu12" = "*", "cuequivariance-torch" = "*", "rdkit" = ">=2025.3.6"}
+pypi-dependencies = {"boltz" = "==2.2.1", "rdkit" = ">=2025.3.6"}
 
 [tool.pixi.feature.boltz.pypi-options.dependency-overrides]
 click = "==8.1.7"
+
+# Pin cuequivariance to match the pinned torch, as #426 did for RF3 (see #403).
+# Unpinned these float to 0.11.x, which imports a torch symbol torch <2.8 lacks.
+[tool.pixi.feature.boltz.target.linux-64.pypi-dependencies]
+cuequivariance = "==0.9.0"
+cuequivariance-torch = "==0.9.0"
+cuequivariance-ops-torch-cu12 = "==0.9.0"
 
 [tool.pixi.feature.boltz-osx]
 platforms = ["osx-arm64"]

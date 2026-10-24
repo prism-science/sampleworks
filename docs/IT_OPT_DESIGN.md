@@ -118,10 +118,10 @@ attributes are `s`/`z` for Boltz and `s_trunk`/`z_trunk` for Protenix/RF3
 
 | Model | Status | Note |
 |---|---|---|
-| **Boltz1** | Clean | Trunk latents reach the diffusion module directly. |
-| **RF3** | Clean | Same. |
+| **Boltz1** | Expected clean, unverified | Trunk latents reach the diffusion module directly. No Level-0 check or end-to-end run yet. |
+| **RF3** | Works | Trunk latents reach the diffusion module directly. The trunk runs under bfloat16 autocast, so `_pairformer_pass` hands `s_inputs`/`s_trunk`/`z_trunk` out in float32: bfloat16 leaves round most Adam updates away (spacing 0.25 at \|z\| ~ 40, 4 at \|s\| ~ 800) and the optimization stalls. |
 | **Protenix** | Works, with two conditions | (a) `step()` keeps an injected leaf attached automatically via the `detach_unless_leaf` helper — a cached latent detaches under grad (avoids double-backward), but a leaf with `requires_grad=True` is kept attached. No manual edit needed. (b) For `z`, the diffusion shared-vars cache must be **off** (`pair_z`/`p_lm`/`c_l` are z-derived; a stale cache silently zeroes / corrupts the `z` gradient). `_run_guidance` disables it for `LATENT_OPT`. |
-| **Boltz2** | Not yet | `z` (and part of `s`) are baked into a cached `diffusion_conditioning` at featurize time; needs the conditioning recomputed from the live latents. |
+| **Boltz2** | Works | `z` (and part of `s`) enter the diffusion module only through the cached `diffusion_conditioning` bundle built at featurize time. `step()` rebuilds the bundle whenever the `s`/`z` tensors it receives are not the ones the cached bundle was built from (an identity check, not a grad gate), so optimized latents reach every pass including the final frozen-latent one. Rebuilt once per round; no measurable cost. |
 
 All four models' conditioning is a `@dataclass(frozen=True, slots=True)`, swapped via
 `dataclasses.replace` — hence `AttrLatentIO`.
@@ -164,7 +164,7 @@ than the reference's Frobenius norm (shape-agnostic, so `w_s`/`w_z` are comparab
 
 ## 7. Running it
 
-CLI: `sampleworks-guidance --model <protenix|rf3|boltz1> --guidance-type latent_opt …` with
+CLI: `sampleworks-guidance --model <protenix|rf3|boltz1|boltz2> --guidance-type latent_opt …` with
 `--which-latent {single,pair,both}` (default `pair`), `--learning-rate` (0.05), `--outer-steps` (2),
 `--anchor-weight` (0.0), `--max-grad-norm` (1.0), `--bond-length-weight` (5e-5). Also reachable
 programmatically through `run_guidance`. `_run_guidance` resolves the model name to the latent

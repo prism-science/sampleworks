@@ -684,9 +684,11 @@ class RF3Wrapper:
                 # Handle the case where the generator is empty
                 raise RuntimeError("Recycling generator produced no outputs")
 
-        s_inputs = recycling_outputs["S_inputs_I"]
-        s_trunk = recycling_outputs["S_I"]
-        z_trunk = recycling_outputs["Z_II"]
+        # Hand the latents out in float32, not the trunk's bfloat16: latent optimization clones
+        # them as Adam leaves, and in bfloat16 an Adam step of ~0.05 rounds away on most elements.
+        s_inputs = recycling_outputs["S_inputs_I"].float()
+        s_trunk = recycling_outputs["S_I"].float()
+        z_trunk = recycling_outputs["Z_II"].float()
 
         return {
             "s_inputs": s_inputs,
