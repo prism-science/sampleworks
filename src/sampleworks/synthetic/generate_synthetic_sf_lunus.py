@@ -1,6 +1,6 @@
 """Generate synthetic structure factor amplitudes via lunus.sf.
 
-The lunus counterpart of ``generate_synthetic_sf.py``, which uses SFcalculator.
+The lunus counterpart of ``generate_synthetic_sf_sfc.py``, which uses SFcalculator.
 Both write the same MTZ layout (``F{label}`` / ``SIGF{label}`` / ``PHIF{label}``
 plus an optional R-free flag), so either output can feed the structure-factor
 loss. On 6B8X at 2.2 Å the two engines agree to correlation 1.000000 and
@@ -435,7 +435,7 @@ def dataset_from_bragg_amplitudes(
     """Build an in-memory MTZ from Miller indices and complex amplitudes.
 
     The first moment of the ensemble, ``<F>``, written as ``|<F>|`` plus its phase,
-    in the column layout of ``generate_synthetic_sf.process_amplitudes_to_dataset``.
+    in the column layout of ``generate_synthetic_sf_sfc.process_amplitudes_to_dataset``.
 
     Parameters
     ----------

@@ -11,7 +11,7 @@ common ancestor of everything that uses it.
 
 The loss families get their target data differently. The density fixtures read
 committed files (a carved .ccp4 and its matching recentered cif). The SF fixtures
-generate their (cif, mtz) pair per session via `generate_synthetic_sf.py`. The
+generate their (cif, mtz) pair per session via `generate_synthetic_sf_sfc.py`. The
 diffuse_bragg fixtures run `generate_synthetic_sf_lunus.py`'s row processor on 1vme
 three times: with its altlocs expanded into a two-configuration ensemble (Bragg,
 diffuse and R-free flags), as a single model, and as the ensemble with bulk solvent.
@@ -87,7 +87,7 @@ def sf_1vme_cif_and_mtz_paths(
     """Generate the synthetic SF data and the exact structure used for the generation,
     returns the ``(cif, mtz)`` paths.
 
-    Mirrors the ``--structure`` branch of ``generate_synthetic_sf.main()``, so these
+    Mirrors the ``--structure`` branch of ``generate_synthetic_sf_sfc.main()``, so these
     fixtures exercise exactly what the CLI produces. ``--save-structure`` writes back the
     post-selection and occupancy modifed model, which is the structure actually used to
     generate the synthetic SF data.
@@ -97,10 +97,8 @@ def sf_1vme_cif_and_mtz_paths(
     scales. The resulted mtz file carries both Fprotein/SIGFprotein/PHIFprotein and
     Ftotal/SIGFtotal/PHIFtotal.
     """
-    from sampleworks.synthetic.generate_synthetic_sf import (
-        _process_single_row,
-        BatchRowForMTZ,
-    )
+    from sampleworks.synthetic.generate_synthetic_sf_sfc import _process_single_row
+    from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ
 
     source_cif = "1vme_final.cif"
     source_dir = resources_dir / "1vme"
@@ -125,11 +123,11 @@ def sf_1vme_cif_and_mtz_paths(
         device=device,
         strip_hydrogens=True,
         strip_waters=True,
-        simulate_solvent_and_scale=True,
+        bulk_solvent="combined",
         save_structure=True,
     )
 
-    # Following the default file names in the generate_synthetic_sf.py script:
+    # Following the default file names in the generate_synthetic_sf_sfc.py script:
     # `{stem}_{resolution:.2f}A.mtz`, and the saved structure as `{stem}_sf_input.cif`.
     # Ideally we want to modify _process_single_row to return the paths directly in case
     # the naming defaults changed or accept naming parameters.
@@ -141,7 +139,7 @@ def sf_1vme_cif_and_mtz_paths(
     missing = [p.name for p in (cif_path, mtz_path) if not p.exists()]
     if missing:
         raise RuntimeError(
-            f"generate_synthetic_sf wrote no {missing} to {output_dir}; see the "
+            f"generate_synthetic_sf_sfc wrote no {missing} to {output_dir}; see the "
             f"generator's logged error for the cause"
         )
     return cif_path, mtz_path
@@ -258,8 +256,8 @@ def _generate_lunus_targets(
     the fixtures exercise exactly what the CLI writes. The processor logs and
     returns on failure instead of raising, so the record's status is checked here.
     """
-    from sampleworks.synthetic.generate_synthetic_sf import BatchRowForMTZ
     from sampleworks.synthetic.generate_synthetic_sf_lunus import _process_single_row
+    from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ
 
     record = _process_single_row(
         row=BatchRowForMTZ(filename=DIFFUSE_BRAGG_SOURCE),
@@ -283,8 +281,8 @@ def _generate_lunus_targets(
 def _lunus_configurations(resources_dir: Path, altlocs_as_models: bool) -> AtomArrayStack:
     """1vme as the lunus generator loads it, waters stripped (guidance strips them too)."""
     pytest.importorskip("lunus.sf", reason="lunus[sf] not installed")
-    from sampleworks.synthetic.generate_synthetic_sf import BatchRowForMTZ
     from sampleworks.synthetic.generate_synthetic_sf_lunus import load_configurations
+    from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ
 
     source = resources_dir / "1vme" / DIFFUSE_BRAGG_SOURCE
     if not source.exists():
