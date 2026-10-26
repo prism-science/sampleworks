@@ -16,6 +16,7 @@ from sampleworks.core.losses.real_space_density import (
 from sampleworks.synthetic.synthetic_utils import (
     load_structure_for_synthetic_loss,
     resolve_parallel_jobs,
+    SyntheticStructureOptions,
     validate_occupancy_values,
     validate_structure_extension,
 )
@@ -141,12 +142,9 @@ def _process_single_row(
     resolution: float,
     em_mode: bool,
     device: torch.device,
-    strip_hydrogens: bool = False,
-    strip_waters: bool = False,
-    strip_ligands: bool = False,
+    structure_options: SyntheticStructureOptions = SyntheticStructureOptions(),
     save_structure: bool = True,
     scattering_table: str | None = None,
-    b_factor: float | None = None,
 ) -> None:
     """Process a single structure row.
 
@@ -166,33 +164,20 @@ def _process_single_row(
         If True, use electron scattering factors. If False, use X-ray factors.
     device
         PyTorch device for computation
-    strip_hydrogens
-        If True, remove hydrogen atoms before computing density. Default is False.
-    strip_waters
-        If True, remove water molecules before computing density. Default is False.
-    strip_ligands
-        If True, remove ligand molecules (non-water heteroatoms) before computing density. Default
-        is False.
-        This is done by keeping only polymer atoms in the selection, which are typically not
-        ligands.
-        TODO: be more thorough with this? We could make this a transform
+    structure_options
+        Atom filters and B-factor override applied to each loaded structure.
     save_structure
         If True, save the processed structure to a CIF file in the input directory. Default is True.
     scattering_table
         ``"wk1995"``, ``"it1992"`` or ``"electron"``; ``None`` takes the mode's default.
-    b_factor
-        Optional isotropic B-factor assigned to every retained atom.
     """
     structure_path = base_dir / row.filename
     atom_array = load_structure_for_synthetic_loss(
         structure_path,
         occupancy_mode=occupancy_mode,
         occupancy_values=row.occupancy_values,
-        strip_hydrogens=strip_hydrogens,
-        strip_waters=strip_waters,
-        strip_ligands=strip_ligands,
+        structure_options=structure_options,
         selection=row.selection,
-        b_factor=b_factor,
     )
     if atom_array is None:
         return
@@ -252,12 +237,9 @@ def process_batch(
     em_mode: bool,
     device: torch.device,
     n_jobs: int = -1,
-    strip_hydrogens: bool = False,
-    strip_waters: bool = False,
-    strip_ligands: bool = False,
+    structure_options: SyntheticStructureOptions = SyntheticStructureOptions(),
     save_structure: bool = False,
     scattering_table: str | None = None,
-    b_factor: float | None = None,
 ) -> None:
     """Process multiple structures from a CSV file in batch mode.
 
@@ -277,18 +259,12 @@ def process_batch(
         PyTorch device for computation
     n_jobs
         Number of parallel jobs. -1 means use all available CPUs.
-    strip_hydrogens
-        If True, remove hydrogen atoms before computing density.
-    strip_waters
-        If True, remove water molecules before computing density.
-    strip_ligands
-        If True, remove ligand molecules (non-water heteroatoms) before computing density.
+    structure_options
+        Atom filters and B-factor override applied to each loaded structure.
     save_structure
         If True, save the processed structure to a CIF file in the input directory.
     scattering_table
         ``"wk1995"``, ``"it1992"`` or ``"electron"``; ``None`` takes the mode's default.
-    b_factor
-        Optional isotropic B-factor assigned to every retained atom.
     """
     from joblib import delayed, Parallel
 
@@ -306,11 +282,8 @@ def process_batch(
             em_mode=em_mode,
             device=device,
             scattering_table=scattering_table,
-            strip_hydrogens=strip_hydrogens,
-            strip_waters=strip_waters,
-            strip_ligands=strip_ligands,
+            structure_options=structure_options,
             save_structure=save_structure,
-            b_factor=b_factor,
         )
         for row in rows
     )
@@ -422,6 +395,12 @@ def main() -> None:
         logger.error(str(error))
         sys.exit(1)
     device = try_gpu()
+    structure_options = SyntheticStructureOptions(
+        strip_hydrogens=args.remove_hydrogens,
+        strip_waters=args.remove_waters,
+        strip_ligands=args.remove_ligands,
+        b_factor=args.b_factor,
+    )
 
     if args.batch_csv:
         process_batch(
@@ -434,11 +413,8 @@ def main() -> None:
             device=device,
             scattering_table=args.scattering_table,
             n_jobs=args.n_jobs,
-            strip_hydrogens=args.remove_hydrogens,
-            strip_waters=args.remove_waters,
-            strip_ligands=args.remove_ligands,
+            structure_options=structure_options,
             save_structure=args.save_structure,
-            b_factor=args.b_factor,
         )
     elif args.structure:
         row = BatchRow(
@@ -458,11 +434,8 @@ def main() -> None:
             em_mode=args.em_mode,
             device=device,
             scattering_table=args.scattering_table,
-            strip_hydrogens=args.remove_hydrogens,
-            strip_waters=args.remove_waters,
-            strip_ligands=args.remove_ligands,
+            structure_options=structure_options,
             save_structure=args.save_structure,
-            b_factor=args.b_factor,
         )
     else:
         logger.error("Please specify --structure or --batch-csv")

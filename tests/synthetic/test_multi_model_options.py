@@ -18,7 +18,7 @@ pytest.importorskip("lunus.sf", reason="lunus[sf] not installed")
 from pathlib import Path
 
 from sampleworks.synthetic.generate_synthetic_sf_lunus import load_configurations
-from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ
+from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ, SyntheticStructureOptions
 
 
 @pytest.fixture(scope="module")
@@ -82,7 +82,9 @@ def test_selection_applies_to_every_configuration(ensemble_input):
 
 def test_stripping_hydrogens_applies_to_every_configuration(ensemble_input):
     path, kwargs = ensemble_input
-    stripped = _load(path, strip_hydrogens=True, **kwargs)
+    stripped = _load(
+        path, structure_options=SyntheticStructureOptions(strip_hydrogens=True), **kwargs
+    )
 
     assert "H" not in set(np.asarray(stripped.element))
     assert stripped.stack_depth() >= 2
@@ -91,10 +93,18 @@ def test_stripping_hydrogens_applies_to_every_configuration(ensemble_input):
 def test_stripping_waters_applies_to_every_configuration(ensemble_input):
     path, kwargs = ensemble_input
     full = _load(path, **kwargs)
-    stripped = _load(path, strip_waters=True, **kwargs)
+    stripped = _load(path, structure_options=SyntheticStructureOptions(strip_waters=True), **kwargs)
 
     assert "HOH" not in set(np.asarray(stripped.res_name))
     assert stripped.stack_depth() == full.stack_depth()
+
+
+def test_b_factor_override_applies_to_every_configuration(ensemble_input):
+    path, kwargs = ensemble_input
+    overridden = _load(path, structure_options=SyntheticStructureOptions(b_factor=42.0), **kwargs)
+
+    assert overridden.stack_depth() >= 2
+    np.testing.assert_array_equal(overridden.b_factor, 42.0)
 
 
 def test_topology_and_coordinates_stay_in_register_after_filtering(ensemble_input):
