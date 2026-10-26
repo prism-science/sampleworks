@@ -17,7 +17,7 @@ Only *loss-agnostic* checks live here:
   (true < perturbed < random, monotonic) on top of the absolute bar.
 - The batch=1 occupancy-gradient check IS shared (every loss consumes the single
   conformer's occupancy); see `test_gradients_wrt_occupancies` below. Tests that change
-  atom count / topology (single-atom) or rely on `precompute_unique_combinations` /
+  atom count / topology (single-atom) or rely on the density loss's `prepare()` (vmap) /
   `structure_to_loss_input` stay in the loss-specific files, since not every loss
   is independent of topology information or implements those methods.
 
