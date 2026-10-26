@@ -23,8 +23,6 @@ class MockGradientLossFunction:
         elements: Tensor | None = None,
         b_factors: Tensor | None = None,
         occupancies: Tensor | None = None,
-        unique_combinations: Tensor | None = None,
-        inverse_indices: Tensor | None = None,
     ) -> Tensor:
         """Loss = 0.5 * scale * ||coords||^2, so grad = scale * coords."""
         return 0.5 * self.gradient_scale * (coordinates**2).sum()
