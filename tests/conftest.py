@@ -472,7 +472,7 @@ def structure_1vme(resources_dir: Path) -> dict:
 
 
 @pytest.fixture(scope="session")
-def structure_1vme_density(resources_dir: Path) -> dict:
+def structure_1vme_density_input(resources_dir: Path) -> dict:
     """1VME density input. Its chain A also carries CL/FEO ligand residues (malformed)."""
     return parse_and_remove_hydrogens(resources_dir / "1vme" / "1VME_single_001_density_input.cif")
 
@@ -808,15 +808,19 @@ def temp_output_dir(tmp_path: Path) -> Generator[Path, None, None]:
 
 
 @pytest.fixture(scope="session")
-def density_map_1vme(resources_dir: Path):
+def density_path_1vme(resources_dir: Path) -> Path:
+    return resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB_1.80A.ccp4"
+
+
+@pytest.fixture(scope="session")
+def density_map_1vme(density_path_1vme: Path):
     from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.volume import (
         XMap,
     )
 
-    map_path = resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB_1.80A.ccp4"
-    if not map_path.exists():
-        pytest.skip(f"Density map not found at {map_path}")
-    return XMap.fromfile(str(map_path), resolution=1.8)
+    if not density_path_1vme.exists():
+        pytest.skip(f"Density map not found at {density_path_1vme}")
+    return XMap.fromfile(str(density_path_1vme), resolution=1.8)
 
 
 @pytest.fixture(scope="module")

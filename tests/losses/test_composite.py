@@ -1,5 +1,7 @@
 """Tests for weighted loss combination."""
 
+from pathlib import Path
+
 import pytest
 import torch
 from sampleworks.core.losses.composite import CompositeLoss
@@ -53,13 +55,8 @@ def per_atom(n_atoms: int = 3) -> dict:
     )
 
 
-@pytest.fixture
-def density_path(resources_dir) -> str:
-    return str(resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB_1.80A.ccp4")
-
-
-def density_options(density_path: str, loss_order: int = 1) -> dict:
-    return {"density": density_path, "resolution": 1.8, "loss_order": loss_order}
+def density_options(density_path: Path, loss_order: int = 1) -> dict:
+    return {"density": str(density_path), "resolution": 1.8, "loss_order": loss_order}
 
 
 def batched_inputs(test_coordinates_1vme, device) -> dict:
@@ -79,20 +76,27 @@ class TestCompositeValue:
         assert isinstance(CompositeLoss([QuadraticLoss()]), LossFunctionProtocol)
 
     def test_value_is_the_weighted_sum_of_its_terms(self):
-        """Weights are used as given, not renormalized to sum to one.
+        """The composite value is each term's value scaled by its weight, then summed.
 
-        A weighted sum of quadratics is the quadratic whose scale is the weighted sum
-        of scales, so 2*Q(1) + 3*Q(3) = Q(11), while normalizing by the total weight
-        would give Q(11/5).
+        The weights here sum to one, so this checks the weighted sum itself, not the
+        normalization covered by ``test_a_single_term_keeps_its_weight``.
         """
-        composite = CompositeLoss([QuadraticLoss(1.0), QuadraticLoss(3.0)], [2.0, 3.0])
+        terms = [QuadraticLoss(1.0), QuadraticLoss(3.0)]
+        composite = CompositeLoss(terms, [0.25, 0.75])
+        x = coords()
 
-        assert torch.isclose(composite(coords(), **per_atom()), QuadraticLoss(11.0)(coords()))
+        combined = composite(x, **per_atom())
+
+        expected = 0.25 * terms[0](x) + 0.75 * terms[1](x)
+        assert torch.isclose(combined, expected)
 
     def test_a_single_term_keeps_its_weight(self):
-        composite = CompositeLoss([QuadraticLoss(2.0)], [0.5])
+        """Weights are used as given, not renormalized to sum to one."""
+        term = QuadraticLoss(2.0)
+        composite = CompositeLoss([term], [0.5])
+        x = coords()
 
-        assert torch.isclose(composite(coords(), **per_atom()), QuadraticLoss(1.0)(coords()))
+        assert torch.equal(composite(x, **per_atom()), 0.5 * term(x))
 
     def test_default_weights_average_the_terms(self):
         composite = CompositeLoss([QuadraticLoss(1.0), QuadraticLoss(3.0)])
@@ -149,9 +153,9 @@ class TestBuildLoss:
     """build_loss turns a configuration into the loss a run scores against."""
 
     def test_a_single_loss_at_full_weight_is_not_wrapped(
-        self, density_path, device, structure_1vme_density
+        self, density_path_1vme, device, structure_1vme_density
     ):
-        config = LossConfig.single(Losses.REAL_SPACE_DENSITY, **density_options(density_path))
+        config = LossConfig.single(Losses.REAL_SPACE_DENSITY, **density_options(density_path_1vme))
 
         loss = build_loss(config, LossBuildContext(structure=structure_1vme_density, device=device))
 
@@ -159,11 +163,12 @@ class TestBuildLoss:
 
     @pytest.mark.gpu
     def test_a_single_loss_scores_at_its_configured_weight(
-        self, density_path, device, structure_1vme_density, test_coordinates_1vme
+        self, density_path_1vme, device, structure_1vme_density, test_coordinates_1vme
     ):
         context = LossBuildContext(structure=structure_1vme_density, device=device)
         full_weight = build_loss(
-            LossConfig.single(Losses.REAL_SPACE_DENSITY, **density_options(density_path)), context
+            LossConfig.single(Losses.REAL_SPACE_DENSITY, **density_options(density_path_1vme)),
+            context,
         )
         half_weight = build_loss(
             LossConfig(
@@ -171,7 +176,7 @@ class TestBuildLoss:
                     LossEntry(
                         loss=Losses.REAL_SPACE_DENSITY,
                         weight=0.5,
-                        options=density_options(density_path),
+                        options=density_options(density_path_1vme),
                     ),
                 )
             ),
@@ -179,19 +184,19 @@ class TestBuildLoss:
         )
         inputs = batched_inputs(test_coordinates_1vme, device)
 
-        assert torch.isclose(half_weight(**inputs), 0.5 * full_weight(**inputs))
+        assert torch.equal(half_weight(**inputs), 0.5 * full_weight(**inputs))
 
     @pytest.mark.gpu
     def test_several_losses_are_combined_with_their_weights(
-        self, density_path, device, structure_1vme_density, test_coordinates_1vme
+        self, density_path_1vme, device, structure_1vme_density, test_coordinates_1vme
     ):
         context = LossBuildContext(structure=structure_1vme_density, device=device)
         first_order = build_loss(
-            LossConfig.single(Losses.REAL_SPACE_DENSITY, **density_options(density_path, 1)),
+            LossConfig.single(Losses.REAL_SPACE_DENSITY, **density_options(density_path_1vme, 1)),
             context,
         )
         second_order = build_loss(
-            LossConfig.single(Losses.REAL_SPACE_DENSITY, **density_options(density_path, 2)),
+            LossConfig.single(Losses.REAL_SPACE_DENSITY, **density_options(density_path_1vme, 2)),
             context,
         )
         combined = CompositeLoss([first_order, second_order], weights=[0.25, 0.75])

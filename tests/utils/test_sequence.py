@@ -554,11 +554,12 @@ def test_reset_numbering_raises_malformed():
         apply_sequence_override(structure, "MKLMK")
 
 
-def test_ligand_in_protein_chain_raises_malformed(structure_1vme_density: dict):
+def test_ligand_in_protein_chain_raises_malformed(structure_1vme_density_input: dict):
     """Ligands deposited inside the protein chain are reported and not silently misaligned."""
-    sequence = structure_1vme_density["chain_info"]["A"]["processed_entity_canonical_sequence"]
+    chain_a = structure_1vme_density_input["chain_info"]["A"]
+    sequence = chain_a["processed_entity_canonical_sequence"]
 
     with pytest.raises(ValueError, match="malformed") as excinfo:
-        apply_sequence_override(structure_1vme_density, sequence.replace("X", ""))
+        apply_sequence_override(structure_1vme_density_input, sequence.replace("X", ""))
 
     assert "FEO" in str(excinfo.value)

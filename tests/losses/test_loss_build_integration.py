@@ -50,9 +50,10 @@ def build_from_argv(argv: list[str], structure_path: Path, device: torch.device)
     )
 
 
-def test_density_loss_is_reachable_from_the_command_line(resources_dir: Path, device):
+def test_density_loss_is_reachable_from_the_command_line(
+    resources_dir: Path, density_path_1vme: Path, device
+):
     structure_path = resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
-    density_path = resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB_1.80A.ccp4"
 
     loss = build_from_argv(
         BASE_ARGV
@@ -60,7 +61,7 @@ def test_density_loss_is_reachable_from_the_command_line(resources_dir: Path, de
             "--structure",
             str(structure_path),
             "--density",
-            str(density_path),
+            str(density_path_1vme),
             "--resolution",
             "1.8",
             "--loss-order",
@@ -130,18 +131,17 @@ def test_structure_factor_loss_scores_a_structure_end_to_end(
 
 def test_a_configuration_file_composes_two_losses(
     tmp_path: Path,
-    resources_dir: Path,
+    density_path_1vme: Path,
     sf_1vme_cif_and_mtz_paths: tuple[Path, Path],
     device: torch.device,
 ):
     """The two losses score different data about the same structure, and combine."""
     structure_path, mtz_path = sf_1vme_cif_and_mtz_paths
-    density_path = resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB_1.80A.ccp4"
     config_file = tmp_path / "losses.yaml"
     config_file.write_text(
         "real_space_density:\n"
         "  weight: 0.4\n"
-        f"  loss_options: {{density: {density_path}, resolution: 1.8}}\n"
+        f"  loss_options: {{density: {density_path_1vme}, resolution: 1.8}}\n"
         "structure_factor:\n"
         "  weight: 0.6\n"
         f"  loss_options: {{mtzfile: {mtz_path}, expcolumns: [Fprotein, SIGFprotein]}}\n"
