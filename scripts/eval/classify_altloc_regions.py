@@ -440,21 +440,17 @@ def _process_structure(
 
     rows: list[dict] = []
     classified_res_ids: set[tuple[str, int]] = set()
-    seen_res_ids: set[tuple[str, int]] = set()
     for selection_str in [s.strip() for s in selection_field.split(";") if s.strip()]:
         # find_altloc_selections.py may append a combined selection unioning every altloc
-        # span (atomworks-style "res_id == .. or .."). That union names no residue the
-        # earlier selections in this row have not already named, so skip a selection whose
-        # residues were all seen before it, to avoid double-counting. The test is against
-        # the residues seen so far in this row, not against every altloc residue in the
-        # structure: when the structure's altlocs form a single span, that one span also
-        # covers every altloc residue, and comparing against the structure dropped it
-        # (7DMS residue 5, 5D7F residues 1-10). True discontinuous "or" selections name
-        # residues not seen before, so they are still classified.
+        # span (atomworks-style "res_id == .. or .."). Skip only that redundant total union
+        # to avoid double-counting. True discontinuous "or" selections are still
+        # classified
         covered_res_ids = selection_to_residues(atom_array, selection_str)
-        if covered_res_ids and covered_res_ids <= seen_res_ids:
-            continue
-        seen_res_ids.update(covered_res_ids)
+        if covered_res_ids and covered_res_ids == all_altloc_res_ids:
+            # A single span can cover every altloc residue too (7DMS residue 5). Only the
+            # union carries "((", from cif_utils.py line 122, so skip on that mark alone.
+            if "((" in selection_str:
+                continue
         try:
             out = _classify_selection(
                 atom_array=atom_array,

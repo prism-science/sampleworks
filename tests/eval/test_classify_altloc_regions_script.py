@@ -1,5 +1,5 @@
 """
-Integration tests for ``scripts/eval/classify_altloc_regions.py``.
+Unit tests for ``scripts/eval/classify_altloc_regions.py``.
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from sampleworks.utils.cif_utils import find_altloc_selections
 
 from .script_loader import load_script
 
@@ -25,7 +26,7 @@ def classify_script():
 
 
 def _classify_input_csv(tmp_path: Path, resources_dir: Path, selection: str) -> Path:
-    """Write a one-row input CSV for the 1vme altloc CIF with the given selection cell.
+    """Write a one-row input CSV for the 1vme altloc CIF with the given selection.
 
     Skips the test if the CIF resource is missing.
     """
@@ -50,23 +51,24 @@ def _make_args(*, input_csv: Path, output_file: Path) -> argparse.Namespace:
     )
 
 
-def test_repeated_selection_is_classified_once(
-    tmp_path: Path, resources_dir: Path, classify_script
-):
-    """A selection cell holding a span and the combined selection that repeats it gives one row.
+def test_union_selection_is_not_classified(tmp_path: Path, resources_dir: Path, classify_script):
+    """Every span of 1VME is classified once and the union appended after them is skipped.
 
-    find_altloc_selections.py appends a per-chain combined selection after the individual
-    spans. Here the cell holds one span, 1VME residue 82, and a combined selection naming the
-    same residue, so the second string repeats the first and must be skipped. Residue 82's
-    altlocs are on side-chain atoms only, so no loop scoring runs.
+    The selection is find_altloc_selections's own output for the 1VME resource with the union
+    switched on, and the expected rows are its output with the union switched off. The
+    classified rows must be exactly the spans.
     """
-    selection = "chain A and resi 82-82;chain_id == 'A' and ((res_id == 82))"
-    input_csv = _classify_input_csv(tmp_path, resources_dir, selection)
+    cif_path = resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
+    if not cif_path.exists():
+        pytest.skip(f"Test resource not found: {cif_path}")
+    spans = list(find_altloc_selections(cif_path, "label_alt_id", 1, False))
+    entries = list(find_altloc_selections(cif_path, "label_alt_id", 1, True))
+    assert len(entries) > len(spans), "the resource row should carry a union after its spans"
+
+    input_csv = _classify_input_csv(tmp_path, resources_dir, ";".join(entries))
     output_file = tmp_path / "output.csv"
 
     classify_script.main(_make_args(input_csv=input_csv, output_file=output_file))
 
     df = pd.read_csv(output_file)
-    assert df[["selection", "classification"]].values.tolist() == [
-        ["chain A and resi 82-82", "side_chain_only"]
-    ]
+    assert df["selection"].tolist() == spans
