@@ -8,7 +8,7 @@ Code should be direct, readable, and maximize clarity without verbosity. Name va
 
 Respond in a measured, clear tone. Consider alternatives carefully. Include confidence estimates for claims (e.g., "I am about 75% confident").
 
-Code reuse is paramount. Whenever possible, locate high-quality implementations in this codebase or high-quality open-source implementations for algorithms and use those instead of implementing something yourself. Chances are someone has already solved the problem, no need to reinvent the wheel.
+Code reuse is paramount. Whenever possible, locate high-quality implementations in this codebase or high-quality open-source implementations for algorithms and use those instead of implementing something yourself. Chances are someone has already solved the problem, no need to reinvent the wheel. In particular, check whether something from atomworks, biotite, or gemmi could be used in place of a custom function.
 
 ## Project Overview
 
@@ -16,128 +16,62 @@ Code reuse is paramount. Whenever possible, locate high-quality implementations 
 
 **The core insight**: Structure prediction models like Boltz, AlphaFold, and RosettaFold capture aspects of the underlying distribution of realistic macromolecular structures, but collapse ensembles to single states. By treating these models as physics-informed samplers and applying experimental constraints and guidance during generation, we can recover the conformational ensemble present in the experiment.
 
-**The core problem solved**: Without sampleworks, integrating N generative models with M experimental data types requires O(N×M) bespoke implementations. Sampleworks reduces this to O(N+M) through protocol-driven decoupling.
+**The core problem solved**: Without sampleworks, integrating N generative models with M experimental data types requires O(N×M) bespoke implementations. Sampleworks reduces this to O(N+M) through protocol-driven decoupling, allowing thorough evaluation, benchmarking, and comparison between models, guidance algorithms, and types of experimental data.
 
 ### Atomworks
 
-[Atomworks](https://baker-laboratory.github.io/atomworks-dev/latest/) is sampleworks' core dependency for structure I/O and representation. Atomworks is built atop biotite, a bioinformatics Python library. It provides:
+[Atomworks](https://baker-laboratory.github.io/atomworks-dev/latest/) (built on Biotite) handles structure I/O. A `structure: dict` parameter anywhere in sampleworks is the dict returned by `atomworks.parse()`, whose `"asym_unit"` key holds a Biotite `AtomArray`/`AtomArrayStack`. To load a `.pdb`/`.cif` straight to an `AtomArray`, use `atomworks.io.utils.io_utils.load_any()`.
 
-- **`atomworks.parse()`**: The universal entry point for loading structure files (`.cif`, `.pdb`). Returns a dictionary containing an `"asym_unit"` key with a Biotite `AtomArray` or `AtomArrayStack`, plus metadata. This dictionary is the standard structure representation passed to `ModelWrapper.featurize()`.
-- **`AtomArray` / `AtomArrayStack`** (from [Biotite](https://www.biotite-python.org/)): Per-atom annotations (element, residue ID, chain ID, B-factor, occupancy, coordinates). `AtomArrayStack` is the multi-model variant used for ensembles.
-- **`atomworks.ml`**: ML utilities used by model wrappers for featurization.
-
-Whenever you see a `structure: dict` parameter in sampleworks, it refers to an atomworks-parsed dictionary. Use `atomworks.parse()` to create one from a file, and use `load_any()` to load a `.pdb` or `.cif` to an AtomArray or AtomArrayStack.
-
-Additionally, if you need to modify or transform coordinates or other atomic annotations, search Atomworks and biotite for the appropriate tools.
+Because we're dealing with ensemble models here, we need to make sure we properly handle altlocs and multimodel structures at input, inference, and output. We have a variety of utility functions in `atom_array_utils`, `cif_utils`, and `structure_utils` to handle these cases. If you notice we need to extend these, block and notify about what is needed so we can carefully consider the best approach.
 
 ## Design Philosophy
 
 ### 1. Protocols Over Inheritance
 
-All interfaces use `typing.Protocol` for structural subtyping. This is a deliberate choice for this domain:
-
-- **Duck typing of external models**: We wrap models (Boltz, Protenix, RF3) from external codebases where modifying source is infeasible. Protocols let any class with matching methods participate — no inheritance required.
-- **Natural composition**: Objects can satisfy multiple interfaces without diamond inheritance problems.
-- **Minimal coupling**: Contributors don't need to import our framework to build compatible wrappers.
-
-```python
-class MyProtocol(Protocol):
-    def method(self, x: Tensor) -> Tensor: ...
-
-
-# Any class with matching signature works
-class MyImpl:
-    def method(self, x: Tensor) -> Tensor:
-        return x * 2
-
-
-assert isinstance(MyImpl(), MyProtocol)  # True if @runtime_checkable decorates MyProtocol
-```
+Component interfaces are `typing.Protocol`s rather than base classes. Model wrappers (Boltz, Protenix, RF3, Protpardelle) are plain classes that inherit from nothing in sampleworks; they satisfy the protocols structurally. This keeps the wrapper classes free of a shared base-class hierarchy, so the code that wraps an external model's source (which we avoid modifying) does not need to subclass anything. Wrappers still import small sampleworks helpers and types, such as `GenerativeModelInput` from `models/protocol.py`.
 
 ### 2. Decouple Guidance from Generation
 
-The separation of **Guidance** (Scalers/Losses) from **Generation** (ModelWrappers/Samplers) is the architectural core. A loss function (e.g., real-space density fit) is written once and applied to any supported generative model. This maps to the inverse problem paradigm: define a forward model and target loss, optimize during guidance.
+The separation of **Guidance** (Scalers/Losses) from **Generation** (ModelWrappers/Samplers) is the architectural core. A loss function is written once and applied to any supported generative model — the inverse-problem paradigm: define a forward model and target loss, optimize during guidance.
 
 ### 3. Restraints vs. Constraints
 
-Two types of conditioning, borrowed from Chroma's philosophy:
-
-- **Restraints (Soft)**: Modify the energy/loss landscape. "Make it fit this density map." Implemented as additive potentials — biases the probability distribution while the model balances the prior (protein realism) with the condition.
-- **Constraints (Hard)**: Modify coordinates directly. "Enforce C3 symmetry." Implemented as geometric projections — restricts the sampling manifold by construction.
-
-Scalers implement both: `StepScalerProtocol` for per-step restraints/constraints, `TrajectoryScalerProtocol` for population-level steering.
+Following Chroma, **restraints** (soft) are additive potentials that bias the distribution ("fit this density map"), while **constraints** (hard) are geometric projections on the coordinates ("enforce C3 symmetry"). `StepScalerProtocol` implements per-step restraints/constraints; `TrajectoryScalerProtocol` implements population-level steering.
 
 ### 4. Ensemble as First-Class Citizen
 
-Ensembles are managed *outside* the model (`TrajectoryScalerProtocol`). Current SOTA models aren't ensemble-native, so we recover distributions by running the generative process multiple times under experimental constraints — reweighting trajectories based on fit to data (e.g., Feynman-Kaç steering).
-
-At its core this is Bayesian inference: the generative model provides the prior over structures, and experimental data defines the likelihood via differentiable score functions. By sampling from the posterior, we perform experimentally-constrained ensemble generation — producing populations weighted by data that reveal cryptic pockets or dynamic loops invisible to single-structure refinement.
+Ensembles are managed _outside_ the model, by `TrajectoryScalerProtocol`. Current models aren't ensemble-native, so we run the generative process many times under experimental guidance and reweight trajectories by fit to data (e.g., Feynman-Kaç steering).
 
 ### 5. Time-Dependent Conditioning
 
-Diffusion/flow models operate over time t ∈ [1, 0]. Effective conditioning requires time-awareness:
-
-- **Annealing**: Scale potentials by signal-to-noise ratio. At high noise (t ≈ 1), strong gradients guide global fold. At low noise (t ≈ 0), subtle gradients preserve local chemistry.
-- **Gating**: Some constraints only apply at specific stages. E.g., don't optimize fit of an unstructured atom cloud to a 1 Å map — downsample the target map according to timestep.
-- **Scale awareness**: If auxiliary energy swamps the base model, you get geometric garbage that satisfies the condition. If too weak, the condition is ignored. `StepParams` bundles time and other step-specific info for scalers to use.
+For FlowModelWrappers, guidance must be time-aware: we may want to anneal potentials with noise level (global fold early, local chemistry late), gate terms that only make sense at certain stages (e.g., downsample a 1 Å target map while the structure is still an atom cloud), and keep guidance from swamping the model prior. `StepParams` carries the time ( t ∈ [1, 0]), which it may transform into the appropriate parameter (e.g. `t_hat`) for the model `step` and other per-step information scalers need.
 
 ### 6. Differentiability End-to-End
 
-Gradient-based guidance requires differentiability from experimental observable back to atomic coordinates. The forward models (density calculation, structure factors) must be differentiable. If coordinates or internal representations can't receive gradients, the potential can't guide the structure.
+Gradients must flow from the experimental observable back to atomic coordinates (or arbitrary internal representations in the model, potentially all the way back to input features/embeddings), so every forward model (density, structure factors) must be differentiable.
 
 ### 7. Atomic Responsibility
 
-Each component does one thing well:
-- A loss function computes one experimental mismatch
-- A scaler applies one guidance strategy
-- A sampler implements one numerical solver
-- A model wrapper adapts one generative model
-
-Don't bundle logic. Compose instead.
+One loss per experimental mismatch, one scaler per guidance strategy, one sampler per numerical solver, one wrapper per generative model. Compose; don't bundle.
 
 ## Architecture
 
-### Component Hierarchy
-
-```
-sampleworks
-├── ModelWrappers — featurize structures, run model forward passes
-│   ├── StructureModelWrapper
-│   ├── FlowModelWrapper (diffusion/flow-matching)
-│   └── EnergyBasedModelWrapper
-├── Samplers — numerical solvers for sampling
-│   └── TrajectorySampler (EDM)
-├── Scalers — guidance strategies
-│   ├── StepScalerProtocol — per-step (DPS, Tweedie)
-│   └── TrajectoryScalerProtocol — population-level (PureGuidance, FK steering)
-└── Losses — experimental data fit via differentiable forward models
-    └── LossFunctionProtocol
-```
-
 ### Data Flow
 
+`TrajectoryScalerProtocol.sample()` owns a run end to end:
+
 ```
-Atomworks Structure → ModelWrapper.featurize() → Features
-                                                    ↓
-                    ModelWrapper.step() → Denoised prediction
-                                                    ↓
-┌────────────────── Sampling Loop ──────────────────┐
-│  Schedule → StepParams (t, dt, loss, etc.)       │
-│                     ↓                             │
-│  Sampler.step(state, model, context, scaler)      │
-│       ├── Model forward pass                      │
-│       ├── StepScaler.scale() → guidance signal    │
-│       └── Update rule → next state                │
-└───────────────────────────────────────────────────┘
-                         ↓
-              TrajectoryScaler (optional reweighting/resampling)
-                         ↓
-                   Final Ensemble
+featurize(structure) → initialize_from_prior() → prepare loss (if preparable)
+for each step in sampler.compute_schedule():
+    StepParams ← sampler.get_context_for_step()
+    sampler.step(): model.step() → x̂₀ (or other coordinate output for non-FlowModelWrappers) → StepScaler.scale() (once i ≥ guidance_start) → update rule → next state
+    (FK steering: reweight/resample the population)
+→ ensemble
 ```
 
 ### Key Protocols
 
-**ModelWrapper** (`models/protocol.py`): `featurize()` converts atomworks structures to model input; `step()` runs one forward pass. `FlowModelWrapper` adds `initialize_from_prior()`. All `step()` methods return predicted clean samples.
+**ModelWrapper** (`models/protocol.py`): `StructureModelWrapper`, `FlowModelWrapper` (diffusion/flow-matching), and `EnergyBasedModelWrapper`. `featurize()` converts atomworks structures to model input; `step()` runs one forward pass. `FlowModelWrapper` adds `initialize_from_prior()`. `FlowModelWrapper.step()` returns the predicted clean sample `x̂₀`; the other wrappers' `step()` returns coordinates directly.
 
 **Sampler** (`core/samplers/protocol.py`): `step()` advances state by one iteration. `TrajectorySampler` adds `compute_schedule()` and `get_context_for_step()` for diffusion/flow time management.
 
@@ -145,23 +79,16 @@ Atomworks Structure → ModelWrapper.featurize() → Features
 
 **LossFunction** (`core/losses/protocol.py`): `LossFunctionProtocol` defines a callable computing scalar loss from coordinates. `PrecomputableLossFunctionProtocol` extends it with `precompute_unique_combinations()` for vmap compatibility. `LossInputs` dataclass bundles pre-extracted inputs (elements, b_factors, occupancies, coords).
 
-### Module Layout
+### Reference Implementations
 
-```
-src/sampleworks/
-├── core/
-│   ├── forward_models/    # Differentiable physics (X-ray density, cryo-EM)
-│   ├── losses/            # Loss functions for experimental data fit
-│   ├── scalers/           # Guidance strategies (DPS, FK steering)
-│   └── samplers/          # Numerical solvers (EDM)
-├── models/                # Generative model wrappers (Boltz, Protenix, RF3)
-├── metrics/               # Quality metrics (LDDT, sidechain)
-├── eval/                  # Evaluation utilities
-├── synthetic/             # Synthetic data generation
-├── data/                  # Reference data (protein configs)
-├── runs/                  # `sampleworks-runs` CLI + TOML preset orchestrator
-└── utils/                 # Shared utilities
-```
+Paths are relative to `src/sampleworks/`.
+
+- `core/losses/real_space_density.py` and `core/forward_models/xray/real_space_density.py`: reference loss and its differentiable forward model
+- `core/scalers/step_scalers.py`: `DataSpaceDPSScaler`, `NoiseSpaceDPSScaler`
+- `core/scalers/pure_guidance.py` (reference trajectory scaler) and `core/scalers/fk_steering.py`
+- `models/boltz/wrapper.py`: reference model wrapper (pairformer caching, MSA management, atom reconciliation)
+- `utils/atom_reconciler.py`: atom-count mismatches and differentiable alignment
+- `utils/guidance_script_utils.py`: `run_guidance()`, which wires all components together
 
 ## Running Guidance Pipelines
 
@@ -225,120 +152,38 @@ The `run_guidance()` function in `utils/guidance_script_utils.py` is the central
 
 ## Development Environment
 
-**Package Manager**: [Pixi](https://pixi.sh) for cross-platform dependency management.
+Dependencies are managed with [Pixi](https://pixi.sh). The model wrappers (Boltz, Protenix, RF3, Protpardelle) have mutually incompatible dependencies, so each model has its own `<model>` and `<model>-dev` environment; test in the matching `-dev` one. Other environments: `analysis[-dev]`, `boltz-analysis`, `boltz-osx`.
+
+| Command                           | Runs                                                |
+| --------------------------------- | --------------------------------------------------- |
+| `pixi run -e <env>-dev tests`     | Fast tests (`-m 'not slow and not gpu'`)            |
+| `pixi run -e <env>-dev all-tests` | All tests, including slow and GPU                   |
+| `pixi run -e <env>-dev gpu-tests` | GPU tests only (needs CUDA)                         |
+| `pixi run test-fast` / `test-all` | `tests` / `all-tests` across every model `-dev` env |
+
+Forward pytest options as one argument: `pixi run -e rf3-dev tests "-k integration"`.
+
+Mark tests that need a GPU or model checkpoint with `@pytest.mark.slow`, and tests that need CUDA with `@pytest.mark.gpu` (on CPU they crash or exhaust memory).
+
+Pre-commit hooks (ruff, ty, toml-sort, commitizen) run through [prek](https://github.com/j178/prek) and block commits on failure. `ty` is split per environment; see `.pre-commit-config.yaml` for the file routing.
 
 ```bash
-pixi install          # Install dependencies
-pixi shell            # Activate environment
-pixi run test-fast    # Run fast tests across all model dev environments
-pixi run test-all     # Run all tests (including slow tests) across all dev environments
-pixi run -e boltz-dev tests  # Run fast tests in specific environment
+pixi run -e boltz-dev prek install                          # git hook
+pixi run -e boltz-dev prek install --hook-type commit-msg   # commit-message check
+pixi run -e boltz-dev prek run -a                           # all hooks, all files
 ```
 
-**Environments**: `default`, `boltz[-dev]`, `boltz-analysis`, `protenix[-dev]`, `rf3[-dev]`, `analysis[-dev]`
+## Commits, PRs, and Releases
 
-Model wrappers for Boltz, Protenix, and RF3 have mutually incompatible dependencies — each lives in its own pixi environment. Use the appropriate `-dev` environment for testing.
+Releases are automated by [python-semantic-release](https://python-semantic-release.readthedocs.io/) on merge to `main`; never bump versions or edit `CHANGELOG.md` by hand. Commits must follow [Conventional Commits](https://www.conventionalcommits.org/). PRs are squash-merged, so the **PR title** becomes the commit on `main` and decides the version bump. Keep each PR to one logical change.
 
-**Test tasks** (defined in `pyproject.toml` under `[tool.pixi.tasks]`):
+| Type                                               | Version bump |
+| -------------------------------------------------- | ------------ |
+| `feat`                                             | Minor        |
+| `fix`, `perf`                                      | Patch        |
+| `docs`, `refactor`, `test`, `chore`, `ci`, `style` | None         |
 
-| Task | Command | Description |
-|------|---------|-------------|
-| `tests` | `pixi run -e <env>-dev tests` | Fast tests only (`-m 'not slow and not gpu'`), single env |
-| `all-tests` | `pixi run -e <env>-dev all-tests` | All tests including slow (GPU/weights), single env |
-| `test-fast` | `pixi run test-fast` | Fast tests across all three model dev envs |
-| `test-all` | `pixi run test-all` | All tests across all three model dev envs |
-
-The `tests` and `all-tests` tasks accept a `flags` argument for forwarding pytest options:
-
-```bash
-pixi run -e boltz-dev tests -- -k integration   # Run only integration tests
-pixi run -e rf3-dev tests -- -x                 # Stop on first failure
-```
-
-The `@pytest.mark.slow` marker gates tests that require a GPU or model checkpoint files. Fast test runs (`tests` / `test-fast`) skip these automatically, along with `@pytest.mark.gpu` tests, which need CUDA (on CPU they crash or exhaust memory). Run those with `pixi run -e <env>-dev gpu-tests` on a GPU machine.
-
-**Pre-commit hooks**: ruff (lint/format), ty (type checking, per-environment), toml-sort. Hooks block commits on failure. We use [prek](https://github.com/j178/prek) (a Rust-reimplementation of pre-commit) as the hook runner.
-
-```bash
-pixi run -e boltz-dev prek install      # Install prek as a git hook
-pixi run -e boltz-dev prek run -a       # Run all hooks on all files
-```
-
-Note: `ty` type checking is split per environment — Boltz files are checked in `boltz-dev`, Protenix files in `protenix-dev`, RF3 files in `rf3-dev`. See `.pre-commit-config.yaml` for the file routing rules.
-
-## Release Process
-
-Releases are fully automated via [python-semantic-release](https://python-semantic-release.readthedocs.io/) (PSR v10). No manual version bumps or changelog edits are needed.
-
-### Conventional Commits (Required)
-
-All commit messages **must** follow the [Conventional Commits](https://www.conventionalcommits.org/) format:
-
-```
-<type>(<optional scope>): <summary>
-
-[optional body]
-
-[optional footer(s)]
-```
-
-**Types and their effect on versioning:**
-
-| Type | Description | Version bump |
-|------|-------------|-------------|
-| `feat` | New feature | Minor (0.x.0) |
-| `fix` | Bug fix | Patch (0.x.x) |
-| `docs` | Documentation only | None |
-| `refactor` | Code change (no new feature or fix) | None |
-| `test` | Adding/updating tests | None |
-| `chore` | Maintenance (CI, deps, tooling) | None |
-| `perf` | Performance improvement | Patch (0.x.x) |
-
-**Breaking changes** (append `!` after type, e.g. `feat!:`) bump the minor version while we're in 0.x (`major_on_zero = false`).
-
-**Examples:**
-```bash
-feat(losses): add cryo-EM image stack loss function
-fix(boltz): correct atom reconciler index mapping for OXT atoms
-docs: update AGENTS.md with new model wrapper example
-refactor(scalers)!: rename StepScaler to StepGuide
-chore(ci): pin Docker build action to v5
-```
-
-A **commitizen** pre-commit hook validates commit messages locally. Install it with:
-```bash
-pixi run -e boltz-dev prek install --hook-type commit-msg
-```
-
-### How Releases Work
-
-1. Push/merge to `main` with `feat:` or `fix:` commits
-2. The **Release** workflow runs PSR, which:
-   - Analyzes commits since the last tag
-   - Determines the version bump (or skips if no releasable commits)
-   - Updates `version` in `pyproject.toml`
-   - Updates `CHANGELOG.md`
-   - Creates a version commit and `v{version}` tag
-   - Pushes the commit and tag
-3. The **Docker** workflow triggers on the new `v*.*.*` tag and builds images tagged with the version
-
-### What Does NOT Trigger a Release
-
-Commits with types `docs`, `refactor`, `test`, `chore`, `ci`, or `style` do not bump the version. They will appear in the next changelog under their respective sections when a releasable commit is included.
-
-### Version Strategy
-
-We use `major_on_zero = false`, meaning breaking changes bump minor (not major) while the version is 0.x. This will change when we decide to release 1.0.
-
-### Merge Strategy
-
-Use **squash merge** for all PRs. This collapses a PR's commits into a single commit on `main`, with the PR title as the commit message. The PR title **must** follow Conventional Commits format and controls the version bump:
-
-- `feat(losses): add cryo-EM image stack loss` → minor bump
-- `fix(boltz): correct OXT atom mapping` → patch bump
-- `docs: update installation guide` → no release
-
-This keeps the changelog clean (one entry per PR), the version history predictable (one potential bump per PR), and requires no discipline around individual commit messages during development. PRs should be focused on a single logical change — avoid PRs that bundle unrelated features and fixes.
+Breaking changes (`feat!:`, `refactor(scalers)!:`) bump the minor version while we're on 0.x (`major_on_zero = false`).
 
 ## Testing Philosophy
 
@@ -376,122 +221,23 @@ def test_boltz_full_inference(boltz_wrapper, features): ...
 
 ## Implementation Patterns
 
-### Immutable State
-
-Frozen dataclasses with functional updates:
-
-```python
-@dataclass(frozen=True)
-class State:
-    value: Tensor
-
-    def with_value(self, new_value: Tensor) -> "State":
-        return State(new_value)
-```
-
-### Caching
-
-- **Conditioning**: Compute once, flow through trajectory
-- **Features**: Cache `featurize()` output when structure unchanged
-- **Pairformer**: Cache encoder output across denoising steps (Boltz/Protenix/RF3)
-
-### Gradient Control
-
-- **Detach cached representations** when gradients are enabled to avoid double-backward errors.
-
-### Type Annotations
-
-Use jaxtyping for array shapes:
-
-```python
-from jaxtyping import Float
-from torch import Tensor
-
-
-def process(coords: Float[Tensor, "batch atoms 3"]) -> Float[Tensor, "batch atoms 3"]: ...
-```
+- **Immutable state**: frozen dataclasses with `with_*` functional updates (see `StepParams`).
+- **Caching**: compute conditioning and `featurize()` output once per structure; cache pairformer output across denoising steps. Any cache derived from a representation that a later step changes (e.g., diffusion conditioning built from `s`/`z`) must be invalidated or disabled for that representation, or the change silently has no effect. Inference-time latent optimization (IT-opt, `core/scalers/latent_optimization.py`) is a targeted break of this pattern: it overwrites the cached `s`/`z` each step and needs Boltz2's diffusion conditioning recomputed and Protenix's diffusion cache disabled for `z`.
+- **Gradients**: detach cached representations and other tensors that do not need gradients when gradients are enabled, to avoid double-backward errors. Methods that optimize a cached representation are a targeted exception: the optimized leaf must stay attached to the denoiser graph (Protenix keeps it attached via `detach_unless_leaf`), so detach everything else at the boundary rather than the leaf itself.
+- **Shapes**: annotate array shapes with jaxtyping, e.g. `Float[Tensor, "batch atoms 3"]`.
 
 ## Adding New Components
 
-1. **Model wrapper**: Implement the appropriate `ModelWrapper` protocol in `models/`
-2. **Loss function**: Implement `LossFunctionProtocol` in `core/losses/`
-3. **Scaler**: Implement `StepScalerProtocol` or `TrajectoryScalerProtocol` in `core/scalers/`
-4. **Sampler**: Implement `Sampler` or `TrajectorySampler` protocol in `core/samplers/`
-5. **Forward model**: Implement differentiable physics in `core/forward_models/`
-
-All use structural typing — no inheritance needed. Just satisfy the protocol interface.
-
-### Example: Adding a New Model Wrapper
-
-A `FlowModelWrapper` needs three methods: `featurize()`, `step()`, and `initialize_from_prior()`. The minimal skeleton:
-
-```python
-# models/my_model/wrapper.py
-
-
-class MyModelWrapper:
-    """Wrapper for MyModel generative model."""
-
-    def __init__(self, checkpoint_path: str, device: torch.device):
-        self.device = device
-        self.model = load_my_model(checkpoint_path).to(device)
-
-    def featurize(self, structure: dict) -> GenerativeModelInput:
-        """Convert atomworks structure dict to model-specific features."""
-        atom_array = structure["asym_unit"]
-        # ... model-specific featurization ...
-        conditioning = my_model_features(atom_array)
-        return GenerativeModelInput(conditioning=conditioning)
-
-    def step(
-        self,
-        x_t: Tensor,
-        t: Float[Array, "*batch"],
-        *,
-        features: GenerativeModelInput | None = None,
-    ) -> Tensor:
-        """Denoise x_t at timestep t → predicted clean structure x̂_θ."""
-        return self.model(x_t, t, features.conditioning)
-
-    def initialize_from_prior(
-        self,
-        batch_size: int,
-        features: GenerativeModelInput | None = None,
-        *,
-        shape: tuple[int, ...] | None = None,
-    ) -> Tensor:
-        """Sample from the prior (typically Gaussian noise)."""
-        n_atoms = features.conditioning.num_atoms if features else shape[-2]
-        return torch.randn(batch_size, n_atoms, 3, device=self.device)
-```
-
-See `models/boltz/wrapper.py` for a production reference with pairformer caching, MSA management, and atom reconciliation.
+Satisfy the matching protocol (see Key Protocols) in `models/`, `core/losses/`, `core/scalers/`, or `core/samplers/`; differentiable physics goes in `core/forward_models/`. Start from the reference implementations above. New loss types also need registering; see "Adding a loss type".
 
 ## Common Pitfalls
 
-### Alignment and SE(3) Invariance
+### Alignment and Atom-Count Mismatches
 
-Most loss functions (e.g., real-space density fit) are **not** SE(3)-invariant — they compare coordinates in a fixed reference frame (the crystallographic or cryo-EM map frame). But generative models produce structures in an arbitrary frame. This means:
+Most losses (e.g., real-space density) are **not** SE(3)-invariant: they compare coordinates in the experimental map frame, while models generate in an arbitrary frame and often with different atoms than the input structure (missing hydrogens, extra OXT, different residue coverage). `AtomReconciler` (`utils/atom_reconciler.py`) handles both: `from_arrays()` builds bidirectional index maps over the common atom subset, and `align()` does a differentiable rigid alignment on it.
 
-- **Structures must be aligned** to the experimental reference frame before computing losses. The `AtomReconciler` (`utils/atom_reconciler.py`) handles this, computing rigid alignment on the common atom subset between model and structure representations.
-- **Atom count mismatches** are common. A model's internal representation may have different atoms than the input structure (e.g., missing hydrogens, extra OXT atoms, different residue coverage). `AtomReconciler.from_arrays()` detects this and provides bidirectional index mappings.
-- **Alignment must be differentiable** when using gradient-based guidance. `AtomReconciler.align()` uses `weighted_rigid_align_differentiable()` from `utils/frame_transforms.py` to preserve gradients through the alignment step.
-- **The sampler handles alignment timing**. `AF3EDMSampler` uses the `alignment_reference` field in `StepParams` and the reconciler to align at each step. Don't add alignment logic inside loss functions or scalers.
-
-When writing new loss functions, assume coordinates arrive pre-aligned. When writing new samplers or trajectory scalers, ensure alignment happens before the loss is evaluated.
-
-### Atom Count Mismatches Between Model and Structure
-
-Different models may represent the same protein with different atom counts. The `AtomReconciler` bridges this gap:
-
-```python
-reconciler = AtomReconciler.from_arrays(model_atom_array, structure_atom_array)
-if reconciler.has_mismatch:
-    # reconciler.model_indices and reconciler.struct_indices map between spaces
-    aligned_coords, transform = reconciler.align(model_coords, reference_coords)
-```
-
-Build loss inputs from the model atom array (not the input structure) when a mismatch exists. See `utils/structure_utils.py::SampleworksProcessedStructure.to_loss_inputs()` for the canonical pattern. Two-phase losses (`PreparableLossFunctionProtocol`) are prepared with those same `LossInputs`, never with an atom array; `LossInputs.to_atom_array()` rebuilds a reference `AtomArray` (model topology, reconciled coordinates and B-factors) for forward models that need one. Do not write reconciled values back into the model atom array.
+- **The sampler owns alignment.** `AF3EDMSampler` aligns at each step using `StepParams.alignment_reference` and the reconciler. Losses assume pre-aligned coordinates; don't align inside losses or scalers. New samplers or trajectory scalers must align before the loss is evaluated.
+- **Build `LossInputs` from the model atom array**, not the input structure (`SampleworksProcessedStructure.to_loss_inputs()` in `utils/structure_utils.py`). `PreparableLossFunctionProtocol` losses are prepared with those same `LossInputs`, never an atom array; `LossInputs.to_atom_array()` rebuilds a reference `AtomArray` (model topology, reconciled coordinates and B-factors) for forward models that need one. Don't write reconciled values back into the model atom array.
 
 ## Avoiding Technical Debt
 
@@ -514,29 +260,13 @@ Proteins exist as thermodynamic ensembles, not static structures. Current genera
 ### Experimental Data Types
 
 Currently planned:
-- Real-space electron density (X-ray crystallography) *implemented*
-- Cryo-EM density *implemented*
-- Structure factors (reciprocal space) *implemented*
+
+- Real-space electron density (X-ray crystallography) _implemented_
+- Cryo-EM density _implemented_
+- Structure factors (reciprocal space) _implemented_
 - Diffuse scattering
 - Cryo-EM image stacks
 
 ### Symmetry
 
 Crystallographic symmetry is handled natively in forward models. Most ML models operate in P1 (asymmetric unit), but experimental maps are in the full crystal frame. The forward models bridge this gap.
-
-## Key Files
-
-- **`models/protocol.py`**: ModelWrapper protocol definitions
-- **`core/scalers/protocol.py`**: StepScalerProtocol, TrajectoryScalerProtocol
-- **`core/samplers/protocol.py`**: Sampler, TrajectorySampler, StepParams
-- **`core/losses/protocol.py`**: LossFunctionProtocol, PrecomputableLossFunctionProtocol, LossInputs
-- **`core/losses/real_space_density.py`**: Reference loss implementation
-- **`core/forward_models/xray/real_space_density.py`**: Differentiable density calculation
-- **`core/scalers/step_scalers.py`**: DataSpaceDPSScaler, NoiseSpaceDPSScaler implementations
-- **`core/scalers/pure_guidance.py`**: PureGuidance trajectory scaler (reference TrajectoryScalerProtocol impl)
-- **`core/scalers/fk_steering.py`**: Feynman-Kaç steering trajectory scaler
-- **`models/boltz/wrapper.py`**: Reference model wrapper implementation
-- **`utils/guidance_script_utils.py`**: Central orchestrator — `run_guidance()` wires all components together
-- **`utils/atom_reconciler.py`**: Handles atom count mismatches and differentiable alignment
-- **`scripts/`**: Entry-point scripts for running guidance pipelines
-- **`pyproject.toml`**: Package metadata, dependencies, tool config
