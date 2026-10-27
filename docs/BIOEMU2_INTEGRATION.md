@@ -78,6 +78,18 @@ bookkeeping, batching and gradient flow are tested on CPU without the checkpoint
 protocol and integration tests pick up the `bioemu2` registry entry and run with the real
 checkpoint on a GPU.
 
+## Validation (2026-10-27, one H200, `bioemu2-preview`)
+
+- The `bioemu2` tests in `tests/models`, `test_model_wrapper_protocol.py` and `tests/integration`
+  pass with the real checkpoint (98 tests).
+- Unguided 1VME, 200 steps, ensemble of 8: BioEmu2's own `EDMSampler` gives 8/8 physical samples,
+  median CA-RMSD to the input 2.24 Å; the same embeddings through `AF3EDMSampler` give 8/8
+  physical, median 2.73 Å.
+- Pure guidance on the 1VME density with `--gradient-normalization --step-size 0.1`: final loss
+  0.0147 against 0.0483 unguided, median CA-RMSD 1.80 Å, but 0/8 samples pass BioEmu2's
+  high-quality physicality check (all `bad_bonds_backbone`). Without gradient normalization,
+  step size 0.1 does not move the loss. Guidance strength needs tuning in the occupancy sweep.
+
 ## Not done yet
 
 - Bake the checkpoint into the checkpoints image used by `Dockerfile` (`CHECKPOINTS_IMAGE`).
