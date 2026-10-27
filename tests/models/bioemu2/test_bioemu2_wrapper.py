@@ -17,6 +17,7 @@ from sampleworks.models.bioemu2.wrapper import (
     BioEmu2Conditioning,
     BioEmu2Config,
     BioEmu2Wrapper,
+    ligand_residues,
     resolve_msa,
     system_from_structure,
 )
@@ -72,6 +73,25 @@ class TestSystemFromStructure:
         }
         assert ligand_ids == ligand_chains
         assert set(without_ligands.chain_ids) == set(chain_info) - ligand_chains
+
+    def test_multi_residue_ligand_chain_is_split(self, structure_2yl0: dict):
+        """PDB files often put several hetero groups in one chain."""
+        ligand_chains = {
+            chain_id: list(info["res_name"])
+            for chain_id, info in structure_2yl0["chain_info"].items()
+            if info["chain_type"] == ChainType.NON_POLYMER and len(info["res_name"]) > 1
+        }
+        assert ligand_chains, "2YL0_single_001.pdb should have a multi-residue ligand chain"
+
+        residues = ligand_residues(structure_2yl0)
+        ligands = [
+            e for e in system_from_structure(structure_2yl0).entities if isinstance(e, Ligand)
+        ]
+        assert len(ligands) == len(residues)
+        for chain_id, res_names in ligand_chains.items():
+            split = [ccd for input_chain, _, ccd in residues.values() if input_chain == chain_id]
+            assert split == res_names
+        assert all(len(asym_id) <= 4 for asym_id in residues)
 
     def test_sequence_override_carries_through(
         self, structure_5i09_density: dict, seq_5i09_deposited: str

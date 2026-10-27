@@ -28,7 +28,10 @@ so latent optimization can work on it.
 
 - Polymer chains use `processed_entity_canonical_sequence`, so sequence overrides carry through
   and modified residues (MSE, PCA) become their canonical parents.
-- Non-polymer chains become CCD ligands (`--bioemu2-exclude-ligands` drops them). Waters are dropped.
+- Every non-polymer residue becomes a CCD ligand (`--bioemu2-exclude-ligands` drops them). A chain
+  holding several hetero groups is split into one ligand per residue and mapped back to the input
+  chain and residue number. Residues BioEmu2 cannot build (not in the CCD) are skipped with a
+  warning. Waters are dropped.
 - BioEmu2 models heavy atoms and no terminal OXT. On the test structures, every input atom
   reconciles except OXT and atoms of modified residues.
 - `model_atom_array` takes residue numbers from `chain_info["res_id"]` when it covers the
