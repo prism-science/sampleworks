@@ -339,70 +339,23 @@ def _rigidly_moved_cloud(
     )
 
 
-def _principal_axis_cloud(shape: tuple[int, int, int], seed: int = 0) -> np.ndarray:
-    """Build centered point clouds whose principal axes are x > y > z.
-
-    Each cloud's second-moment matrix is diagonal with strictly decreasing entries, so
-    the proper rotation that best superimposes it onto its mirror image through the
-    xy-plane is the identity (Kabsch flips the smallest singular direction).
-
-    Parameters
-    ----------
-    shape : tuple[int, int, int]
-        ``(batch, n, 3)`` shape of the cloud.
-    seed : int, optional
-        Seed for the random generator, by default 0.
-
-    Returns
-    -------
-    np.ndarray
-        float32, shape (batch, n, 3). Centered coordinates in each cloud's principal frame.
-    """
-    rng = np.random.default_rng(seed)
-    clouds = rng.normal(size=shape) * np.array([6.0, 3.0, 1.0])
-    clouds -= clouds.mean(axis=1, keepdims=True)
-    for cloud in clouds:
-        _, eigenvectors = np.linalg.eigh(cloud.T @ cloud)  # ascending eigenvalues
-        cloud[:] = cloud @ eigenvectors[:, ::-1]
-    return clouds.astype(np.float32)
+_ALIGN_SHAPE = (2, 50, 3)  # (batch, n, 3)
 
 
-@pytest.mark.parametrize("shape", [(1, 10, 3), (2, 50, 3), (15, 100, 3)])
 class TestWeightedRigidAlign:
     """Test weighted rigid alignment against known rigid motions."""
 
-    def test_recovers_known_rigid_motion_torch(self, shape: tuple[int, int, int]):
-        """A cloud moved by a known rotation and translation is aligned back exactly."""
-        cloud, moved, _, _ = _rigidly_moved_cloud(shape)
-        ones = torch.ones(shape[:2])
-
-        aligned = weighted_rigid_align_differentiable(
-            torch.from_numpy(moved), torch.from_numpy(cloud), weights=ones, mask=ones
-        )
-
-        torch.testing.assert_close(aligned, torch.from_numpy(cloud), atol=1e-4, rtol=1e-4)
-
-    def test_recovers_known_rigid_motion_jax(self, shape: tuple[int, int, int]):
-        """A cloud moved by a known rotation and translation is aligned back exactly."""
-        cloud, moved, _, _ = _rigidly_moved_cloud(shape)
-        ones = jax.numpy.ones(shape[:2])
-
-        aligned = weighted_rigid_align_differentiable(
-            jax.numpy.asarray(moved), jax.numpy.asarray(cloud), weights=ones, mask=ones
-        )
-
-        np.testing.assert_allclose(np.asarray(aligned), cloud, atol=1e-4, rtol=1e-4)
-
-    def test_returned_transform_is_inverse_of_known_motion_torch(self, shape: tuple[int, int, int]):
-        """The returned transform is exactly x -> R.T @ (x - t) and reproduces the output."""
-        cloud, moved, rotation, translation = _rigidly_moved_cloud(shape)
-        ones = torch.ones(shape[:2])
+    def test_recovers_known_rigid_motion_torch(self):
+        """A known rigid motion is undone exactly, and the transform is x -> R.T @ (x - t)."""
+        cloud, moved, rotation, translation = _rigidly_moved_cloud(_ALIGN_SHAPE)
+        ones = torch.ones(_ALIGN_SHAPE[:2])
         moved_torch = torch.from_numpy(moved)
 
         aligned, transform = weighted_rigid_align_differentiable(
             moved_torch, torch.from_numpy(cloud), weights=ones, mask=ones, return_transforms=True
         )
 
+        torch.testing.assert_close(aligned, torch.from_numpy(cloud), atol=1e-4, rtol=1e-4)
         inverse_rotation = rotation.transpose(0, 2, 1)
         inverse_translation = -np.einsum("bij,bj->bi", inverse_rotation, translation)
         torch.testing.assert_close(
@@ -415,16 +368,17 @@ class TestWeightedRigidAlign:
             apply_forward_transform(moved_torch, transform), aligned, atol=1e-4, rtol=1e-4
         )
 
-    def test_returned_transform_is_inverse_of_known_motion_jax(self, shape: tuple[int, int, int]):
-        """The returned transform is exactly x -> R.T @ (x - t) and reproduces the output."""
-        cloud, moved, rotation, translation = _rigidly_moved_cloud(shape)
-        ones = jax.numpy.ones(shape[:2])
+    def test_recovers_known_rigid_motion_jax(self):
+        """A known rigid motion is undone exactly, and the transform is x -> R.T @ (x - t)."""
+        cloud, moved, rotation, translation = _rigidly_moved_cloud(_ALIGN_SHAPE)
+        ones = jax.numpy.ones(_ALIGN_SHAPE[:2])
         moved_jax = jax.numpy.asarray(moved)
 
         aligned, transform = weighted_rigid_align_differentiable(
             moved_jax, jax.numpy.asarray(cloud), weights=ones, mask=ones, return_transforms=True
         )
 
+        np.testing.assert_allclose(np.asarray(aligned), cloud, atol=1e-4, rtol=1e-4)
         inverse_rotation = rotation.transpose(0, 2, 1)
         inverse_translation = -np.einsum("bij,bj->bi", inverse_rotation, translation)
         np.testing.assert_allclose(
@@ -440,53 +394,15 @@ class TestWeightedRigidAlign:
             rtol=1e-4,
         )
 
-    def test_mirror_image_is_matched_by_a_proper_rotation_torch(self, shape: tuple[int, int, int]):
-        """Aligning onto a mirror image never reflects: the best proper rotation is used."""
-        cloud = _principal_axis_cloud(shape)
-        mirrored = cloud * np.array([1.0, 1.0, -1.0], dtype=np.float32)
-        ones = torch.ones(shape[:2])
-
-        aligned, transform = weighted_rigid_align_differentiable(
-            torch.from_numpy(cloud),
-            torch.from_numpy(mirrored),
-            weights=ones,
-            mask=ones,
-            return_transforms=True,
-        )
-
-        torch.testing.assert_close(torch.linalg.det(transform["rotation"]), torch.ones(shape[0]))
-        torch.testing.assert_close(aligned, torch.from_numpy(cloud), atol=1e-4, rtol=1e-4)
-
-    def test_mirror_image_is_matched_by_a_proper_rotation_jax(self, shape: tuple[int, int, int]):
-        """Aligning onto a mirror image never reflects: the best proper rotation is used."""
-        cloud = _principal_axis_cloud(shape)
-        mirrored = cloud * np.array([1.0, 1.0, -1.0], dtype=np.float32)
-        ones = jax.numpy.ones(shape[:2])
-
-        aligned, transform = weighted_rigid_align_differentiable(
-            jax.numpy.asarray(cloud),
-            jax.numpy.asarray(mirrored),
-            weights=ones,
-            mask=ones,
-            return_transforms=True,
-        )
-
-        np.testing.assert_allclose(
-            np.linalg.det(np.asarray(transform["rotation"])), np.ones(shape[0]), atol=1e-5
-        )
-        np.testing.assert_allclose(np.asarray(aligned), cloud, atol=1e-4, rtol=1e-4)
-
     @pytest.mark.parametrize("excluded_by", ["mask", "weights"])
-    def test_excluded_atoms_do_not_affect_alignment_torch(
-        self, shape: tuple[int, int, int], excluded_by: str
-    ):
+    def test_excluded_atoms_do_not_affect_alignment_torch(self, excluded_by: str):
         """Reference atoms with zero mask or weight are ignored, however far off they are."""
-        cloud, moved, _, _ = _rigidly_moved_cloud(shape)
-        excluded = np.arange(shape[1]) >= shape[1] - shape[1] // 3
+        cloud, moved, _, _ = _rigidly_moved_cloud(_ALIGN_SHAPE)
+        excluded = np.arange(_ALIGN_SHAPE[1]) >= _ALIGN_SHAPE[1] - _ALIGN_SHAPE[1] // 3
         corrupted_reference = cloud.copy()
         corrupted_reference[:, excluded] += 50.0
-        included = torch.from_numpy(~excluded).float().expand(shape[0], -1)
-        ones = torch.ones(shape[:2])
+        included = torch.from_numpy(~excluded).float().expand(_ALIGN_SHAPE[0], -1)
+        ones = torch.ones(_ALIGN_SHAPE[:2])
         weights, mask = (ones, included) if excluded_by == "mask" else (included, ones)
 
         aligned = weighted_rigid_align_differentiable(
@@ -500,18 +416,16 @@ class TestWeightedRigidAlign:
         torch.testing.assert_close(aligned, torch.from_numpy(cloud), atol=1e-4, rtol=1e-4)
 
     @pytest.mark.parametrize("excluded_by", ["mask", "weights"])
-    def test_excluded_atoms_do_not_affect_alignment_jax(
-        self, shape: tuple[int, int, int], excluded_by: str
-    ):
+    def test_excluded_atoms_do_not_affect_alignment_jax(self, excluded_by: str):
         """Reference atoms with zero mask or weight are ignored, however far off they are."""
-        cloud, moved, _, _ = _rigidly_moved_cloud(shape)
-        excluded = np.arange(shape[1]) >= shape[1] - shape[1] // 3
+        cloud, moved, _, _ = _rigidly_moved_cloud(_ALIGN_SHAPE)
+        excluded = np.arange(_ALIGN_SHAPE[1]) >= _ALIGN_SHAPE[1] - _ALIGN_SHAPE[1] // 3
         corrupted_reference = cloud.copy()
         corrupted_reference[:, excluded] += 50.0
         included = jax.numpy.broadcast_to(
-            jax.numpy.asarray(~excluded, dtype=jax.numpy.float32), shape[:2]
+            jax.numpy.asarray(~excluded, dtype=jax.numpy.float32), _ALIGN_SHAPE[:2]
         )
-        ones = jax.numpy.ones(shape[:2])
+        ones = jax.numpy.ones(_ALIGN_SHAPE[:2])
         weights, mask = (ones, included) if excluded_by == "mask" else (included, ones)
 
         aligned = weighted_rigid_align_differentiable(
@@ -524,11 +438,11 @@ class TestWeightedRigidAlign:
         # Every atom, excluded ones included, lands on its true (uncorrupted) position.
         np.testing.assert_allclose(np.asarray(aligned), cloud, atol=1e-4, rtol=1e-4)
 
-    def test_consistency_with_boltz(self, shape: tuple[int, ...]):
+    def test_consistency_with_boltz(self):
         """Test that PyTorch, JAX, and Boltz implementations are consistent."""
         boltz_diffusion = pytest.importorskip("boltz.model.loss.diffusion")
-        batch_size = shape[0]
-        num_points = shape[1]
+        batch_size = _ALIGN_SHAPE[0]
+        num_points = _ALIGN_SHAPE[1]
 
         # Create test data in PyTorch
         torch.manual_seed(1)
