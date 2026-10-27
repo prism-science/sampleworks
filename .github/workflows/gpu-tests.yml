@@ -33,7 +33,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        environment: [boltz-dev, protenix-dev, rf3-dev]
+        # `models` lists the checkpoints each env's tests require so that
+        # "Check model checkpoints" can resolve them
+        include:
+          - environment: boltz-dev
+            models: boltz1 boltz2
+          - environment: protenix-dev
+            models: protenix
+          - environment: rf3-dev
+            models: rf3
 
     name: ${{ matrix.environment }}
 
@@ -55,8 +63,22 @@ jobs:
           pixi-version: v0.82.1
           cache: false  # NFS-backed cache on self-hosted runner handles this
 
+      # Fail fast instead of letting every wrapper-backed test skip on a missing checkpoint.
+      - name: Check model checkpoints
+        run: >-
+          pixi run -e ${{ matrix.environment }} python -c
+          "import sys; from sampleworks.utils.guidance_script_arguments import _resolve_checkpoint;
+          [print(m, _resolve_checkpoint(m)) for m in sys.argv[1:]]"
+          ${{ matrix.models }}
+
       - name: Build CUDA extensions
         run: pixi run -e ${{ matrix.environment }} python3 -c "from sampleworks.core.forward_models.xray.real_space_density_deps.ops.csrc import dilate_points_cuda"
 
       - name: Run tests
         run: pixi run -e ${{ matrix.environment }} gpu-tests
+
+      # TORCH_EXTENSIONS_DIR persists across jobs; a killed build leaves a lock that hangs the
+      # next one. Runner pods are single-tenant per job, so no live build can hold it here.
+      - name: Clear torch extension locks
+        if: always()
+        run: rm -f "${TORCH_EXTENSIONS_DIR:?}"/*/lock
