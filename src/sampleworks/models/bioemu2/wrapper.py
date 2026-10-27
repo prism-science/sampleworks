@@ -6,6 +6,7 @@ trajectory writers are not used. Importing ``bioemu2`` patches mdtraj process-wi
 so keep that import confined to this module.
 """
 
+import itertools as it
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,7 @@ from bioemu2.structure.preparation import prepare_sampling_inputs
 from biotite.structure import AtomArray, AtomArrayStack
 from jaxtyping import Float
 from loguru import logger
+from pydantic import ValidationError
 from torch import Tensor
 
 from sampleworks.models.protocol import GenerativeModelInput
@@ -164,13 +166,54 @@ def annotate_structure_for_bioemu2(
     return {**structure, "_bioemu2_config": config}
 
 
+def ligand_residues(structure: dict) -> dict[str, tuple[str, int, str]]:
+    """Assign a BioEmu2 ``asym_id`` to every ligand residue in ``chain_info``.
+
+    BioEmu2 ligands are single CCD components, but PDB files often put several
+    hetero groups in one chain. A one-residue chain keeps its chain ID; each residue
+    of a longer chain gets ``<chain_id><n>`` (or ``L<n>``, if that is taken or longer
+    than BioEmu2's four-character limit).
+
+    Parameters
+    ----------
+    structure : dict
+        Atomworks structure dictionary with a ``chain_info`` mapping.
+
+    Returns
+    -------
+    dict[str, tuple[str, int, str]]
+        ``asym_id -> (input chain_id, res_id, CCD code)``, in ``chain_info`` order.
+    """
+    chain_info = structure["chain_info"]
+    taken = set(chain_info)
+    assigned: dict[str, tuple[str, int, str]] = {}
+    for chain_id, info in chain_info.items():
+        if info["chain_type"] != ChainType.NON_POLYMER:
+            continue
+        res_names = [str(name) for name in info.get("res_name", [])]
+        res_ids = [int(r) for r in info.get("res_id", [])] or list(range(1, len(res_names) + 1))
+        if len(res_names) == 1:
+            assigned[chain_id] = (chain_id, res_ids[0], res_names[0])
+            continue
+        for res_id, res_name in zip(res_ids, res_names):
+            candidates = it.chain(
+                (f"{chain_id}{n}" for n in range(1, 1_000)), (f"L{n}" for n in range(1, 1_000))
+            )
+            asym_id = next(c for c in candidates if len(c) <= 4 and c not in taken)
+            taken.add(asym_id)
+            assigned[asym_id] = (chain_id, res_id, res_name)
+    return assigned
+
+
 def system_from_structure(structure: dict, *, include_ligands: bool = True) -> System:
     """Build a BioEmu2 ``System`` from an Atomworks structure's ``chain_info``.
 
     Polymer chains use ``processed_entity_canonical_sequence``, so a sequence override
     applied with ``apply_sequence_override`` carries through and modified residues
-    (e.g. MSE) become their canonical parents. Non-polymer chains become CCD ligands;
-    waters are dropped.
+    (e.g. MSE) become their canonical parents. Every non-polymer residue becomes a CCD
+    ligand (see :func:`ligand_residues` for its ``asym_id``); ligands BioEmu2 cannot
+    build, such as residues missing from the CCD, are skipped with a warning. Waters
+    are dropped.
 
     Parameters
     ----------
@@ -182,13 +225,12 @@ def system_from_structure(structure: dict, *, include_ligands: bool = True) -> S
     Returns
     -------
     System
-        BioEmu2 system whose ``asym_ids`` are the input chain IDs.
+        BioEmu2 system whose polymer ``asym_ids`` are the input chain IDs.
 
     Raises
     ------
     ValueError
-        If ``chain_info`` is missing, a chain type is unsupported, or a ligand chain
-        holds more than one residue.
+        If ``chain_info`` is missing or a chain type is unsupported.
     """
     chain_info = structure.get("chain_info")
     if not chain_info:
@@ -200,20 +242,19 @@ def system_from_structure(structure: dict, *, include_ligands: bool = True) -> S
         if chain_type in _POLYMER_ENTITIES:
             sequence = info["processed_entity_canonical_sequence"]
             entities.append(_POLYMER_ENTITIES[chain_type](sequence=sequence, asym_ids=[chain_id]))
-        elif chain_type == ChainType.WATER:
-            continue
-        elif chain_type == ChainType.NON_POLYMER:
-            if not include_ligands:
-                continue
-            res_names = list(info.get("res_name", []))
-            if len(res_names) != 1:
-                raise ValueError(
-                    f"Ligand chain {chain_id} has residues {res_names}; BioEmu2 ligands "
-                    "must be a single CCD component"
-                )
-            entities.append(Ligand(ccd_code=res_names[0], asym_ids=[chain_id]))
-        else:
+        elif chain_type not in (ChainType.WATER, ChainType.NON_POLYMER):
             raise ValueError(f"BioEmu2 does not support chain {chain_id} of type {chain_type!r}")
+
+    if include_ligands:
+        for asym_id, (chain_id, res_id, ccd_code) in ligand_residues(structure).items():
+            try:
+                entities.append(Ligand(ccd_code=ccd_code, asym_ids=[asym_id]))
+            except ValidationError as error:
+                # e.g. atomworks' "~"-prefixed names for residues missing from the CCD.
+                logger.warning(
+                    f"Skipping ligand {ccd_code} (chain {chain_id}, residue {res_id}): "
+                    f"BioEmu2 rejected it: {error.errors()[0]['msg']}"
+                )
 
     if not entities:
         raise ValueError("Structure has no chains BioEmu2 can model")
@@ -223,9 +264,10 @@ def system_from_structure(structure: dict, *, include_ligands: bool = True) -> S
 def model_atom_array_from_topology(topology: mdtraj.Topology, structure: dict) -> AtomArray:
     """Build the AtomArray of atoms BioEmu2 operates on, in model order.
 
-    Residues are renumbered from the structure's ``chain_info`` residue IDs when they
-    cover the chain's sequence, otherwise from 1. The atom reconciler normalizes
-    numbering, so this matters for output files rather than for matching.
+    Polymer residues are renumbered from the structure's ``chain_info`` residue IDs
+    when they cover the chain's sequence, otherwise from 1. Ligands go back to their
+    input chain and residue ID, so a chain split by :func:`ligand_residues` reads as
+    the original chain.
 
     Parameters
     ----------
@@ -241,29 +283,32 @@ def model_atom_array_from_topology(topology: mdtraj.Topology, structure: dict) -
         occupancy 1 and B-factor 20.
     """
     chain_info = structure["chain_info"]
+    ligands = ligand_residues(structure)
 
-    res_id_of: dict[int, int] = {}  # topology residue index -> output res_id
+    # topology residue index -> (output chain_id, output res_id)
+    residue_label: dict[int, tuple[str, int]] = {}
     for chain in topology.chains:
         residues = list(chain.residues)
+        if chain.chain_id in ligands:
+            input_chain, res_id, _ = ligands[chain.chain_id]
+            for residue in residues:
+                residue_label[residue.index] = (input_chain, res_id)
+            continue
         listed_ids = [int(r) for r in chain_info[chain.chain_id].get("res_id", [])]
         use_listed = len(listed_ids) == len(residues)
         for position, residue in enumerate(residues):
-            res_id_of[residue.index] = listed_ids[position] if use_listed else position + 1
+            res_id = listed_ids[position] if use_listed else position + 1
+            residue_label[residue.index] = (chain.chain_id, res_id)
 
     atoms = list(topology.atoms)
+    labels = [residue_label[atom.residue.index] for atom in atoms]
     atom_array = AtomArray(len(atoms))
-    atom_array.chain_id = np.array([atom.residue.chain.chain_id for atom in atoms])
-    atom_array.res_id = np.array([res_id_of[atom.residue.index] for atom in atoms], dtype=int)
+    atom_array.chain_id = np.array([chain_id for chain_id, _ in labels])
+    atom_array.res_id = np.array([res_id for _, res_id in labels], dtype=int)
     atom_array.res_name = np.array([atom.residue.name for atom in atoms])
     atom_array.atom_name = np.array([atom.name for atom in atoms])
     atom_array.element = np.array([atom.element.symbol.upper() for atom in atoms])
-    atom_array.hetero = np.array(
-        [
-            chain_info[atom.residue.chain.chain_id]["chain_type"] == ChainType.NON_POLYMER
-            for atom in atoms
-        ],
-        dtype=bool,
-    )
+    atom_array.hetero = np.array([atom.residue.chain.chain_id in ligands for atom in atoms])
     atom_array.coord = np.zeros((len(atoms), 3), dtype=np.float32)
     atom_array.set_annotation("occupancy", np.ones(len(atoms), dtype=np.float32))
     atom_array.set_annotation("b_factor", np.full(len(atoms), _DEFAULT_B_FACTOR, dtype=np.float32))
