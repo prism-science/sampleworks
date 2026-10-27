@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -746,7 +747,6 @@ class TestSamplerStep:
             augmentation=False,
             align_to_input=True,
             alignment_reverse_diffusion=False,
-            scale_guidance_to_diffusion=True,
             device="cpu",
         )
         return AF3EDMSampler(config)
@@ -759,10 +759,11 @@ class TestSamplerStep:
         loss_function=None,
         loss_inputs: LossInputs | None = None,
         t: float = 1.0,
+        step_index: int = 0,
     ) -> StepParams:
         """Build deterministic step context with optional loss payload."""
         context = StepParams(
-            step_index=0,
+            step_index=step_index,
             total_steps=5,
             t=torch.tensor([t]),
             dt=torch.tensor([-0.1]),
@@ -810,7 +811,6 @@ class TestSamplerStep:
             augmentation=False,
             align_to_input=False,
             alignment_reverse_diffusion=False,
-            scale_guidance_to_diffusion=True,
             device="cpu",
         )
         sampler_no_align = AF3EDMSampler(config_no_align)
@@ -839,10 +839,11 @@ class TestSamplerStep:
         r"""A guided step shifts the state down the loss gradient by the DPS step size.
 
         With ``noise_scale=0`` and no augmentation, both runs share :math:`\hat{x}_0`.
-        Their Euler updates differ only by :math:`s\,dt\,w\,g\,\lVert\delta\rVert/t`.
+        Their Euler updates differ only by
+        :math:`s\,dt\,k\,\mathrm{clip}(w\,t\,g, \lVert\delta\rVert)`.
         For ``MockGradientLossFunction``, :math:`L(x)=\tfrac12\lVert x\rVert^2`, so
         :math:`g=\nabla L(\hat{x}_0)=\hat{x}_0`. Choosing :math:`t\ne1` exposes the
-        :math:`1/t` factor.
+        :math:`t` factor, and a step past the first gives a nonzero ramp :math:`k`.
         """
         wrapper = MismatchCaseWrapper(mismatch_case)
         reconciler = AtomReconciler.from_arrays(
@@ -855,12 +856,14 @@ class TestSamplerStep:
         state = torch.randn(1, mismatch_case.n_model, 3)
         loss_inputs = _model_space_loss_inputs(mismatch_case.n_model)
         t = 2.0
+        step_index = 4
         context = self._context_with_reference(
             reconciler,
             reference,
             loss_function=mock_gradient_loss,
             loss_inputs=loss_inputs,
             t=t,
+            step_index=step_index,
         )
         step_size = 0.1
 
@@ -898,9 +901,13 @@ class TestSamplerStep:
             f"guidance must move the state against the loss gradient, got cosine {cosine:.4f}"
         )
 
-        expected_shift = (
-            step_scale * dt * step_size * torch.linalg.norm(diffusion_delta) * loss_gradient / t
+        total_steps = cast(int, context.total_steps)
+        ramp = math.cos(0.5 * math.pi * (total_steps - step_index) / total_steps) ** 2
+        likelihood_term = step_size * t * loss_gradient
+        cap = min(
+            1.0, (torch.linalg.norm(diffusion_delta) / torch.linalg.norm(likelihood_term)).item()
         )
+        expected_shift = step_scale * dt * ramp * cap * likelihood_term
         torch.testing.assert_close(shift, expected_shift, rtol=1e-4, atol=1e-6)
 
     def test_denoised_is_model_space(self, mismatch_case: MismatchCase, sampler: AF3EDMSampler):
