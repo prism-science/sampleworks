@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import cast, TYPE_CHECKING
 
@@ -50,6 +50,28 @@ class EDMSchedule(SamplerSchedule):
             "t_hat": self.t_hat,
             "dt": self.dt,
         }
+
+
+def cosine_guidance_ramp(normalized_time: torch.Tensor) -> torch.Tensor:
+    r"""Cosine guidance ramp :math:`k(\tau) = \cos^2(\pi \tau / 2)` from MLIPDiff.
+
+    Parameters
+    ----------
+    normalized_time
+        0-d tensor :math:`\tau = (N - i) / N` for step :math:`i` of :math:`N`: 1 at the first
+        (noisiest) step, approaching 0 at the last.
+
+    Returns
+    -------
+    torch.Tensor
+        0-d tensor guidance weight in [0, 1]: 0 at pure noise, approaching 1 at the clean end.
+
+    References
+    ----------
+    Liao et al. "MLIPDiff: Guiding Denoising Diffusion Models for Structure-Based Drug Design
+    via Machine-Learned Interatomic Potentials", Sec. 2.2. https://arxiv.org/abs/2610.33315
+    """
+    return torch.cos(0.5 * torch.pi * normalized_time) ** 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,9 +125,11 @@ class EDMSamplerConfig:
         Whether to also align the noisy state to the denoised prediction
         before computing the denoising direction. This is from Boltz-1, and doesn't work
         well during inference for non-Boltz models.
-    scale_guidance_to_diffusion
-        Whether to rescale the guidance direction to match the magnitude
-        of the diffusion denoising update.
+    guidance_ramp
+        Schedule :math:`k(\tau)` that ramps guidance in over the trajectory. Takes a 0-d
+        tensor :math:`\tau = (N - i) / N` (1 at the first step, approaching 0 at the last) and
+        returns a 0-d tensor weight in [0, 1]; a weight outside [0, 1] raises at that step.
+        Defaults to :func:`cosine_guidance_ramp`.
     device
         Torch device for schedule tensor allocation.
     """
@@ -121,7 +145,7 @@ class EDMSamplerConfig:
     augmentation: bool = True
     align_to_input: bool = True
     alignment_reverse_diffusion: bool = False
-    scale_guidance_to_diffusion: bool = True
+    guidance_ramp: Callable[[torch.Tensor], torch.Tensor] = cosine_guidance_ramp
     device: str | torch.device = "cpu"
 
     def __post_init__(self) -> None:
@@ -165,8 +189,7 @@ class AF3EDMSampler:
             (``sigma_data``, ``s_max``, ``s_min``, ``p``, ``gamma_min``,
             ``gamma_0``, ``noise_scale``, ``step_scale``) and runtime flags
             (``augmentation``, ``align_to_input``,
-            ``alignment_reverse_diffusion``, ``scale_guidance_to_diffusion``,
-            ``device``).
+            ``alignment_reverse_diffusion``, ``guidance_ramp``, ``device``).
         """
         self.config = config
 
@@ -310,7 +333,12 @@ class AF3EDMSampler:
         align_transform: Mapping[str, torch.Tensor] | None,
         allow_gradients: bool,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
-        """Apply guidance from scaler to the denoising direction.
+        r"""Apply guidance from scaler to the denoising direction.
+
+        Treats the scaler's weighted gradient :math:`w g` as the negative DPS likelihood score
+        and adds it to the model score, capped at the model score's norm and ramped in by
+        ``config.guidance_ramp`` (MLIPDiff, arXiv:2610.33315):
+        :math:`\delta \leftarrow \delta + k(\tau)\,\mathrm{clip}(\hat{t}\,w g, \lVert\delta\rVert)`.
 
         Returns
         -------
@@ -345,15 +373,26 @@ class AF3EDMSampler:
                 guidance_direction, align_transform, rotation_only=True
             )
 
-        if self.config.scale_guidance_to_diffusion:
-            delta_norm = torch.linalg.norm(delta, dim=(-1, -2), keepdim=True)
-            # scaler handles any adjustment/clipping of guidance direction, but we have diffusion
-            # update magnitude here, so can optionally scale to match
-            guidance_direction = guidance_direction * delta_norm
+        total_steps = cast(int, context.total_steps)
+        normalized_time = torch.tensor(1 - context.step_index / total_steps, device=delta.device)
+        ramp = torch.as_tensor(self.config.guidance_ramp(normalized_time))
+        if ramp.shape != normalized_time.shape or not 0.0 <= ramp.item() <= 1.0:
+            raise ValueError(
+                f"guidance_ramp({normalized_time.item():.3f}) must return a 0-d tensor in [0, 1], "
+                f"got {ramp}."
+            )
 
-        scaled_delta_contribution = (
+        # delta = -t_hat * model score, so adding the DPS likelihood score -w * g to the model
+        # score adds t_hat * w * g here; the Euler step then scales it by the step's variance.
+        likelihood_term = (
             einx.multiply("b, b n c -> b n c", guidance_weight, guidance_direction)
-            / context.t_effective
+            * context.t_effective
+        )
+        delta_norm = torch.linalg.norm(delta, dim=(-1, -2), keepdim=True)
+        likelihood_norm = torch.linalg.norm(likelihood_term, dim=(-1, -2), keepdim=True)
+        # Cap the likelihood score at the model score's norm so guidance never outruns the prior
+        scaled_delta_contribution = (
+            ramp * likelihood_term * torch.clamp(delta_norm / (likelihood_norm + 1e-8), max=1.0)
         )
         proposal_shift = self.config.step_scale * context.dt * scaled_delta_contribution  # ty: ignore[unsupported-operator] (dt will be Array if check_context didn't raise)
 
