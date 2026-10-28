@@ -8,7 +8,6 @@ from typing import Any
 
 import numpy as np
 from atomworks.io.utils.io_utils import load_any
-from biotite.sequence import ProteinSequence
 from biotite.structure import AtomArrayStack
 from biotite.structure.info import get_from_ccd
 from biotite.structure.io.pdbx.cif import CIFBlock, CIFCategory, CIFFile
@@ -630,36 +629,6 @@ def _output_polymer_entities(
     if not entities:
         raise ValueError("Output has no polymer entities")
     return entities
-
-
-# Unused since carry_polymer_entity_categories looks residues up in pdbx_poly_seq_scheme.
-def _one_letter_sequence(residue_names: list[str]) -> str:
-    """Convert three-letter residue names to a one-letter sequence.
-
-    Parameters
-    ----------
-    residue_names : list[str]
-        Three-letter residue names in sequence order.
-
-    Returns
-    -------
-    str
-        One-letter sequence.
-
-    Raises
-    ------
-    ValueError
-        If any name has no one-letter representation, for example a nucleotide or a
-        modified residue. ``ProteinSequence`` raises ``KeyError`` for those, which would
-        otherwise escape the callers that degrade on ``ValueError``.
-    """
-    letters: list[str] = []
-    for name in residue_names:
-        try:
-            letters.append(ProteinSequence.convert_letter_3to1(name))
-        except KeyError:
-            raise ValueError(f"Residue {name} has no one-letter representation") from None
-    return "".join(letters)
 
 
 def _concatenate_category_rows(rows: list[dict[str, list[str]]]) -> dict[str, list[str]]:
