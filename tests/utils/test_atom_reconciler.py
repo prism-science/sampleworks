@@ -130,6 +130,29 @@ class TestFromArrays:
         assert rec.model_indices.tolist() == rec.struct_indices.tolist()
         assert rec.has_mismatch
 
+    def test_differently_named_chains_pair_in_order_of_appearance(self):
+        # The model names chains A, B; the input names the same chains L, H (sorted: H, L).
+        names = {"L": ["GLY", "SER"], "H": ["TRP", "TYR"], "A": ["GLY", "SER"], "B": ["TRP", "TYR"]}
+
+        def chains(chain_ids: list[str]):
+            atoms = build_test_atom_array(
+                chain_ids=[c for c in chain_ids for _ in range(4)],
+                res_ids=[r for _ in chain_ids for r in (1, 1, 2, 2)],
+                atom_names=["N", "CA"] * 2 * len(chain_ids),
+            )
+            atoms.res_name[:] = [n for c in chain_ids for n in names[c] for _ in "NC"]
+            return atoms
+
+        model, struct = chains(["A", "B"]), chains(["L", "H"])
+
+        rec = AtomReconciler.from_arrays(model, struct)
+
+        assert rec.n_common == 8
+        assert (
+            model.res_name[rec.model_indices.numpy()].tolist()
+            == struct.res_name[rec.struct_indices.numpy()].tolist()
+        )
+
     def test_mse_se_maps_to_met_sd(self):
         model = build_test_atom_array(chain_ids=["A", "A"], res_ids=[0, 0], atom_names=["N", "SD"])
         model.res_name[:] = "MET"
