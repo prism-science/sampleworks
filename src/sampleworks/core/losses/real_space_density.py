@@ -294,6 +294,7 @@ class RealSpaceLossFunction:
             scattering_params=scattering_params,
             em=em,
             device=device,
+            use_cuda_kernels=device.type == "cuda" and torch.cuda.is_available(),
         )
 
         # TODO: selection doesn't do anything right now
@@ -462,7 +463,7 @@ def build_real_space_density_loss(
     target = loss.transformer.xmap.array
     with torch.no_grad():
         model_density = loss.transformer(**inputs).sum(0).to(target.dtype)
-        mask = loss.transformer.create_mask(inputs["coordinates"][0], radius=2.0)
+        mask = loss.transformer.create_mask(inputs["coordinates"].reshape(-1, 3), radius=2.0)
         loss.transformer.xmap.array = scale_map(target, model_density, mask)
     logger.info(
         f"Scaled target map to the input structure's computed density within 2 A of its atoms: "

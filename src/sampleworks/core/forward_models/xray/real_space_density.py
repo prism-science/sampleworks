@@ -1223,10 +1223,13 @@ def scale_map(
     xmap_array: torch.Tensor,
     model_map_array: torch.Tensor,
     mask: torch.Tensor,
-    similarity_threshold: float = 0.05,
-    min_scaling_denominator: float = 1e-10,
 ) -> torch.Tensor:
-    """Scale xmap_array to match model_map_array based on values within the mask.
+    """Scale xmap_array to match the mean and standard deviation of model_map_array
+    within the mask.
+
+    The scale is always positive and does not depend on the units of xmap_array, so
+    the target keeps the map's contrast however well the model fits it. Unlike a
+    least-squares fit, it does not shrink the map by its correlation with the model.
 
     Parameters
     ----------
@@ -1236,19 +1239,16 @@ def scale_map(
         The calculated model map array used as the reference for scaling.
     mask: torch.Tensor
         A boolean mask indicating the regions to use for calculating scaling factors.
-    similarity_threshold: float, optional
-        Threshold to determine if maps are already similar enough to skip aggressive
-        scaling.
-        Default is 0.05 (5% difference).
-    min_scaling_denominator: float, optional
-        Minimum value for denominator in scaling calculation to ensure numerical
-        stability.
-        Default is 1e-10.
 
     Returns
     -------
     torch.Tensor
         The scaled xmap_array.
+
+    Raises
+    ------
+    ValueError
+        If xmap_array is constant within the mask.
     """
     if not mask.any():
         warnings.warn("Mask for map scaling is empty. Using all map.")
@@ -1258,40 +1258,18 @@ def scale_map(
     model_masked = model_map_array[mask]
 
     xmap_std = xmap_masked.std()
-    model_std = model_masked.std()
+    if xmap_std == 0:
+        raise ValueError("Cannot scale the map: it is constant within the mask.")
 
-    xmap_masked_mean = xmap_masked.mean()
-    model_masked_mean = model_masked.mean()
+    correlation = torch.corrcoef(torch.stack([xmap_masked, model_masked]))[0, 1]
+    if correlation <= 0:
+        warnings.warn(
+            f"Map and model density are not positively correlated within the mask "
+            f"(r = {correlation:.3f}); the input structure may be misplaced relative to the map."
+        )
 
-    # Calculate normalized difference between maps
-    rel_mean_diff = torch.abs(xmap_masked_mean - model_masked_mean) / (
-        torch.max(torch.abs(model_masked_mean), torch.tensor(1e-8))
-    )
-    rel_std_diff = torch.abs(xmap_std - model_std) / (
-        torch.max(torch.abs(model_std), torch.tensor(1e-8))
-    )
-
-    # If maps are already very similar, apply gentle scaling
-    if rel_mean_diff < similarity_threshold and rel_std_diff < similarity_threshold:
-        scaling_factor = model_std / (xmap_std + 1e-10)
-        offset = model_masked_mean - scaling_factor * xmap_masked_mean
-        return scaling_factor * xmap_array + offset
-
-    # Standard scaling for maps with significant differences
-    xmap_masked_centered = xmap_masked - xmap_masked_mean
-    model_masked_centered = model_masked - model_masked_mean
-
-    s2 = torch.dot(model_masked_centered, xmap_masked_centered)
-    s1 = torch.dot(xmap_masked_centered, xmap_masked_centered)
-
-    s1 = torch.max(s1, torch.tensor(min_scaling_denominator, device=s1.device))
-
-    scaling_factor = s2 / s1
-    k = model_masked_mean - scaling_factor * xmap_masked_mean
-
-    scaled_xmap_array = scaling_factor * xmap_array + k
-
-    return scaled_xmap_array
+    scaling_factor = model_masked.std() / xmap_std
+    return scaling_factor * (xmap_array - xmap_masked.mean()) + model_masked.mean()
 
 
 def to_f_density(real_map: torch.Tensor) -> torch.Tensor:
