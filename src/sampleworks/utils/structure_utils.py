@@ -17,9 +17,9 @@ from sampleworks.eval.eval_dataclasses import ProteinConfig
 from sampleworks.models.protocol import GenerativeModelInput
 from sampleworks.utils import atom_array_utils
 from sampleworks.utils.atom_array_utils import (
-    _closest_canonical_amino_acid,
     apply_selection,
     BLANK_ALTLOC_IDS,
+    closest_canonical_amino_acid,
 )
 from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.framework_utils import match_batch
@@ -411,7 +411,7 @@ def canonicalize_mixed_altloc_residues(
     oxygens). This function makes such positions stackable by
 
     1. renaming every residue at a mixed position to their shared canonical parent (via
-       :func:`_closest_canonical_amino_acid`) and clearing ``hetero``, but only when *all*
+       :func:`closest_canonical_amino_acid`) and clearing ``hetero``, but only when *all*
        residue names at that position resolve to the *same* canonical parent, and
     2. dropping atoms that are not shared by every altloc at a canonicalized position, so each
        conformer ends with an identical atom set. The modified-only atoms are removed while both
@@ -466,7 +466,7 @@ def canonicalize_mixed_altloc_residues(
     #    stackable anyway, so it's better to leave those untouched and warn.
     canonical_parent_by_position: dict[tuple, str] = {}
     for position in mixed_positions:
-        parents = {_closest_canonical_amino_acid(name) for name in res_names_by_position[position]}
+        parents = {closest_canonical_amino_acid(name) for name in res_names_by_position[position]}
         if len(parents) == 1 and (parent := parents.pop()) is not None:
             canonical_parent_by_position[position] = parent
         else:

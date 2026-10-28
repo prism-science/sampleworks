@@ -1,11 +1,62 @@
 """Tests for AtomReconciler."""
 
+import logging
+from collections.abc import Sequence
+
 import pytest
 import torch
+from biotite.structure import AtomArray
 from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.frame_transforms import random_rotation_matrix
 
 from tests.utils.atom_array_builders import build_test_atom_array
+
+
+MODEL_NAMES = ["MET", "THR", "GLU", "ARG", "LYS", "GLY"]
+
+
+def _chain_a(
+    res_ids: Sequence[int], res_names: Sequence[str], atom_names: Sequence[str] = ("N", "CA")
+) -> AtomArray:
+    """Build chain A with one residue per ``res_ids`` entry, each holding ``atom_names``.
+
+    Parameters
+    ----------
+    res_ids
+        Residue number of each residue.
+    res_names
+        Residue name of each residue.
+    atom_names
+        Atoms of every residue, in order.
+
+    Returns
+    -------
+    AtomArray
+        ``len(res_ids) * len(atom_names)`` atoms, residue by residue.
+    """
+    chain = build_test_atom_array(
+        chain_ids=["A"] * (len(res_ids) * len(atom_names)),
+        res_ids=[res_id for res_id in res_ids for _ in atom_names],
+        atom_names=list(atom_names) * len(res_ids),
+    )
+    chain.res_name[:] = [name for name in res_names for _ in atom_names]
+    return chain
+
+
+def _pairs(rec: AtomReconciler) -> dict[int, int]:
+    """Map each paired structure atom index to its model atom index.
+
+    Parameters
+    ----------
+    rec
+        Reconciler to read the pairing from.
+
+    Returns
+    -------
+    dict[int, int]
+        Structure atom index to model atom index.
+    """
+    return dict(zip(rec.struct_indices.tolist(), rec.model_indices.tolist()))
 
 
 class TestIdentity:
@@ -130,6 +181,32 @@ class TestFromArrays:
         assert rec.model_indices.tolist() == rec.struct_indices.tolist()
         assert rec.has_mismatch
 
+    def test_unresolved_terminus_pairs_same_residues(self):
+        # Model built from the full sequence, but the structure lacks the first 3 residues
+        # and numbers the rest by sequence position e.g. unmodeled N-term
+        names = ["MET", "THR", "GLU", "ARG", "LYS", "GLY"]
+        model = build_test_atom_array(
+            chain_ids=["A"] * 12,
+            res_ids=[i for i in range(6) for _ in "NC"],
+            atom_names=["N", "CA"] * 6,
+        )
+        model.res_name[:] = [n for n in names for _ in "NC"]
+        struct = build_test_atom_array(
+            chain_ids=["A"] * 6,
+            res_ids=[i for i in range(4, 7) for _ in "NC"],
+            atom_names=["N", "CA"] * 3,
+        )
+        struct.res_name[:] = [n for n in names[3:] for _ in "NC"]
+
+        rec = AtomReconciler.from_arrays(model, struct)
+
+        assert rec.n_common == len(struct)
+        assert (
+            model.res_name[rec.model_indices.numpy()].tolist()
+            == struct.res_name[rec.struct_indices.numpy()].tolist()
+        )
+        assert sorted(rec.model_indices.tolist()) == list(range(6, 12))
+
     def test_differently_named_chains_pair_in_order_of_appearance(self):
         # The model names chains A, B; the input names the same chains L, H (sorted: H, L).
         names = {"L": ["GLY", "SER"], "H": ["TRP", "TYR"], "A": ["GLY", "SER"], "B": ["TRP", "TYR"]}
@@ -153,6 +230,28 @@ class TestFromArrays:
             == struct.res_name[rec.struct_indices.numpy()].tolist()
         )
 
+    def test_gap_in_repeated_residues_follows_input_numbering(self):
+        # His-tag HHHH with the input missing residue 3: by name alone the gap could be anywhere.
+        names = ["MET", "HIS", "HIS", "HIS", "HIS", "GLY"]
+        model = build_test_atom_array(
+            chain_ids=["A"] * 6, res_ids=list(range(1, 7)), atom_names=["CA"] * 6
+        )
+        model.res_name[:] = names
+        struct = build_test_atom_array(
+            chain_ids=["A"] * 5, res_ids=[11, 12, 14, 15, 16], atom_names=["CA"] * 5
+        )
+        struct.res_name[:] = [names[i] for i in (0, 1, 3, 4, 5)]
+
+        rec = AtomReconciler.from_arrays(model, struct)
+
+        assert dict(zip(rec.struct_indices.tolist(), rec.model_indices.tolist())) == {
+            0: 0,
+            1: 1,
+            2: 3,
+            3: 4,
+            4: 5,
+        }
+
     def test_mse_se_maps_to_met_sd(self):
         model = build_test_atom_array(chain_ids=["A", "A"], res_ids=[0, 0], atom_names=["N", "SD"])
         model.res_name[:] = "MET"
@@ -169,6 +268,80 @@ class TestFromArrays:
         assert rec.n_common == len(model) == len(struct)
         assert rec.model_indices.tolist() == [0, 1]
         assert rec.struct_indices.tolist() == [0, 1]
+
+    def test_point_mutation_pairs_as_in_a_full_length_chain(self, caplog):
+        # ARG4ALA in an input missing residue 1: the backbone still belongs to model residue 4.
+        model = _chain_a(range(1, 7), MODEL_NAMES)
+        struct = _chain_a(range(2, 7), ["THR", "GLU", "ALA", "LYS", "GLY"])
+
+        with caplog.at_level(logging.WARNING):
+            rec = AtomReconciler.from_arrays(model, struct)
+
+        assert _pairs(rec) == {index: index + 2 for index in range(len(struct))}
+        assert caplog.text == ""
+
+    def test_unmatched_terminal_residue_is_excluded_with_warning(self, caplog):
+        # A terminal mismatch cannot be told from a residue the model lacks, so it pairs nothing.
+        model = _chain_a(range(1, 7), MODEL_NAMES)
+        struct = _chain_a(range(2, 7), ["THR", "GLU", "ARG", "LYS", "TRP"])
+
+        with caplog.at_level(logging.WARNING):
+            rec = AtomReconciler.from_arrays(model, struct)
+
+        assert _pairs(rec) == {index: index + 2 for index in range(len(struct) - 2)}
+        assert "TRP6" in caplog.text
+
+    @pytest.mark.parametrize("conformers", [("GLY", "ALA"), ("ALA", "GLY")])
+    def test_microheterogeneity_matches_on_either_name(self, conformers):
+        # Terminal residue 6 is GLY/ALA in the input, GLY in the model; residue 1 is unresolved.
+        # Its first conformer pairs with the model residue whichever name comes first.
+        model = _chain_a(range(1, 7), MODEL_NAMES)
+        struct = _chain_a([2, 3, 4, 5, 6, 6], [*MODEL_NAMES[1:5], *conformers])
+
+        rec = AtomReconciler.from_arrays(model, struct)
+
+        assert _pairs(rec) == {index: index + 2 for index in range(len(struct) - 2)}
+
+    def test_matching_chain_logs_no_warning(self, caplog):
+        model = _chain_a(range(1, 7), MODEL_NAMES)
+
+        with caplog.at_level(logging.WARNING):
+            AtomReconciler.from_arrays(model, _chain_a(range(11, 17), MODEL_NAMES))
+
+        assert caplog.text == ""
+
+    def test_equal_length_chain_with_shifted_residues_warns(self, caplog):
+        # A tag residue before MET and GLY6 unresolved: as many residues as the model, so the
+        # chain is paired by position, one residue off.
+        model = _chain_a(range(1, 7), MODEL_NAMES)
+        struct = _chain_a(range(0, 6), ["SER", *MODEL_NAMES[:5]])
+
+        with caplog.at_level(logging.WARNING):
+            AtomReconciler.from_arrays(model, struct)
+
+        assert "paired with it by position" in caplog.text
+        assert "SER0" in caplog.text
+
+    def test_waters_in_a_protein_chain_warn(self, caplog):
+        model = _chain_a(range(1, 7), MODEL_NAMES)
+        struct = _chain_a(range(2, 7), MODEL_NAMES[1:]) + _chain_a([101], ["HOH"], ["O"])
+
+        with caplog.at_level(logging.WARNING):
+            AtomReconciler.from_arrays(model, struct)
+
+        assert "mixes amino acids with other residues ['HOH101']" in caplog.text
+
+    def test_ambiguous_placement_warns(self, caplog):
+        # His-tag with one HIS unresolved and the input renumbered contiguously: the gap could
+        # follow any HIS.
+        his_tag = ["MET", "HIS", "HIS", "HIS", "HIS", "GLY"]
+        model = _chain_a(range(1, 7), his_tag, ["CA"])
+        struct = _chain_a(range(1, 6), [*his_tag[:4], "GLY"], ["CA"])
+
+        with caplog.at_level(logging.WARNING):
+            AtomReconciler.from_arrays(model, struct)
+
+        assert "several equally good ways" in caplog.text
 
 
 class TestCoordinateTranslation:
