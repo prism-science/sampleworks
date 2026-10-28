@@ -92,6 +92,27 @@ checkpoint on a GPU.
   high-quality physicality check (all `bad_bonds_backbone`). Without gradient normalization,
   step size 0.1 does not move the loss. Guidance strength needs tuning in the occupancy sweep.
 
+### Guidance methods (2026-10-28, same setup)
+
+Every row was scored the same way: the ensemble density loss on `refined.cif`, BioEmu2's
+high-quality physicality check, and the median CA-RMSD to the input. Native-steering rows use
+`--fk-lambda` as the energy scale and `p` particles per ensemble member.
+
+| Run | Density loss | Physical | Median CA-RMSD |
+| --- | --- | --- | --- |
+| Unguided | 0.0556 | 8/8 | 2.58 Å |
+| Pure guidance, `--gradient-normalization --step-size 0.1` | 0.0147 | 0/8 | 1.82 Å |
+| IT-opt, `--which-latent pair` (defaults) | 0.0249 | 8/8 | 1.69 Å |
+| Native FKC `smc`, λ=100, p=4 | 0.0405 | 8/8 | 2.12 Å |
+| Native FKC `smc`, λ=1000, p=4 | 0.0382 | 8/8 | 1.97 Å |
+| Native FKC `smc`, λ=1000, p=2 | 0.0466 | 8/8 | 2.22 Å |
+| Native FKC `guidance`, λ=1000, p=2 | 0.0409 | 8/8 | 2.19 Å |
+
+- IT-opt halves the loss and keeps every sample physical.
+- Pure guidance fits the density best but breaks backbone bonds.
+- Native FKC stays physical but moves the loss less, because each particle is scored on its own.
+- FKC `guidance` with p=4 (32 particles) runs out of memory on an H200.
+
 ## Not done yet
 
 - Bake the checkpoint into the checkpoints image used by `Dockerfile` (`CHECKPOINTS_IMAGE`).
