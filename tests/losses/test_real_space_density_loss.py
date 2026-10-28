@@ -16,6 +16,7 @@ real-space density forward model:
 from functools import partial
 from typing import cast
 
+import biotite.structure as struc
 import einx
 import gemmi
 import numpy as np
@@ -25,11 +26,14 @@ from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.sf import
     ATOM_STRUCTURE_FACTORS,
     ELEMENT_TO_ATOMIC_NUM,
 )
+from sampleworks.core.losses.options import RealSpaceDensityOptions
 from sampleworks.core.losses.real_space_density import (
+    build_real_space_density_loss,
     extract_density_inputs_from_atomarray,
     RealSpaceLossFunction,
     setup_scattering_params,
 )
+from sampleworks.core.losses.registry import LossBuildContext
 
 
 class TestSetupScatteringParams:
@@ -497,3 +501,34 @@ class TestEdgeCases:
         loss = loss_function_1vme(**inputs)
         assert torch.isfinite(loss)
         assert loss.item() >= 0.0
+
+
+class TestBuildRealSpaceDensityLoss:
+    def test_builds_and_scores_on_cpu(self, structure_1vme_density, density_path_1vme):
+        """A CPU run must take the pure-torch transformer path, both when the builder scales
+        the map and when the loss is evaluated afterwards."""
+        loss = build_real_space_density_loss(
+            RealSpaceDensityOptions(density=str(density_path_1vme), resolution=1.8),
+            LossBuildContext(structure=structure_1vme_density, device=torch.device("cpu")),
+        )
+
+        assert torch.isfinite(loss(**loss.structure_to_loss_input(structure_1vme_density)))
+
+    def test_target_does_not_depend_on_model_order(
+        self, structure_1vme_density, density_path_1vme, device
+    ):
+        """The scaled target must cover every model of a multi-model input, so listing the
+        same conformers in another order gives the same target."""
+        model = structure_1vme_density["asym_unit"][0]
+        shifted = model.copy()
+        shifted.coord += np.array([1.5, 0.0, 0.0], dtype=shifted.coord.dtype)
+        options = RealSpaceDensityOptions(density=str(density_path_1vme), resolution=1.8)
+
+        targets = []
+        for conformers in ([model, shifted], [shifted, model]):
+            context = LossBuildContext(
+                structure={"asym_unit": struc.stack(conformers)}, device=device
+            )
+            targets.append(build_real_space_density_loss(options, context).transformer.xmap.array)
+
+        torch.testing.assert_close(targets[0], targets[1])
