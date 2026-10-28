@@ -392,11 +392,13 @@ class TestReconcilerWithSequenceOverride:
         )
 
         # 5I09 author numbering is deposited position + 1, so each protein atom's
-        # normalized position must be its res_id - 1 (the only chain is index 0).
+        # normalized position must be its res_id - 1.
         protein = arr.seq_idx >= 0
         expected_ids = [
-            f"0_{res_id - 1}_{atom_name}"
-            for res_id, atom_name in zip(arr.res_id[protein], arr.atom_name[protein])
+            f"{chain}_{res_id - 1}_{atom_name}"
+            for chain, res_id, atom_name in zip(
+                arr.chain_id[protein], arr.res_id[protein], arr.atom_name[protein]
+            )
         ]
         np.testing.assert_array_equal(ids_with[protein], expected_ids)
 
