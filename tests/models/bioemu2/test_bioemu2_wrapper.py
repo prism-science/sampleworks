@@ -266,6 +266,26 @@ class TestStep:
             assert latent.grad is not None
             assert latent.grad.abs().sum() > 0
 
+    def test_replaced_pair_reaches_output_without_grad(
+        self,
+        tiny_bioemu2_wrapper: BioEmu2Wrapper,
+        features_2yl0: GenerativeModelInput[BioEmu2Conditioning],
+    ):
+        """IT-opt's final pass samples with optimized latents under no_grad; they must count."""
+        cond = _conditioning(features_2yl0)
+        x_t = 16.0 * tiny_bioemu2_wrapper.initialize_from_prior(1, features_2yl0)
+        perturbed = cond.pair + 3 * cond.pair.std() * torch.randn_like(cond.pair)
+        with torch.no_grad():
+            reference = tiny_bioemu2_wrapper.step(x_t, 4.0, features=features_2yl0)
+            same = tiny_bioemu2_wrapper.step(
+                x_t, 4.0, features=GenerativeModelInput(conditioning=replace(cond))
+            )
+            moved = tiny_bioemu2_wrapper.step(
+                x_t, 4.0, features=GenerativeModelInput(conditioning=replace(cond, pair=perturbed))
+            )
+        torch.testing.assert_close(same, reference)
+        assert not torch.allclose(moved, reference)
+
     def test_requires_features(self, tiny_bioemu2_wrapper: BioEmu2Wrapper):
         with pytest.raises(ValueError, match="features"):
             tiny_bioemu2_wrapper.step(torch.zeros(1, 4, 3), torch.tensor(1.0))

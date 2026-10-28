@@ -43,12 +43,14 @@ DEFAULT_SINGLE_REP_ATTR: dict[str, str] = {
     "boltz2": "s",
     "protenix": "s_trunk",
     "rf3": "s_trunk",
+    "bioemu2": "single",
 }
 DEFAULT_PAIR_REP_ATTR: dict[str, str] = {
     "boltz1": "z",
     "boltz2": "z",
     "protenix": "z_trunk",
     "rf3": "z_trunk",
+    "bioemu2": "pair",
 }
 
 

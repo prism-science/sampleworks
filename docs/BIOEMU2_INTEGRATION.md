@@ -21,8 +21,10 @@ BioEmu2's EDM recipe matches `AF3EDMSampler`. `_run_guidance` reads `sigma_data`
 `step_scale=1.0` (equilibrium) or `1.5` (structure), with reverse-diffusion alignment on.
 
 `step()` keeps the autograd graph. Gradients reach `x_t` (noise-space DPS), and the trunk `single`
-and `pair` tensors; when `pair` requires grad, `step()` rebuilds the static context with gradients
-so latent optimization can work on it.
+and `pair` tensors. `pair` and the relative-position encoding enter only through the static
+context, so `step()` rebuilds it whenever either is not the tensor it was built from (an identity
+check, as Boltz2 does since #442). IT-opt (`--guidance-type latent_opt`) addresses BioEmu2's
+`single` / `pair` through `models/latent_adapter.py`.
 
 ## Atoms
 
@@ -93,6 +95,5 @@ checkpoint on a GPU.
 ## Not done yet
 
 - Bake the checkpoint into the checkpoints image used by `Dockerfile` (`CHECKPOINTS_IMAGE`).
-- Latent-adapter entries for IT-opt (`models/latent_adapter.py`).
 - Baseline: BioEmu2's own FK/FKC steering on a sampleworks loss, through a `Potential` bridge.
 - Disulfide `Bond`s and contact conditioning are not passed to BioEmu2.
