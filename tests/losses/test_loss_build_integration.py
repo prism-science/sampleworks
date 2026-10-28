@@ -7,6 +7,8 @@ structure-factor loss being unreachable from the CLI.
 
 from pathlib import Path
 
+import gemmi
+import numpy as np
 import pytest
 import torch
 from sampleworks.core.losses.config import build_loss
@@ -73,6 +75,27 @@ def test_density_loss_is_reachable_from_the_command_line(
 
     assert isinstance(loss, RealSpaceLossFunction)
     assert isinstance(loss.loss, torch.nn.L1Loss)
+
+
+def test_density_loss_target_does_not_depend_on_map_units(resources_dir: Path, device, tmp_path):
+    """Experimental maps come in arbitrary units. The built loss should rescale them to the input
+    structure's computed density, so the same map stored 30x smaller or larger is the same
+    target."""
+    structure_path = resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
+    density_path = resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB_1.80A.ccp4"
+    targets = []
+    for factor in (1 / 30, 30):
+        ccp4 = gemmi.read_ccp4_map(str(density_path))
+        grid = np.asarray(ccp4.grid)  # view: scaling it scales the map in place
+        grid *= factor
+        ccp4.update_ccp4_header()
+        scaled_path = tmp_path / f"scaled_{factor:g}.ccp4"
+        ccp4.write_ccp4_map(str(scaled_path))
+        argv = ["--structure", str(structure_path), "--density", str(scaled_path)]
+        loss = build_from_argv(BASE_ARGV + argv + ["--resolution", "1.8"], structure_path, device)
+        targets.append(loss.transformer.xmap.array)
+
+    torch.testing.assert_close(targets[0], targets[1], rtol=1e-4, atol=1e-6)
 
 
 def test_structure_factor_loss_scores_a_structure_end_to_end(
