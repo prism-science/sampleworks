@@ -87,6 +87,9 @@ class BioEmu2Conditioning:
         Distogram logits, shape ``(1, tokens, tokens, bins)``.
     static_context : StaticContext
         Coordinate-independent structure-module inputs computed from the embeddings.
+    static_context_source : tuple[Tensor, Tensor]
+        The ``pair`` and ``relative_position_encoding`` tensors ``static_context`` was built from.
+        :meth:`BioEmu2Wrapper.step` rebuilds the context when either has been replaced.
     batch : BatchAllAtomStructure
         Model input structure, batch size 1, atoms right-padded to a multiple of 32.
     num_atoms : int
@@ -109,6 +112,7 @@ class BioEmu2Conditioning:
     relative_position_encoding: Tensor
     distogram: Tensor
     static_context: StaticContext
+    static_context_source: tuple[Tensor, Tensor]
     batch: BatchAllAtomStructure
     num_atoms: int
     num_padded_atoms: int
@@ -446,6 +450,7 @@ class BioEmu2Wrapper:
             relative_position_encoding=embeddings.relative_position_encoding,
             distogram=embeddings.distogram,
             static_context=static_context,
+            static_context_source=(embeddings.pair, embeddings.relative_position_encoding),
             batch=batch,
             num_atoms=num_atoms,
             num_padded_atoms=num_padded_atoms,
@@ -494,9 +499,11 @@ class BioEmu2Wrapper:
 
         embeddings = cond.trunk_embeddings
         static_context = cond.static_context
-        # The pair and relative-position embeddings enter only through the static
-        # context, so latent optimization on them needs it rebuilt with gradients.
-        if cond.pair.requires_grad or cond.relative_position_encoding.requires_grad:
+        # The pair and relative-position embeddings enter only through the static context.
+        # IT-opt swaps in optimized copies, so rebuild it whenever they are not the tensors it
+        # was built from (an identity check, so the final no-grad pass sees them too).
+        source_pair, source_relpos = cond.static_context_source
+        if cond.pair is not source_pair or cond.relative_position_encoding is not source_relpos:
             # load_model's wrapper computes the context under no_grad; its score model does not.
             score_model = cast(BioMoaCModel, getattr(self.model, "score_model"))
             static_context = score_model.compute_static_context(cond.batch, embeddings)
