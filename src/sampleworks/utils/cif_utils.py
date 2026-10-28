@@ -1,7 +1,7 @@
 import itertools
 import re
 import tempfile
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -794,6 +794,50 @@ def _labels_from_scheme(
     ]
 
 
+def _require_one_residue_per_label(labels: list[_Label | None], atom_site: CIFCategory) -> None:
+    """Check that no two output residues take the same deposited position and monomer.
+
+    Two residues the lookup could not tell apart (e.g. one the model built, numbered like a
+    resolved one) give one label, monomer and model to two atoms of the same name. Different
+    monomers at one position are the deposit's microheterogeneity (a CYS/CSO site) and are
+    allowed, as are altlocs.
+
+    Parameters
+    ----------
+    labels : list[_Label | None]
+        Deposit label per ``atom_site`` row, ``None`` for non-polymer rows.
+    atom_site : CIFCategory
+        Output ``atom_site``.
+
+    Raises
+    ------
+    ValueError
+        If two atoms share a label, monomer, model, atom name and altloc.
+    """
+    atoms = Counter(
+        atom
+        for atom in zip(
+            labels,
+            *(
+                atom_site[column].as_array(str)
+                for column in (
+                    "label_comp_id",
+                    "pdbx_PDB_model_num",
+                    "label_atom_id",
+                    "label_alt_id",
+                )
+            ),
+            strict=True,
+        )
+        if atom[0] is not None
+    )
+    shared = sorted({atom[:2] for atom, count in atoms.items() if count > 1})
+    if shared:
+        raise ValueError(
+            f"{len(shared)} deposited position(s) name several residues, e.g. {shared[:3]}"
+        )
+
+
 def _labels_from_sequence_alignment(
     output_block: CIFBlock, reference_block: CIFBlock
 ) -> list[_Label | None]:
@@ -993,10 +1037,13 @@ def carry_polymer_entity_categories(
         ),
     ):
         try:
-            labels = find_labels()
-            break
+            found = find_labels()
+            _require_one_residue_per_label(found, output_block[_ATOM_SITE])
         except ValueError as error:
             errors.append(f"{method}: {error}")
+            continue
+        labels = found
+        break
     if labels is None:
         raise ValueError("; ".join(errors))
     polymer_labels = {label for label in labels if label is not None}

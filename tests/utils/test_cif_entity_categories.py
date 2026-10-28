@@ -713,6 +713,14 @@ def test_saved_cif_numbers_model_added_residues_from_the_deposit(
     assert all(carried[seq] == number for seq, number, _ in expected)
 
 
+def test_carry_rejects_two_residues_at_one_deposited_position():
+    """Two residues the lookup gives one deposited position fail instead of sharing its ids."""
+    output = _output([2, 3, 3, 4])  # HIS HIS HIS HIS, the middle two both author 0
+
+    with pytest.raises(ValueError, match="name several residues"):
+        carry_polymer_entity_categories(output, _reference())
+
+
 def test_matching_entity_reports_ambiguous_placement():
     """Two of three alanines can sit in three equally good places; say so instead of guessing."""
     block = CIFBlock(
