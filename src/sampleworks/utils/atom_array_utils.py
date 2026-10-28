@@ -994,7 +994,7 @@ def load_conformer_pairs(
     return atom_array, conformer_ids, build_pairwise_altloc_arrays(atom_array, conformer_ids)
 
 
-def _closest_canonical_amino_acid(res_name: str) -> str | None:
+def closest_canonical_amino_acid(res_name: str) -> str | None:
     """Map a (possibly modified) residue name to its canonical parent amino acid.
 
     Uses atomworks' mapping, e.g. ``CSO -> CYS``, ``MSE -> MET``. Standard amino

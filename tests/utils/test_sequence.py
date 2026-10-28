@@ -596,6 +596,12 @@ def test_align_to_sequence_places_gaps_where_numbering_skips():
     assert _align(observed, sequence)[1] is not None
 
 
+def test_align_to_sequence_matches_any_observed_monomer():
+    """An observed microheterogeneity residue matches a position holding any of its monomers."""
+    assert _align([{"ALA", "SER"}, "HIS"], ["SER", "HIS"]) == ([0, 1], None)
+    assert _align([{"ALA", "SER"}, "HIS"], ["GLY", "HIS"]) == ([-1, 1], None)
+
+
 def test_align_to_sequence_keeps_mismatches_in_place():
     """A residue whose name matches nowhere it fits stays unplaced instead of shifting others."""
     assert _align(list("MKXEF"), list("MKLEF"), [1, 2, 3, 4, 5]) == ([0, 1, -1, 3, 4], None)
