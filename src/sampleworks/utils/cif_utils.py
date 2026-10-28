@@ -15,8 +15,8 @@ from biotite.structure.io.pdbx.cif import CIFBlock, CIFCategory, CIFFile
 from loguru import logger
 
 from sampleworks.utils.atom_array_utils import (
-    _closest_canonical_amino_acid,
     BLANK_ALTLOC_IDS,
+    closest_canonical_amino_acid,
     find_all_altloc_ids,
     save_structure_to_cif,
     select_altloc,
@@ -360,7 +360,7 @@ def _canonical_monomer(name: str) -> str:
         Canonical parent amino acid (e.g. ``MSE -> MET``, ``CSO -> CYS``), or ``name`` itself
         when it is not an amino acid.
     """
-    return _closest_canonical_amino_acid(name) or name
+    return closest_canonical_amino_acid(name) or name
 
 
 def _matching_entity(reference_block: CIFBlock, residue_names: list[str]) -> tuple[str, list[str]]:
