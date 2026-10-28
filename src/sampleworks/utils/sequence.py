@@ -128,7 +128,7 @@ def resolve_sequence_arg(
 
 
 def align_to_sequence(
-    observed: Sequence[str],
+    observed: Sequence[str | Collection[str]],
     sequence: Sequence[str | Collection[str]],
     residue_ids: np.ndarray | None,
     insertion_codes: np.ndarray | None,
@@ -146,8 +146,9 @@ def align_to_sequence(
 
     Parameters
     ----------
-    observed : Sequence[str]
-        Observed residues in residue order: one-letter codes, or residue names.
+    observed : Sequence[str | Collection[str]]
+        Observed residues in residue order: one-letter codes, or residue names. A collection
+        lists the monomers observed at one residue (microheterogeneity), any of which matches.
     sequence : Sequence[str | Collection[str]]
         Full sequence, in the same alphabet as ``observed``. A collection lists the monomers
         of a microheterogeneity position, any of which matches.
@@ -174,8 +175,9 @@ def align_to_sequence(
         for name in {names} if isinstance(names, str) else set(names):
             columns.setdefault(name, []).append(position)
     matches = np.zeros((n_observed, n_sequence), dtype=bool)
-    for index, name in enumerate(observed):
-        matches[index, columns.get(name, [])] = True
+    for index, names in enumerate(observed):
+        for name in {names} if isinstance(names, str) else set(names):
+            matches[index, columns.get(name, [])] = True
 
     gap = 1
     mismatch = n_observed + 2  # dearer than every gap together: names are matched first
