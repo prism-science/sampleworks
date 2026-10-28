@@ -14,12 +14,14 @@ import numpy as np
 import torch
 from biotite.structure import AtomArray
 from jaxtyping import Float
+from loguru import logger
 
-from sampleworks.utils.atom_array_utils import filter_to_common_atoms
+from sampleworks.utils.atom_array_utils import closest_canonical_amino_acid, filter_to_common_atoms
 from sampleworks.utils.frame_transforms import (
     apply_forward_transform,
     weighted_rigid_align_differentiable,
 )
+from sampleworks.utils.sequence import align_to_sequence
 
 
 def _normalize_methionine_chalcogen_names(atom_array: AtomArray) -> AtomArray:
@@ -77,6 +79,128 @@ def _pair_struct_chains(model_array: AtomArray, struct_array: AtomArray) -> Atom
     paired = struct_array.copy()
     paired.chain_id = np.array([renames.get(chain, chain) for chain in paired.chain_id])
     return paired
+
+
+def _register_struct_residues(model_array: AtomArray, struct_array: AtomArray) -> AtomArray:
+    """Annotate ``seq_idx`` for the structure chains with unmodeled residues.
+
+    ``make_normalized_atom_id`` numbers residues densely per chain, so a structure chain
+    with unresolved residues (e.g. a disordered terminus the model builds from the full
+    sequence) is shifted against the model and pairs atoms of different residues. For each
+    chain pair (with the same name) where the structure has fewer residues, the structure's
+    residues are placed on the model's by name and numbering (:func:`align_to_sequence`), and
+    ``seq_idx`` is set to the model position. A residue matches on any of its names, so
+    microheterogeneity (two names under one number) matches either. A run of residues whose
+    names match nothing but that exactly fills the space between two placed neighbours is a
+    substitution (e.g. a point mutation) and takes that space, as it would in a full-length
+    chain.
+
+    Warns, without changing the pairing, about input that may pair wrongly or not at all.
+
+    Parameters
+    ----------
+    model_array
+        The generative model's atom array.
+    struct_array
+        The input structure's atom array, chains named as their model partners.
+
+    Returns
+    -------
+    AtomArray
+        ``struct_array`` unchanged when it already has ``seq_idx`` or no chain is shorter
+        than its model chain, otherwise a copy with ``seq_idx``. Structure residues that
+        align to no model residue get positions past the model chain's end, so they match
+        nothing.
+    """
+    if "seq_idx" in struct_array.get_annotation_categories():
+        return struct_array
+
+    def residues(
+        chain_array: AtomArray,
+    ) -> tuple[np.ndarray, np.ndarray, list[frozenset[str]], list[bool], list[str]]:
+        # A residue is a (res_id, ins_code) pair, as in make_normalized_atom_id.
+        keys = list(zip(chain_array.res_id.tolist(), chain_array.ins_code.tolist()))
+        key_to_residue = {key: index for index, key in enumerate(dict.fromkeys(keys))}
+        residue_of_atom = np.array([key_to_residue[key] for key in keys])  # (n_atoms,)
+        first_atoms = np.unique(residue_of_atom, return_index=True)[1]  # (n_residues,)
+        raw_names: list[set[str]] = [set() for _ in first_atoms]
+        for residue, name in zip(residue_of_atom.tolist(), chain_array.res_name.tolist()):
+            raw_names[residue].add(name)
+        parents = {name: closest_canonical_amino_acid(name) for name in set().union(*raw_names)}
+        names = [frozenset(parents[name] or name for name in group) for group in raw_names]
+        is_amino_acid = [any(parents[name] for name in group) for group in raw_names]
+        labels = [
+            f"{'/'.join(sorted(group))}{chain_array.res_id[atom]}{chain_array.ins_code[atom]}"
+            for group, atom in zip(raw_names, first_atoms)
+        ]
+        return residue_of_atom, first_atoms, names, is_amino_acid, labels
+
+    seq_idx = np.full(len(struct_array), -1, dtype=np.int64)
+    for chain in set(model_array.chain_id) & set(struct_array.chain_id):
+        model_names = residues(model_array[model_array.chain_id == chain])[2]
+        struct_mask = struct_array.chain_id == chain
+        struct_chain_array = struct_array[struct_mask]
+        residue_of_atom, first_atoms, struct_names, is_amino_acid, labels = residues(
+            struct_chain_array
+        )
+        non_amino_acids = [label for label, amino in zip(labels, is_amino_acid) if not amino]
+        if non_amino_acids and any(is_amino_acid):
+            logger.warning(
+                f"Input chain {chain} mixes amino acids with other residues "
+                f"{non_amino_acids[:10]} (waters or ligands sharing its chain ID). "
+                "They count as residues when pairing the chain's residues with the model's."
+            )
+        if len(struct_names) >= len(model_names):
+            differ = [
+                label
+                for label, names, model in zip(labels, struct_names, model_names)
+                if not names & model
+            ]
+            if differ or len(struct_names) > len(model_names):
+                logger.warning(
+                    f"Input chain {chain} has {len(struct_names)} residues to the model's "
+                    f"{len(model_names)} and is paired with it by position, but residue names "
+                    f"differ at {differ[:10]}. If the input has residues the model lacks (e.g. "
+                    "an expression tag), every pair after them is shifted."
+                )
+            continue
+        residue_seq_idx, ambiguous_at = align_to_sequence(
+            struct_names,
+            model_names,
+            struct_chain_array.res_id[first_atoms],
+            struct_chain_array.ins_code[first_atoms],
+        )
+        if ambiguous_at is not None:
+            logger.warning(
+                f"Input chain {chain} fits the model sequence in several equally good ways from "
+                f"model residue index {ambiguous_at} on (a gap inside a run of repeated "
+                "residues that the input numbering does not place). Using the earliest."
+            )
+        # A run of unmatched residues exactly filling the space between two matched ones is
+        # considered a substitution: the residues between the matched ones are renamed.
+        placed = np.flatnonzero(residue_seq_idx >= 0)
+        for before, after in zip(placed[:-1].tolist(), placed[1:].tolist()):
+            if after - before > 1 and (
+                residue_seq_idx[after] - residue_seq_idx[before] == after - before
+            ):
+                residue_seq_idx[before + 1 : after] = residue_seq_idx[before] + np.arange(
+                    1, after - before
+                )
+        unaligned = residue_seq_idx < 0
+        if np.any(unaligned):
+            unpaired = [labels[index] for index in np.flatnonzero(unaligned)]
+            logger.warning(
+                f"Input chain {chain} residues {unpaired[:10]} match no model residue. "
+                "Their atoms are left out of the common atoms."
+            )
+        residue_seq_idx[unaligned] = len(model_names) + np.flatnonzero(unaligned)
+        seq_idx[struct_mask] = residue_seq_idx[residue_of_atom]
+
+    if not np.any(seq_idx >= 0):
+        return struct_array
+    registered = struct_array.copy()
+    registered.set_annotation("seq_idx", seq_idx)
+    return registered
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,8 +265,11 @@ class AtomReconciler:
         AtomReconciler
         """
         model_array_for_matching = _normalize_methionine_chalcogen_names(model_array)
-        struct_array_for_matching = _pair_struct_chains(
-            model_array_for_matching, _normalize_methionine_chalcogen_names(struct_array)
+        struct_array_for_matching = _register_struct_residues(
+            model_array_for_matching,
+            _pair_struct_chains(
+                model_array_for_matching, _normalize_methionine_chalcogen_names(struct_array)
+            ),
         )
         _, (m_idx, s_idx) = filter_to_common_atoms(
             model_array_for_matching,
