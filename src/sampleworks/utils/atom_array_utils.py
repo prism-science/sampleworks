@@ -1,6 +1,7 @@
 import re
 import warnings
-from collections.abc import Collection, Sequence
+from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast, Literal, overload
@@ -866,45 +867,33 @@ def make_atom_id(arr: AtomArray | AtomArrayStack) -> np.ndarray:
     )
 
 
-def make_normalized_atom_id(
-    arr: AtomArray | AtomArrayStack, chain_ids: Collection[str] | None = None
-) -> np.ndarray:
+def make_normalized_atom_id(arr: AtomArray | AtomArrayStack) -> np.ndarray:
     """Like ``make_atom_id`` but with sequential 0-based residue numbering per chain.
 
     Handles numbering differences between representations (Boltz 0-based,
-    PDB author numbering, etc.).
-
-    Parameters
-    ----------
-    arr
-        Atoms to label.
-    chain_ids
-        Chain IDs to rank chains over, a superset of ``arr``'s. Defaults to ``arr``'s own
-        chain IDs. Arrays compared against each other must share it when one of them lacks
-        some of the other's chains, or their chain ranks disagree.
+    PDB author numbering, etc.). A residue is a ``(res_id, ins_code)`` pair, so insertion
+    codes (``1H ... 1A, 1``) are separate positions, while microheterogeneity (two residue
+    names under one number) shares one. An id that repeats (that second residue's atoms, or
+    altlocs) gets an occurrence suffix, so ids are unique and a repeat pairs only with the same
+    repeat in another array.
 
     Returns
     -------
     np.ndarray
-        Array of ``"chainidx_seqpos_atomname"`` strings.
+        Array of ``"chain_seqpos_atomname"`` strings, ``"#n"`` appended to the n-th repeat.
     """
     chain_id = cast(np.ndarray, arr.chain_id)
     res_id = cast(np.ndarray, arr.res_id)
+    ins_code = cast(np.ndarray, arr.ins_code)
     atom_name = cast(np.ndarray, arr.atom_name)
 
-    # Sorted so the index assignment is stable regardless of input ordering.
-    unique_chains = sorted(set(chain_id))
-    chain_to_idx = {c: i for i, c in enumerate(sorted(chain_ids or unique_chains))}
-
-    # Assign sequential 0-based seq_pos per chain.
+    # Assign sequential 0-based seq_pos per chain, in order of first appearance.
     seq_pos = np.empty(len(res_id), dtype=np.int64)
-    for chain in unique_chains:
+    for chain in set(chain_id):
         chain_mask = chain_id == chain
-        chain_res_ids = res_id[chain_mask]
-        _, first_idx = np.unique(chain_res_ids, return_index=True)
-        ordered_unique = chain_res_ids[np.sort(first_idx)]
-        rid_to_pos = {int(rid): pos for pos, rid in enumerate(ordered_unique)}
-        seq_pos[chain_mask] = np.array([rid_to_pos[int(r)] for r in chain_res_ids])
+        residue_keys = list(zip(res_id[chain_mask].tolist(), ins_code[chain_mask].tolist()))
+        key_to_pos = {key: pos for pos, key in enumerate(dict.fromkeys(residue_keys))}
+        seq_pos[chain_mask] = [key_to_pos[key] for key in residue_keys]
 
     # Override with alignment-derived seq_idx when present (set by
     # apply_sequence_override to handle gaps / missing residues).
@@ -913,7 +902,12 @@ def make_normalized_atom_id(
         mask = override >= 0
         seq_pos[mask] = override[mask]
 
-    return np.array([f"{chain_to_idx[c]}_{s}_{a}" for c, s, a in zip(chain_id, seq_pos, atom_name)])
+    occurrences: Counter[str] = Counter()
+    ids = []
+    for atom_id in (f"{c}_{s}_{a}" for c, s, a in zip(chain_id, seq_pos, atom_name)):
+        ids.append(f"{atom_id}#{occurrences[atom_id]}" if occurrences[atom_id] else atom_id)
+        occurrences[atom_id] += 1
+    return np.array(ids)
 
 
 @overload
@@ -996,13 +990,7 @@ def filter_to_common_atoms(
 
     # Find common atom IDs across all structures
     if normalize_ids:
-        # Arrays whose chains are all named in the largest array's chains (e.g. a model that
-        # leaves out ligands or waters) rank chains over that set; otherwise chains may have
-        # been renamed and each array ranks its own.
-        chain_sets = [set(cast(np.ndarray, array.chain_id)) for array in arrays]
-        largest = max(chain_sets, key=len)
-        shared = largest if all(chains <= largest for chains in chain_sets) else None
-        all_ids = [make_normalized_atom_id(array, shared) for array in arrays]
+        all_ids = [make_normalized_atom_id(array) for array in arrays]
     else:
         all_ids = [make_atom_id(array) for array in arrays]
 

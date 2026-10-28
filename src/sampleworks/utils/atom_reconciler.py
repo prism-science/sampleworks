@@ -45,6 +45,40 @@ def _normalize_methionine_chalcogen_names(atom_array: AtomArray) -> AtomArray:
     return normalized
 
 
+def _pair_struct_chains(model_array: AtomArray, struct_array: AtomArray) -> AtomArray:
+    """Rename structure chains to the model chains they correspond to.
+
+    ``make_normalized_atom_id`` pairs atoms by chain name. A structure chain pairs with the
+    model chain of the same name, and remaining structure chains pair with the remaining model
+    chains by position, each in order of first appearance in its atom array (a model naming
+    chains A, B against an input's L, H pairs L with A).
+
+    Parameters
+    ----------
+    model_array
+        The generative model's atom array.
+    struct_array
+        The input structure's atom array.
+
+    Returns
+    -------
+    AtomArray
+        ``struct_array`` unchanged when every structure chain has a same-named model chain,
+        otherwise a copy with renamed chains. Structure chains left over once the model's
+        are used up keep their names.
+    """
+    model_chains = list(dict.fromkeys(model_array.chain_id.tolist()))
+    struct_chains = list(dict.fromkeys(struct_array.chain_id.tolist()))
+    unpaired_model = [chain for chain in model_chains if chain not in struct_chains]
+    unpaired_struct = [chain for chain in struct_chains if chain not in model_chains]
+    renames = dict(zip(unpaired_struct, unpaired_model))
+    if not renames:
+        return struct_array
+    paired = struct_array.copy()
+    paired.chain_id = np.array([renames.get(chain, chain) for chain in paired.chain_id])
+    return paired
+
+
 @dataclass(frozen=True, slots=True)
 class AtomReconciler:
     """Bidirectional adapter between model and structure atom spaces.
@@ -107,7 +141,9 @@ class AtomReconciler:
         AtomReconciler
         """
         model_array_for_matching = _normalize_methionine_chalcogen_names(model_array)
-        struct_array_for_matching = _normalize_methionine_chalcogen_names(struct_array)
+        struct_array_for_matching = _pair_struct_chains(
+            model_array_for_matching, _normalize_methionine_chalcogen_names(struct_array)
+        )
         _, (m_idx, s_idx) = filter_to_common_atoms(
             model_array_for_matching,
             struct_array_for_matching,
