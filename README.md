@@ -52,6 +52,7 @@ Alternatively, install only what you need:
 pixi install -e boltz      # Boltz-1 / Boltz-2
 pixi install -e protenix   # Protenix
 pixi install -e rf3        # RosettaFold3
+pixi install -e bioemu2    # BioEmu2
 ```
 
 ### 3. Download model checkpoints
@@ -71,6 +72,19 @@ download_boltz2(cache)
 **Protenix**: checkpoint is downloaded automatically on first use.
 
 **RosettaFold3** (RF3): see the [RC-Foundry repository](https://github.com/RosettaCommons/foundry) for instructions. Default path: `~/.foundry/checkpoints/rf3_foundry_01_24_latest.ckpt`
+
+**BioEmu2**: download the `bioemu2-preview` checkpoint (2 GB) and its `config.yaml` from
+[Hugging Face](https://huggingface.co/microsoft/bioemu2), then pass the `checkpoint.ckpt` path
+with `--model-checkpoint` or `BIOEMU2_CHECKPOINT`. `config.yaml` must sit in the same directory.
+
+```bash
+pixi run -e bioemu2 hf download microsoft/bioemu2 \
+    --include "checkpoints/bioemu2-preview/*" --local-dir ~/.bioemu2
+export BIOEMU2_CHECKPOINT=~/.bioemu2/checkpoints/bioemu2-preview/checkpoint.ckpt
+```
+
+The released checkpoint needs a CUDA GPU (it uses cuEquivariance kernels). BioEmu2 is
+released for research use; see its [model card](https://github.com/microsoft/bioemu2/blob/main/MODEL_CARD.md).
 
 ## Quick Start
 
@@ -103,14 +117,14 @@ Output files appear in `output/boltz2_pure_guidance/`: `refined.cif` (final ense
 
 | Argument          | Description                                                               |
 | ----------------- | ------------------------------------------------------------------------- |
-| `--model`         | `boltz1`, `boltz2`, `protenix`, or `rf3`                                  |
+| `--model`         | `boltz1`, `boltz2`, `protenix`, `rf3`, `protpardelle`, or `bioemu2`       |
 | `--guidance-type` | `pure_guidance`, `fk_steering`, or `latent_opt`                           |
 | `--protein`       | Protein identifier (should match naming used in grid search / evaluation) |
 | `--structure`     | Path to input structure file (CIF)                                        |
 | `--density`       | Path to density map (CCP4/MRC/MAP) — required by the default loss         |
 | `--resolution`    | Map resolution in Angstroms — required by the default loss                |
 
-Model-specific arguments (e.g. `--method` for boltz2, `--msa-path` for rf3) and guidance-type-specific arguments (e.g. `--num-particles` for fk_steering) are included automatically. Run `sampleworks-guidance --model <model> --guidance-type <type> --help` to see all available options.
+Model-specific arguments (e.g. `--method` for boltz2, `--msa-path` for rf3, `--bioemu2-mode` for bioemu2) and guidance-type-specific arguments (e.g. `--num-particles` for fk_steering) are included automatically. Run `sampleworks-guidance --model <model> --guidance-type <type> --help` to see all available options.
 
 ### Latent optimization (IT-opt)
 
@@ -447,7 +461,7 @@ uv sync --group test
 ```
 
 The existing GPU model environments are split by model, e.g. `boltz-dev`,
-`protenix-dev`, `rf3-dev`. To install dev dependencies and run tests there:
+`protenix-dev`, `rf3-dev`, `bioemu2-dev`. To install dev dependencies and run tests there:
 
 ```bash
 pixi install -e [model]-dev    # add pytest, ruff, ty

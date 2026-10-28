@@ -172,6 +172,7 @@ MODEL_PIXI_ENVS: dict[StructurePredictor, str] = {
     StructurePredictor.PROTENIX: "protenix",
     StructurePredictor.RF3: "rf3",
     StructurePredictor.PROTPARDELLE: "protpardelle",
+    StructurePredictor.BIOEMU2: "bioemu2",
 }
 
 
@@ -723,7 +724,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         default="boltz2",
-        choices=["boltz1", "boltz2", "protenix", "rf3", "protpardelle"],
+        choices=["boltz1", "boltz2", "protenix", "rf3", "protpardelle", "bioemu2"],
         help="The protein structure predictor model to use",
     )
     parser.add_argument(

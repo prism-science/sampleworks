@@ -28,7 +28,7 @@ Because we're dealing with ensemble models here, we need to make sure we properl
 
 ### 1. Protocols Over Inheritance
 
-Component interfaces are `typing.Protocol`s rather than base classes. Model wrappers (Boltz, Protenix, RF3, Protpardelle) are plain classes that inherit from nothing in sampleworks; they satisfy the protocols structurally. This keeps the wrapper classes free of a shared base-class hierarchy, so the code that wraps an external model's source (which we avoid modifying) does not need to subclass anything. Wrappers still import small sampleworks helpers and types, such as `GenerativeModelInput` from `models/protocol.py`.
+Component interfaces are `typing.Protocol`s rather than base classes. Model wrappers (Boltz, Protenix, RF3, Protpardelle, BioEmu2) are plain classes that inherit from nothing in sampleworks; they satisfy the protocols structurally. This keeps the wrapper classes free of a shared base-class hierarchy, so the code that wraps an external model's source (which we avoid modifying) does not need to subclass anything. Wrappers still import small sampleworks helpers and types, such as `GenerativeModelInput` from `models/protocol.py`.
 
 ### 2. Decouple Guidance from Generation
 
@@ -152,7 +152,7 @@ The `run_guidance()` function in `utils/guidance_script_utils.py` is the central
 
 ## Development Environment
 
-Dependencies are managed with [Pixi](https://pixi.sh). The model wrappers (Boltz, Protenix, RF3, Protpardelle) have mutually incompatible dependencies, so each model has its own `<model>` and `<model>-dev` environment; test in the matching `-dev` one. Other environments: `analysis[-dev]`, `boltz-analysis`, `boltz-osx`.
+Dependencies are managed with [Pixi](https://pixi.sh). The model wrappers (Boltz, Protenix, RF3, Protpardelle, BioEmu2) have mutually incompatible dependencies, so each model has its own `<model>` and `<model>-dev` environment; test in the matching `-dev` one. Other environments: `analysis[-dev]`, `boltz-analysis`, `boltz-osx`.
 
 | Command                           | Runs                                                |
 | --------------------------------- | --------------------------------------------------- |

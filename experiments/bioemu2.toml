@@ -1,0 +1,27 @@
+description = "BioEmu2 canonical occ-sweep job (equilibrium mode)."
+
+[defaults]
+DATA_DIR = "/data/inputs"
+RESULTS_DIR = "/data/results/bioemu2"
+MSA_CACHE_DIR = "/root/.sampleworks"
+PROTEINS_CSV = "${DATA_DIR}/proteins.csv"
+BIOEMU2_CHECKPOINT = "/checkpoints/bioemu2-preview/checkpoint.ckpt"
+
+[shared_args]
+proteins = "${PROTEINS_CSV}"
+model = "bioemu2"
+scalers = "pure_guidance"
+partial-diffusion-step = 120
+ensemble-sizes = "8"
+gradient-weights = "0.0 0.005 0.01 0.02 0.035 0.05 0.1"
+model-checkpoint = "${BIOEMU2_CHECKPOINT}"
+gradient-normalization = true
+augmentation = true
+align-to-input = true
+
+[[jobs]]
+name = "bioemu2"
+env = "bioemu2"
+gpu_count = 8
+output_subdir = "bioemu2"
+args = {}

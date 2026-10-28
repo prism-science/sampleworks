@@ -165,7 +165,7 @@ RUN --mount=type=cache,id=sampleworks-rattler-2,target=/root/.cache/rattler,shar
     pixi --version && \
     pixi info --no-config && \
     rm -rf /app/.pixi/envs && \
-    for env in boltz protenix rf3 protpardelle analysis; do \
+    for env in boltz protenix rf3 protpardelle bioemu2 analysis; do \
         echo "=== reinstalling ${env} ==="; \
         pixi reinstall -e "${env}" --frozen --no-config || { \
             echo "FATAL: pixi failed while reinstalling environment '${env}'."; \

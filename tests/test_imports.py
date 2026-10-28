@@ -2,8 +2,10 @@
 
 import pytest
 from sampleworks.utils.imports import (
+    BIOEMU2_AVAILABLE,
     BOLTZ_AVAILABLE,
     check_any_model_available,
+    check_bioemu2_available,
     check_boltz_available,
     check_protenix_available,
     check_rf3_available,
@@ -14,6 +16,15 @@ from sampleworks.utils.imports import (
     require_protenix,
     require_rf3,
     RF3_AVAILABLE,
+)
+
+
+ANY_MODEL_AVAILABLE = (
+    BOLTZ_AVAILABLE
+    or PROTENIX_AVAILABLE
+    or RF3_AVAILABLE
+    or PROTPARDELLE_AVAILABLE
+    or BIOEMU2_AVAILABLE
 )
 
 
@@ -32,14 +43,26 @@ class TestAvailabilityFlags:
         """RF3_AVAILABLE should be a boolean."""
         assert isinstance(RF3_AVAILABLE, bool)
 
+    def test_bioemu2_available_is_bool(self):
+        """BIOEMU2_AVAILABLE should be a boolean."""
+        assert isinstance(BIOEMU2_AVAILABLE, bool)
+
 
 class TestCheckFunctions:
     """Test the check_*_available helper functions."""
 
     def test_check_any_model_available_no_error(self):
         """check_any_model_available should not raise if any model available."""
-        if BOLTZ_AVAILABLE or PROTENIX_AVAILABLE or RF3_AVAILABLE or PROTPARDELLE_AVAILABLE:
+        if ANY_MODEL_AVAILABLE:
             check_any_model_available()
+
+    def test_check_bioemu2_available(self):
+        """check_bioemu2_available should match BIOEMU2_AVAILABLE flag."""
+        if BIOEMU2_AVAILABLE:
+            check_bioemu2_available()
+        else:
+            with pytest.raises(ImportError, match="BioEmu2 model wrapper"):
+                check_bioemu2_available()
 
     def test_check_boltz_available(self):
         """check_boltz_available should match BOLTZ_AVAILABLE flag."""
@@ -81,7 +104,7 @@ class TestCheckFunctions:
             with pytest.raises(ImportError, match=custom_msg):
                 check_rf3_available(custom_msg)
 
-        if not BOLTZ_AVAILABLE and not PROTENIX_AVAILABLE and not RF3_AVAILABLE:
+        if not ANY_MODEL_AVAILABLE:
             with pytest.raises(ImportError, match=custom_msg):
                 check_any_model_available(custom_msg)
 
@@ -135,7 +158,7 @@ class TestRequireDecorators:
         def any_model_function():
             return "executed"
 
-        if BOLTZ_AVAILABLE or PROTENIX_AVAILABLE or RF3_AVAILABLE:
+        if ANY_MODEL_AVAILABLE:
             assert any_model_function() == "executed"
         else:
             with pytest.raises(pytest.skip.Exception):
@@ -159,7 +182,7 @@ class TestRequireDecorators:
         def function_with_args(x: int, y: int) -> int:
             return x + y
 
-        if BOLTZ_AVAILABLE or PROTENIX_AVAILABLE or RF3_AVAILABLE:
+        if ANY_MODEL_AVAILABLE:
             assert function_with_args(2, 3) == 5
 
     def test_decorator_custom_message(self):
@@ -194,7 +217,7 @@ class TestRequireDecorators:
         def custom_any_model_function():
             return "executed"
 
-        if not BOLTZ_AVAILABLE and not PROTENIX_AVAILABLE and not RF3_AVAILABLE:
+        if not ANY_MODEL_AVAILABLE:
             with pytest.raises(pytest.skip.Exception, match=custom_msg):
                 custom_any_model_function()
 
@@ -252,4 +275,4 @@ class TestDecoratorIntegrationWithPytest:
     @require_any_model()
     def test_any_model_feature(self):
         """This test should be skipped if no models are available."""
-        assert BOLTZ_AVAILABLE or PROTENIX_AVAILABLE or RF3_AVAILABLE
+        assert ANY_MODEL_AVAILABLE

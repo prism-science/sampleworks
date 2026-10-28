@@ -114,6 +114,8 @@ pyarrow = "==17.0.0"
 [tool.pixi.environments]
 analysis = {features = ["analysis", "external-tools"]}
 analysis-dev = {features = ["analysis", "dev", "external-tools"]}
+bioemu2 = {features = ["bioemu2", "diffuse"]}
+bioemu2-dev = {features = ["bioemu2", "dev", "diffuse"]}
 boltz = {features = ["boltz", "diffuse"]}
 boltz-analysis = {features = ["boltz", "analysis"]}
 boltz-dev = {features = ["boltz", "dev", "diffuse"]}
@@ -124,6 +126,41 @@ protpardelle = {features = ["protpardelle", "diffuse"]}
 protpardelle-dev = {features = ["protpardelle", "dev", "diffuse"]}
 rf3 = {features = ["rf3", "diffuse"]}
 rf3-dev = {features = ["rf3", "dev", "diffuse"]}
+
+# BioEmu2 needs Python >=3.12 and torch >=2.11,<2.14, newer than every other
+# model env. Linux takes the CUDA 12.6 torch build and the cu12 cuEquivariance
+# kernels that the checkpoint's `trimul_variant: cueq` requires; macOS gets CPU
+# torch, enough for the checkpoint-free tests that use a tiny random model.
+[tool.pixi.feature.bioemu2]
+platforms = ["linux-64-cuda-12", "osx-arm64"]
+
+[tool.pixi.feature.bioemu2.dependencies]
+python = ">=3.12,<3.14"
+
+[tool.pixi.feature.bioemu2.pypi-dependencies]
+bioemu2 = "==0.1.0rc0"
+
+# atomworks 2.1.1 pins biotite==1.4.0 and caps torch<2.8 for its `ml` extra;
+# bioemu2 asks for biotite>=1.5 and torch>=2.11. Keep the shared structure stack
+# on biotite 1.4.0 (bioemu2 only uses AtomArray, pdbx and load_structure, which
+# 1.4.0 has) and lift the torch cap; the full fast test suite passes this way.
+[tool.pixi.feature.bioemu2.pypi-options.dependency-overrides]
+biotite = "==1.4.0"
+torch = ">=2.11,<2.14"
+
+[tool.pixi.feature.bioemu2.target.linux-64]
+
+[tool.pixi.feature.bioemu2.target.linux-64.pypi-dependencies]
+cuequivariance = "==0.11.1"
+cuequivariance-ops-cu12 = "==0.11.1"
+cuequivariance-ops-torch-cu12 = "==0.11.1"
+cuequivariance-torch = "==0.11.1"
+torch = {index = "https://download.pytorch.org/whl/cu126", version = "==2.13.0"}
+
+# The PyPI torch wheel bundles its own libomp, and conda-forge's llvm-openmp is
+# loaded too; without this the process aborts on import (macOS CPU tests only).
+[tool.pixi.feature.bioemu2.target.osx-arm64.activation.env]
+KMP_DUPLICATE_LIB_OK = "TRUE"
 
 [tool.pixi.feature.boltz]
 platforms = ["linux-64-cuda-12"]
@@ -258,10 +295,10 @@ cmd = "pytest -m gpu"
 # depends-on/alias mechanism only works within a single environment.
 # This continues past failures, exits 1 if any env failed.
 [tool.pixi.tasks.test-all]
-cmd = "f=0; pixi run -e boltz-dev all-tests || f=1; pixi run -e protenix-dev all-tests || f=1; pixi run -e rf3-dev all-tests || f=1; pixi run -e protpardelle-dev all-tests || f=1; exit $f"
+cmd = "f=0; pixi run -e boltz-dev all-tests || f=1; pixi run -e protenix-dev all-tests || f=1; pixi run -e rf3-dev all-tests || f=1; pixi run -e protpardelle-dev all-tests || f=1; pixi run -e bioemu2-dev all-tests || f=1; exit $f"
 
 [tool.pixi.tasks.test-fast]
-cmd = "f=0; pixi run -e boltz-dev tests || f=1; pixi run -e protenix-dev tests || f=1; pixi run -e rf3-dev tests || f=1; pixi run -e protpardelle-dev tests || f=1; exit $f"
+cmd = "f=0; pixi run -e boltz-dev tests || f=1; pixi run -e protenix-dev tests || f=1; pixi run -e rf3-dev tests || f=1; pixi run -e protpardelle-dev tests || f=1; pixi run -e bioemu2-dev tests || f=1; exit $f"
 
 # NOTE: if new model environment is added, we need new entries here
 # Per-env: pixi run -e rf3-dev tests "-k integration"

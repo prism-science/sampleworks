@@ -86,6 +86,49 @@ class TestFromCliUnified:
         assert getattr(config, "protpardelle_config_path") == "/data/cc89.yaml"
         assert config.num_diffusion_steps == 64
 
+    def test_model_specific_args_bioemu2(self):
+        argv = [
+            "--model",
+            "bioemu2",
+            "--guidance-type",
+            "pure_guidance",
+            "--model-checkpoint",
+            "/data/bioemu2-preview/checkpoint.ckpt",
+            "--bioemu2-mode",
+            "structure",
+            "--msa-path",
+            "/data/msa.a3m",
+            "--bioemu2-no-msa-server",
+            "--bioemu2-exclude-ligands",
+        ] + COMMON_ARGS
+        config = GuidanceConfig.from_cli(argv)
+        assert getattr(config, "model_checkpoint") == "/data/bioemu2-preview/checkpoint.ckpt"
+        assert getattr(config, "bioemu2_mode") == "structure"
+        assert getattr(config, "msa_path") == "/data/msa.a3m"
+        assert getattr(config, "bioemu2_no_msa_server") is True
+        assert getattr(config, "bioemu2_exclude_ligands") is True
+
+    def test_bioemu2_defaults_to_equilibrium_mode(self):
+        argv = ["--model", "bioemu2", "--guidance-type", "pure_guidance"] + COMMON_ARGS
+        config = GuidanceConfig.from_cli(argv)
+        assert getattr(config, "bioemu2_mode") == "equilibrium"
+        assert not getattr(config, "bioemu2_no_msa_server")
+        assert not getattr(config, "bioemu2_native_steering")
+
+    def test_bioemu2_native_steering_args(self):
+        argv = [
+            "--model",
+            "bioemu2",
+            "--guidance-type",
+            "fk_steering",
+            "--bioemu2-native-steering",
+            "--bioemu2-steering-weights",
+            "guidance",
+        ] + COMMON_ARGS
+        config = GuidanceConfig.from_cli(argv)
+        assert getattr(config, "bioemu2_native_steering") is True
+        assert getattr(config, "bioemu2_steering_weights") == "guidance"
+
     def test_guidance_specific_args_fk(self):
         argv = [
             "--model",

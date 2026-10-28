@@ -33,6 +33,7 @@ from sampleworks.utils.guidance_constants import (
     TrajectoryScalers,
 )
 from sampleworks.utils.imports import (
+    BIOEMU2_AVAILABLE,
     BOLTZ_AVAILABLE,
     PROTENIX_AVAILABLE,
     PROTPARDELLE_AVAILABLE,
@@ -68,6 +69,7 @@ def seq_5i09_deposited() -> str:
 
 
 if TYPE_CHECKING:
+    from sampleworks.models.bioemu2.wrapper import BioEmu2Wrapper
     from sampleworks.models.boltz.wrapper import (
         Boltz1Wrapper,
         Boltz2Wrapper,
@@ -90,6 +92,9 @@ if PROTPARDELLE_AVAILABLE:
 
 if RF3_AVAILABLE:
     from sampleworks.models.rf3.wrapper import RF3Wrapper
+
+if BIOEMU2_AVAILABLE:
+    from sampleworks.models.bioemu2.wrapper import BioEmu2Wrapper
 
 
 def _import_from_path(path: str) -> Any:
@@ -186,6 +191,14 @@ MODEL_WRAPPER_REGISTRY: dict[StructurePredictor, ComponentInfo] = {
         requires_checkpoint=True,
         annotate_fn_path="sampleworks.models.protpardelle.wrapper.annotate_structure_for_protpardelle",
         conditioning_type_path="sampleworks.models.protpardelle.wrapper.ProtpardelleConditioning",
+        requires_out_dir=False,
+    ),
+    StructurePredictor.BIOEMU2: ComponentInfo(
+        name="bioemu2",
+        module_path="sampleworks.models.bioemu2.wrapper.BioEmu2Wrapper",
+        requires_checkpoint=True,
+        annotate_fn_path="sampleworks.models.bioemu2.wrapper.annotate_structure_for_bioemu2",
+        conditioning_type_path="sampleworks.models.bioemu2.wrapper.BioEmu2Conditioning",
         requires_out_dir=False,
     ),
 }
@@ -798,6 +811,28 @@ def protpardelle_wrapper(protpardelle_checkpoint_path: Path, device: torch.devic
         checkpoint_path=protpardelle_checkpoint_path,
         device=device,
     )
+
+
+@pytest.fixture(scope="session")
+def bioemu2_checkpoint_path() -> Path:
+    if not BIOEMU2_AVAILABLE:
+        pytest.skip("BioEmu2 dependencies not installed in this environment")
+    from sampleworks.utils.guidance_script_arguments import _resolve_checkpoint
+
+    # The released checkpoint uses cuEquivariance kernels that have no CPU path.
+    if not torch.cuda.is_available():
+        pytest.skip("The BioEmu2 checkpoint requires CUDA")
+    try:
+        return Path(_resolve_checkpoint("bioemu2"))
+    except ValueError as error:
+        pytest.skip(str(error))
+
+
+@pytest.fixture(scope="session")
+def bioemu2_wrapper(bioemu2_checkpoint_path: Path, device: torch.device):
+    if not BIOEMU2_AVAILABLE:
+        pytest.skip("BioEmu2 dependencies not installed in this environment")
+    return BioEmu2Wrapper(checkpoint_path=bioemu2_checkpoint_path, device=device)
 
 
 @pytest.fixture

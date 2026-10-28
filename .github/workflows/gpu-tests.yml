@@ -33,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        environment: [boltz-dev, protenix-dev, rf3-dev]
+        environment: [boltz-dev, protenix-dev, rf3-dev, bioemu2-dev]
 
     name: ${{ matrix.environment }}
 

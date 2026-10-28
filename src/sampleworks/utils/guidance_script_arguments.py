@@ -32,6 +32,7 @@ _CHECKPOINT_ENV_VARS = {
     "boltz2": "BOLTZ2_CHECKPOINT",
     "rf3": "RF3_CHECKPOINT",
     "protenix": "PROTENIX_CHECKPOINT",
+    "bioemu2": "BIOEMU2_CHECKPOINT",
 }
 
 _CHECKPOINT_CANDIDATES = {
@@ -54,6 +55,11 @@ _CHECKPOINT_CANDIDATES = {
         "/checkpoints/protenix_base_default_v0.5.0.pt",
         "/mnt/diffuse-shared/raw/checkpoints/protenix_base_default_v0.5.0.pt",
         ".pixi/envs/protenix-dev/lib/python3.12/site-packages/release_data/checkpoint/protenix_base_default_v0.5.0.pt",
+    ],
+    # BioEmu2 reads config.yaml from the checkpoint's directory.
+    "bioemu2": [
+        "/checkpoints/bioemu2-preview/checkpoint.ckpt",
+        "/mnt/diffuse-shared/raw/checkpoints/bioemu2-preview/checkpoint.ckpt",
     ],
 }
 
@@ -229,6 +235,11 @@ _DYNAMIC_ATTRS = [
     "disable_chiral_features",
     "track_chiral_features",
     "protpardelle_config_path",
+    "bioemu2_mode",
+    "bioemu2_no_msa_server",
+    "bioemu2_exclude_ligands",
+    "bioemu2_native_steering",
+    "bioemu2_steering_weights",
     # generic (overridable)
     "ensemble_size",
     "recycling_steps",
@@ -903,12 +914,64 @@ def add_protpardelle_specific_args(parser: argparse.ArgumentParser | GuidanceCon
     )
 
 
+def add_bioemu2_specific_args(parser: argparse.ArgumentParser | GuidanceConfig):
+    """Add CLI arguments specific to BioEmu2 guidance runs."""
+    parser.add_argument(
+        "--model-checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Path to the BioEmu2 checkpoint.ckpt, with config.yaml beside it "
+            "(default: $BIOEMU2_CHECKPOINT or auto-resolved from /checkpoints/)"
+        ),
+    )
+    parser.add_argument(
+        "--bioemu2-mode",
+        type=str,
+        default="equilibrium",
+        choices=["equilibrium", "structure"],
+        help="BioEmu2 sampling mode: equilibrium ensemble or single folded structure",
+    )
+    parser.add_argument(
+        "--msa-path",
+        type=str,
+        default=None,
+        help="A3M file, JSON {chain_id: a3m}, or none to query the ColabFold server",
+    )
+    parser.add_argument(
+        "--bioemu2-no-msa-server",
+        action="store_true",
+        help="Without --msa-path, use single-sequence MSAs instead of querying ColabFold",
+    )
+    parser.add_argument(
+        "--bioemu2-exclude-ligands",
+        action="store_true",
+        help="Do not model non-polymer chains as CCD ligands",
+    )
+    parser.add_argument(
+        "--bioemu2-native-steering",
+        action="store_true",
+        help=(
+            "With --guidance-type fk_steering, sample with BioEmu2's own FKC sampler, using the "
+            "loss times --fk-lambda as the steering energy (baseline)"
+        ),
+    )
+    parser.add_argument(
+        "--bioemu2-steering-weights",
+        type=str,
+        default="smc",
+        choices=["smc", "guidance"],
+        help="FKC weights for --bioemu2-native-steering: smc (reweight only) or guidance",
+    )
+
+
 _MODEL_ARG_ADDERS: dict[str, Any] = {
     "boltz1": add_boltz1_specific_args,
     "boltz2": add_boltz2_specific_args,
     "protenix": add_protenix_specific_args,
     "rf3": add_rf3_specific_args,
     "protpardelle": add_protpardelle_specific_args,
+    "bioemu2": add_bioemu2_specific_args,
 }
 
 

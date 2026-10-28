@@ -28,6 +28,7 @@ class StructurePredictor(StrEnum):
     PROTENIX = "protenix"
     RF3 = "rf3"
     PROTPARDELLE = "protpardelle"
+    BIOEMU2 = "bioemu2"
 
 
 class TrajectorySamplers(StrEnum):
