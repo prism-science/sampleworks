@@ -9,6 +9,7 @@ from loguru import logger
 
 from sampleworks.core.forward_models.xray.real_space_density import (
     DifferentiableTransformer,
+    scale_map,
     XMap_torch,
 )
 from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.sf import (
@@ -445,7 +446,7 @@ def build_real_space_density_loss(
     selection_mask = atom_array.occupancy > 0
     logger.info(f"Selected {selection_mask.sum()} atoms with occupancy > 0")
 
-    return RealSpaceLossFunction(
+    loss = RealSpaceLossFunction(
         xmap,
         scattering_params,
         selection_mask,
@@ -453,3 +454,18 @@ def build_real_space_density_loss(
         loss_order=options.loss_order,
         device=device,
     )
+
+    # Experimental maps come in arbitrary units (sigma-scaled X-ray, raw cryo-EM) while the
+    # transformer computes absolute density. Scale the target map to the input structure's
+    # computed density, as qFit does, so the loss fits the map's shape rather than its level.
+    inputs = loss.structure_to_loss_input(context.structure)
+    target = loss.transformer.xmap.array
+    with torch.no_grad():
+        model_density = loss.transformer(**inputs).sum(0).to(target.dtype)
+        mask = loss.transformer.create_mask(inputs["coordinates"][0], radius=2.0)
+        loss.transformer.xmap.array = scale_map(target, model_density, mask)
+    logger.info(
+        f"Scaled target map to the input structure's computed density within 2 A of its atoms: "
+        f"masked std {target[mask].std():.3g} -> {loss.transformer.xmap.array[mask].std():.3g}"
+    )
+    return loss
