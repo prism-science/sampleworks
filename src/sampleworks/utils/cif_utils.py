@@ -38,6 +38,7 @@ _STRUCT_ASYM = "struct_asym"
 _PDBX_POLY_SEQ_SCHEME = "pdbx_poly_seq_scheme"
 _CHEM_COMP = "chem_comp"
 _STRUCT_CONN = "struct_conn"
+_PDBX_NONPOLY_SCHEME = "pdbx_nonpoly_scheme"
 # The dictionary's value for an item that does not apply, e.g. label_seq_id of a ligand atom.
 _INAPPLICABLE = "."
 # entity_poly_seq.hetero marks positions with more than one monomer; absent, it defaults to no.
@@ -940,7 +941,11 @@ def carry_polymer_entity_categories(
     position and entity, and its author chain, number and insertion code, from its scheme row,
     so residues the model built that the experiment did not resolve get the deposit's numbers
     too. The deposit's polymer categories and scheme are carried for the chains present, the
-    scheme's ``auth_seq_num`` filled for every modeled position. Where the model writes the
+    scheme's ``auth_seq_num`` filled for every modeled position. A ligand or water the deposit's
+    ``pdbx_nonpoly_scheme`` lists under the same author number, insertion code and monomer,
+    and under the label or author chain the row carries, takes that row's chain, entity and
+    author ids, and its ``pdbx_nonpoly_scheme``, ``struct_asym`` and ``entity`` rows are
+    carried; one the deposit lacks keeps its own. Where the model writes the
     canonical parent of a deposited modified residue (MET for MSE), the modeled monomer is
     added to ``entity_poly_seq`` as a
     heterogeneity row beside the deposit's, and ``chem_comp`` rows are carried for every
@@ -952,8 +957,9 @@ def carry_polymer_entity_categories(
     Parameters
     ----------
     output : CIFFile
-        Single-block output CIF containing ``atom_site``. Side effect: its polymer rows' label
-        and author ids are rewritten, its non-polymer rows' ``label_seq_id`` becomes ``.``,
+        Single-block output CIF containing ``atom_site``. Side effect: its polymer and
+        deposited ligand rows' label and author ids are rewritten, its non-polymer rows'
+        ``label_seq_id`` becomes ``.``,
         ``struct_conn`` partners follow both, and the carried categories are added or replaced.
     reference : str | Path | CIFFile
         Deposited reference CIF or its path.
@@ -997,6 +1003,42 @@ def carry_polymer_entity_categories(
     if not polymer_labels:
         raise ValueError("Output has no polymer residues")
 
+    # Each other row (ligand, water) is the deposit's pdbx_nonpoly_scheme row with its author
+    # number, insertion code and monomer, under the label or author chain the row carries.
+    atom_site = output_block[_ATOM_SITE]
+    nonpoly = category_to_dict(reference_block, _PDBX_NONPOLY_SCHEME)  # empty without one
+    candidates: dict[tuple[str, ...], set[int]] = {}  # (chain, number, code, monomer) -> rows
+    if nonpoly:
+        for index, (asym, strand, number, code, monomer) in enumerate(
+            zip(
+                nonpoly["asym_id"],
+                nonpoly["pdb_strand_id"],
+                nonpoly["pdb_seq_num"],
+                _blank_to_empty(nonpoly["pdb_ins_code"]),
+                nonpoly["mon_id"],
+                strict=True,
+            )
+        ):
+            for chain in (asym, strand):
+                candidates.setdefault((chain, number, code, monomer), set()).add(index)
+    ligands: dict[int, int] = {}  # atom_site row -> pdbx_nonpoly_scheme row
+    for row, (label, *key) in enumerate(
+        zip(
+            labels,
+            atom_site["auth_asym_id"].as_array(str),
+            atom_site["auth_seq_id"].as_array(str),
+            _blank_to_empty(atom_site["pdbx_PDB_ins_code"].as_array(str)),
+            atom_site["label_comp_id"].as_array(str),
+            strict=True,
+        )
+    ):
+        matches = candidates.get(tuple(key), set()) if label is None else set()
+        if len(matches) > 1:
+            raise ValueError(f"{key[3]} {key[0]} {key[1]}{key[2]} names several deposited ligands")
+        if matches:
+            (ligands[row],) = matches
+    ligand_rows = sorted(set(ligands.values()))
+
     asym_ids = {asym_id for asym_id, _, _ in polymer_labels}
     entity_ids = {entity_id for _, _, entity_id in polymer_labels}
     categories = {
@@ -1004,13 +1046,17 @@ def carry_polymer_entity_categories(
             [_select_category_rows(reference_block[name], column, value) for value in sorted(keep)]
         )
         for name, column, keep in (
-            (_ENTITY, "id", entity_ids),
+            (_ENTITY, "id", entity_ids | {nonpoly["entity_id"][row] for row in ligand_rows}),
             (_ENTITY_POLY, "entity_id", entity_ids),
             (_ENTITY_POLY_SEQ, "entity_id", entity_ids),
-            (_STRUCT_ASYM, "id", asym_ids),
+            (_STRUCT_ASYM, "id", asym_ids | {nonpoly["asym_id"][row] for row in ligand_rows}),
             (_PDBX_POLY_SEQ_SCHEME, "asym_id", asym_ids),
         )
     }
+    if ligand_rows:
+        categories[_PDBX_NONPOLY_SCHEME] = {
+            column: list(values[ligand_rows]) for column, values in nonpoly.items()
+        }
     carried_scheme = categories[_PDBX_POLY_SEQ_SCHEME]
     modeled = {(asym_id, seq_id) for asym_id, seq_id, _ in polymer_labels}
     has_coords = [
@@ -1028,7 +1074,6 @@ def carry_polymer_entity_categories(
         for p in scheme_positions(reference_block)
     }
 
-    atom_site = output_block[_ATOM_SITE]
     _add_modeled_monomers(categories[_ENTITY_POLY_SEQ], atom_site, labels)
     if _CHEM_COMP in reference_block:
         # Every monomer named by atom_site or by the carried sequence needs a chem_comp parent.
@@ -1062,47 +1107,37 @@ def carry_polymer_entity_categories(
             )
         categories[_CHEM_COMP] = chem_comp_rows
 
-    # Non-polymer rows (ligands, waters) keep their chain and entity but have no sequence position.
-    new_labels = [
-        (asym_id, _INAPPLICABLE, entity_id) if label is None else label
-        for asym_id, entity_id, label in zip(
-            atom_site["label_asym_id"].as_array(str),
-            atom_site["label_entity_id"].as_array(str),
-            labels,
-            strict=True,
-        )
-    ]
-    # Insertion codes as CIF tokens ("." when absent): biotite matches struct_conn partners to
-    # atom_site on the raw token, so both are written the same way.
-    insertion_codes = atom_site["pdbx_PDB_ins_code"].as_array(str)
-    insertion_codes = np.where(np.isin(insertion_codes, ["", "?"]), _INAPPLICABLE, insertion_codes)
-    new_author_ids = [
-        ids if label is None else author_ids[label[:2]]
-        for ids, label in zip(
-            zip(
-                atom_site["auth_asym_id"].as_array(str),
-                atom_site["auth_seq_id"].as_array(str),
-                insertion_codes,
-                strict=True,
-            ),
-            labels,
-            strict=True,
-        )
-    ]
+    # One (label asym, seq, entity, author chain, number, insertion code) per row: a polymer
+    # residue's from its scheme position, a deposited ligand's from its nonpoly row, any other
+    # row (ligand, water) its own without a sequence position. Insertion codes are CIF tokens
+    # ("." when absent): biotite matches struct_conn partners to atom_site on the raw token.
+    id_columns = (
+        "label_asym_id",
+        "label_seq_id",
+        "label_entity_id",
+        "auth_asym_id",
+        "auth_seq_id",
+        "pdbx_PDB_ins_code",
+    )
+    old_ids = list(zip(*(atom_site[column].as_array(str) for column in id_columns), strict=True))
+    new_ids: list[tuple[str, ...]] = []
+    for row, (label, (asym, _, entity, chain, number, code)) in enumerate(
+        zip(labels, old_ids, strict=True)
+    ):
+        if label is not None:
+            new_ids.append((*label, *author_ids[label[:2]]))
+        elif row in ligands:
+            columns = ("asym_id", "entity_id", "pdb_strand_id", "pdb_seq_num", "pdb_ins_code")
+            asym, entity, chain, number, code = (nonpoly[c][ligands[row]] for c in columns)
+            new_ids.append((asym, _INAPPLICABLE, entity, chain, number, code))
+        else:
+            code = _INAPPLICABLE if code in ("", "?") else code
+            new_ids.append((asym, _INAPPLICABLE, entity, chain, number, code))
     # set_structure names struct_conn partners by the atom_site labels it wrote; map them over.
     relabel = {
-        key: (*label[:2], ids[2])
-        for key, label, ids in zip(
-            zip(
-                atom_site["label_asym_id"].as_array(str),
-                atom_site["label_seq_id"].as_array(str),
-                _blank_to_empty(atom_site["pdbx_PDB_ins_code"].as_array(str)),
-                atom_site["label_comp_id"].as_array(str),
-                strict=True,
-            ),
-            new_labels,
-            new_author_ids,
-            strict=True,
+        (asym, seq, "" if code in (".", "?") else code, name): (ids[0], ids[1], ids[5])
+        for (asym, seq, _, _, _, code), name, ids in zip(
+            old_ids, atom_site["label_comp_id"].as_array(str), new_ids, strict=True
         )
     }
     partner_labels: dict[str, np.ndarray] = {}
@@ -1121,10 +1156,8 @@ def carry_polymer_entity_categories(
             partner_labels[f"ptnr{partner}_label_seq_id"] = np.array(seq_ids)
             partner_labels[f"pdbx_ptnr{partner}_PDB_ins_code"] = np.array(partner_codes)
 
-    for index, column in enumerate(("label_asym_id", "label_seq_id", "label_entity_id")):
-        atom_site[column] = np.array([label[index] for label in new_labels])
-    for index, column in enumerate(("auth_asym_id", "auth_seq_id", "pdbx_PDB_ins_code")):
-        atom_site[column] = np.array([ids[index] for ids in new_author_ids])
+    for index, column in enumerate(id_columns):
+        atom_site[column] = np.array([ids[index] for ids in new_ids])
     for column, values in partner_labels.items():
         output_block[_STRUCT_CONN][column] = values
     for name, data in categories.items():
