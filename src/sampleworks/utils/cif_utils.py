@@ -2,7 +2,7 @@ import itertools
 import re
 import tempfile
 from collections import OrderedDict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,7 @@ from sampleworks.utils.atom_array_utils import (
     save_structure_to_cif,
     select_altloc,
 )
+from sampleworks.utils.sequence import align_to_sequence
 
 
 # Extended PDB IDs use `pdb_` plus eight alphanumerics. Legacy IDs have four
@@ -362,122 +363,6 @@ def _canonical_monomer(name: str) -> str:
     return _closest_canonical_amino_acid(name) or name
 
 
-# Dynamic-programming key: (modeled residues placed so far, whether the path is currently
-# skipping reference residues).
-_DPKey = tuple[int, bool]
-# Dynamic-programming state: (deletion runs so far, matched reference indices or None once the
-# path is ambiguous, number of equally optimal paths capped at 2, first reference index at
-# which equally optimal paths disagree or None while the path is unique).
-_DPState = tuple[int, tuple[int, ...] | None, int, int | None]
-
-
-def _first_disagreement(first: tuple[int, ...], second: tuple[int, ...]) -> int | None:
-    """Return the smaller reference index at the first position where two paths differ."""
-    return next((min(a, b) for a, b in zip(first, second, strict=True) if a != b), None)
-
-
-def _unique_subsequence_indices(
-    reference: Sequence[str | list[str]], modeled: list[str]
-) -> tuple[list[int] | None, int | None]:
-    """Find a unique ordered embedding with the fewest deletion runs.
-
-    Cost counts runs of consecutive skipped reference residues, not residues, so a single
-    gap of three costs 1 while two separate one-residue gaps cost 2.
-
-    Parameters
-    ----------
-    reference : Sequence[str | list[str]]
-        Deposited monomer names, one entry per sequence position. A position with
-        microheterogeneity (``entity_poly_seq`` rows sharing a ``num``) is a list of the
-        alternatives, and a modeled residue matches it when it matches any of them.
-    modeled : list[str]
-        Modeled monomer names.
-
-    Returns
-    -------
-    tuple[list[int] | None, int | None]
-        ``(indices, None)`` with the reference index of each modeled residue when the optimal
-        embedding is unique; ``(None, index)`` when several embeddings are equally good, with
-        the first reference index at which they disagree; ``(None, None)`` when there is no
-        embedding at all.
-    """
-    alternatives = [
-        {_canonical_monomer(name) for name in ([names] if isinstance(names, str) else names)}
-        for names in reference
-    ]
-    modeled = [_canonical_monomer(name) for name in modeled]
-    states: dict[_DPKey, _DPState] = {(0, False): (0, (), 1, None)}
-
-    def update(
-        target: dict[_DPKey, _DPState],
-        key: _DPKey,
-        cost: int,
-        path: tuple[int, ...] | None,
-        count: int,
-        ambiguous_at: int | None,
-    ) -> None:
-        """Keep minimum-cost paths and mark equally optimal alternatives.
-
-        Parameters
-        ----------
-        target : dict
-            Dynamic-programming states for the next reference residue.
-        key : _DPKey
-            Modeled position and whether the path is deleting reference residues.
-        cost : int
-            Number of deletion runs in the candidate path.
-        path : tuple[int, ...] | None
-            Matched reference indices, or ``None`` for an ambiguous path.
-        count : int
-            Number of equally optimal paths, capped at two.
-        ambiguous_at : int | None
-            Where the candidate path first became ambiguous, or ``None``.
-        """
-        current = target.get(key)
-        if current is None or cost < current[0]:
-            target[key] = (cost, path, count, ambiguous_at)
-        elif cost == current[0]:
-            # Two equally good paths meet: remember the earliest residue they disagree on.
-            positions = [current[3], ambiguous_at]
-            if current[1] is not None and path is not None:
-                positions.append(_first_disagreement(current[1], path))
-            recorded = [position for position in positions if position is not None]
-            target[key] = (cost, None, min(2, current[2] + count), min(recorded, default=None))
-
-    # One pass per reference residue. Every state either skips it (cost +1 when that starts a
-    # new deletion run) or, when the names agree, matches it to the next modeled residue. A
-    # state reached twice at the same cost loses its path and keeps a count, so a non-unique
-    # optimum is reported as ambiguous instead of picked arbitrarily.
-    for reference_index, reference_names in enumerate(alternatives):
-        next_states: dict[_DPKey, _DPState] = {}
-        for (modeled_index, deleting), (cost, path, count, ambiguous_at) in states.items():
-            update(
-                next_states, (modeled_index, True), cost + (not deleting), path, count, ambiguous_at
-            )
-            if modeled_index < len(modeled) and modeled[modeled_index] in reference_names:
-                matched_path = None if path is None else (*path, reference_index)
-                update(
-                    next_states, (modeled_index + 1, False), cost, matched_path, count, ambiguous_at
-                )
-        states = next_states
-
-    candidates = [value for (index, _), value in states.items() if index == len(modeled)]
-    if not candidates:
-        return None, None
-    minimum_cost = min(value[0] for value in candidates)
-    optimal = [value for value in candidates if value[0] == minimum_cost]
-    if sum(value[2] for value in optimal) == 1 and optimal[0][1] is not None:
-        return list(optimal[0][1]), None
-    # Several optimal embeddings: the earliest recorded disagreement, or, when they survive as
-    # distinct unique paths, the first index on which those paths differ.
-    positions: list[int | None] = [value[3] for value in optimal]
-    paths = [value[1] for value in optimal if value[1] is not None]
-    if len(paths) > 1:
-        positions.append(_first_disagreement(paths[0], paths[-1]))
-    recorded = [position for position in positions if position is not None]
-    return None, min(recorded, default=0)
-
-
 def _matching_entity(reference_block: CIFBlock, residue_names: list[str]) -> tuple[str, list[str]]:
     """Find one deposited entity with a unique ordered modeled sequence match.
 
@@ -511,13 +396,21 @@ def _matching_entity(reference_block: CIFBlock, residue_names: list[str]) -> tup
         # Microheterogeneity lists several monomers at one num (e.g. CYS/CSO, or a point
         # mutation ASN/ASP): one alignment position, any of its monomers may match.
         nums = sorted({str(num) for num in sequence_nums[rows]}, key=lambda num: int(num))
-        reference_names: list[str | list[str]] = [
+        reference_names = [
             [str(name) for name in sequence_names[rows][sequence_nums[rows] == num]] for num in nums
         ]
-        indices, ambiguous_at = _unique_subsequence_indices(reference_names, residue_names)
-        if indices is not None:
-            matches.append((str(entity_id), [nums[index] for index in indices]))
-        elif ambiguous_at is not None:
+        # The output's own numbering is not the deposit's here, so it places no gaps.
+        positions, ambiguous_at = align_to_sequence(
+            [_canonical_monomer(name) for name in residue_names],
+            [{_canonical_monomer(name) for name in names} for names in reference_names],
+            None,
+            None,
+        )
+        if np.any(positions < 0):
+            continue  # no embedding in this entity
+        if ambiguous_at is None:
+            matches.append((str(entity_id), [nums[position] for position in positions]))
+        else:
             ambiguous.append(
                 f"entity {entity_id} around deposited residue {nums[ambiguous_at]} "
                 f"({'/'.join(reference_names[ambiguous_at])})"
