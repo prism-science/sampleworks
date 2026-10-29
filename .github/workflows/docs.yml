@@ -2,9 +2,7 @@ name: Docs
 
 on:
   push:
-    # fy/docs-sphinx is a temporary entry so the build can be checked from the PR; it comes
-    # out before the PR leaves draft. Only main publishes, see the deploy job below.
-    branches: [main, fy/docs-sphinx]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
