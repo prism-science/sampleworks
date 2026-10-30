@@ -29,6 +29,7 @@ from sampleworks.utils.guidance_constants import Losses
 
 if TYPE_CHECKING:
     import torch
+
     from sampleworks.core.losses.protocol import LossFunctionProtocol
 
 
