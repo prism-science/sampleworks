@@ -12,7 +12,6 @@ from biotite.structure.io.pdbx.cif import CIFBlock, CIFCategory, CIFFile
 from sampleworks.utils.cif_utils import (
     _canonical_monomer,
     _matching_entity,
-    _unique_subsequence_indices,
     carry_polymer_entity_categories,
 )
 from sampleworks.utils.guidance_script_arguments import GuidanceConfig
@@ -443,25 +442,6 @@ def test_carry_aligns_position_numbered_structure_to_deposit(carved_1vme, resour
         )
 
 
-def test_unique_subsequence_indices():
-    """Exact matches, the fewest deletion runs, canonical parents, ambiguity, no embedding."""
-    assert _unique_subsequence_indices(["GLY", "HIS", "SER"], ["GLY", "HIS", "SER"]) == (
-        [0, 1, 2],
-        None,
-    )
-    # One run of four deletions (cost 1) beats two separate runs (cost 2).
-    reference = ["ALA", "GLY", "SER", "ALA", "THR", "ALA"]
-    assert _unique_subsequence_indices(reference, ["ALA", "ALA"]) == ([0, 5], None)
-    assert _unique_subsequence_indices(["MSE", "CSO"], ["MET", "CYS"]) == ([0, 1], None)
-    # Two of three alanines: three equally good placements, disagreeing from the first residue.
-    assert _unique_subsequence_indices(["ALA"] * 3, ["ALA", "ALA"]) == (None, 0)
-    # The ambiguity is reported where it starts, not at the start of the sequence.
-    assert _unique_subsequence_indices(
-        ["GLY", "HIS", "ALA", "ALA", "ALA"], ["GLY", "HIS", "ALA", "ALA"]
-    ) == (None, 2)
-    assert _unique_subsequence_indices(["ALA"], ["GLY"]) == (None, None)
-
-
 def test_matching_entity_reports_ambiguous_placement():
     """Two of three alanines can sit in three equally good places; say so instead of guessing."""
     block = CIFBlock(
@@ -496,10 +476,6 @@ def test_matching_entity_accepts_any_deposited_alternative_at_a_position():
 
     assert _matching_entity(block, ["GLY", "ASP", "HIS"]) == ("1", ["1", "2", "3"])
     assert _matching_entity(block, ["GLY", "ASN", "HIS"]) == ("1", ["1", "2", "3"])
-    assert _unique_subsequence_indices(["GLY", ["ASN", "ASP"], "HIS"], ["ASP", "HIS"]) == (
-        [1, 2],
-        None,
-    )
 
 
 def test_save_everything_writes_cifs_when_entity_carry_fails(

@@ -608,6 +608,7 @@ class TestNormalizedAtomId:
 
         chain_a = arr[arr.chain_id == "A"]
         chain_b = arr[arr.chain_id == "B"]
+        chain_b.chain_id[:] = "A"  # ids carry the chain name
 
         ids_a = sorted(make_normalized_atom_id(chain_a))
         ids_b = sorted(make_normalized_atom_id(chain_b))
@@ -675,6 +676,7 @@ class TestFilterToCommonAtomsNormalized:
 
         chain_a = arr[arr.chain_id == "A"]
         chain_b = arr[arr.chain_id == "B"]
+        chain_b.chain_id[:] = "A"  # chains pair by name
 
         (fa, fb) = filter_to_common_atoms(chain_a, chain_b, normalize_ids=True)
         fa_arr = cast(AtomArray, fa[0])

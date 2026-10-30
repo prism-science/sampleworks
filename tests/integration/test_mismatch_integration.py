@@ -18,7 +18,6 @@ from sampleworks.core.samplers.protocol import StepParams
 from sampleworks.core.scalers.fk_steering import FKSteering
 from sampleworks.core.scalers.pure_guidance import PureGuidance
 from sampleworks.core.scalers.step_scalers import DataSpaceDPSScaler, NoiseSpaceDPSScaler
-from sampleworks.utils.atom_array_utils import make_normalized_atom_id
 from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.frame_transforms import apply_forward_transform
 from sampleworks.utils.guidance_script_arguments import GuidanceConfig
@@ -333,7 +332,7 @@ def mismatch_case_catalog(
         description="Real pair from 2YL0 density-input CIF versus full PDB.",
         model_structure=structure_2yl0_density,
         struct_structure=structure_2yl0,
-        expected_n_common=677,
+        expected_n_common=947,
     )
     catalog["from_5sop"] = _build_real_case(
         id="from_5sop",
@@ -463,18 +462,21 @@ class TestReconcilerConstruction:
         assert torch.all(reconciler.struct_indices < reconciler.n_struct)
 
     def test_common_atoms_have_matching_identity(self, mismatch_case: MismatchCase):
-        """Every reconciled common pair has matching normalized atom identity."""
+        """Every reconciled common pair joins the same atom of the same residue type."""
         reconciler = AtomReconciler.from_arrays(
             mismatch_case.model_atom_array,
             mismatch_case.struct_atom_array,
         )
 
-        model_ids = make_normalized_atom_id(mismatch_case.model_atom_array)
-        struct_ids = make_normalized_atom_id(mismatch_case.struct_atom_array)
+        def identities(atoms: AtomArray, indices: torch.Tensor) -> list[tuple[str, str]]:
+            # MSE pairs with MET (SE with SD), as in the reconciler.
+            res_names = np.where(atoms.res_name == "MSE", "MET", atoms.res_name)
+            atom_names = np.where(atoms.atom_name == "SE", "SD", atoms.atom_name)
+            idx = indices.detach().cpu().numpy()
+            return list(zip(res_names[idx], atom_names[idx], strict=True))
 
-        np.testing.assert_array_equal(
-            model_ids[reconciler.model_indices.detach().cpu().numpy()],
-            struct_ids[reconciler.struct_indices.detach().cpu().numpy()],
+        assert identities(mismatch_case.model_atom_array, reconciler.model_indices) == identities(
+            mismatch_case.struct_atom_array, reconciler.struct_indices
         )
 
 

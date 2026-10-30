@@ -3,7 +3,11 @@
 import numpy as np
 import pytest
 from sampleworks.utils.atom_array_utils import make_normalized_atom_id
-from sampleworks.utils.sequence import apply_sequence_override, validate_seq_with_error
+from sampleworks.utils.sequence import (
+    align_to_sequence,
+    apply_sequence_override,
+    validate_seq_with_error,
+)
 
 
 @pytest.mark.parametrize("stacked", [False, True])
@@ -544,6 +548,46 @@ def test_insertion_codes_next_to_gap():
     updated = apply_sequence_override(structure, "MACDEFGHI")["asym_unit"]
 
     np.testing.assert_array_equal(updated.seq_idx, [0, 1, 2, 3, 4, 7, 8])
+
+
+def _align(observed, sequence, numbers=None, codes=None):
+    """Run align_to_sequence on lists, returning positions as a list and the ambiguity."""
+    positions, ambiguous_at = align_to_sequence(
+        observed,
+        sequence,
+        None if numbers is None else np.array(numbers),
+        None if numbers is None else np.array(codes or [""] * len(numbers)),
+    )
+    return positions.tolist(), ambiguous_at
+
+
+def test_align_to_sequence_without_numbering():
+    """Exact matches, the fewest skipped runs, alternatives, ties where they start, no match."""
+    assert _align(["GLY", "HIS", "SER"], ["GLY", "HIS", "SER"]) == ([0, 1, 2], None)
+    # One run of four skipped positions beats a skipped run at each end.
+    assert _align(["ALA", "ALA"], ["ALA", "GLY", "SER", "ALA", "THR", "ALA"]) == ([0, 5], None)
+    # A microheterogeneity position matches any of its monomers.
+    assert _align(["ASP", "HIS"], ["GLY", {"ASN", "ASP"}, "HIS"]) == ([1, 2], None)
+    # Two of three alanines fit three ways, disagreeing from the first position.
+    assert _align(["ALA", "ALA"], ["ALA"] * 3)[1] == 0
+    # A tie is reported where it starts, not at the start of the sequence.
+    assert _align(["GLY", "HIS", "ALA", "ALA"], ["GLY", "HIS", "ALA", "ALA", "ALA"])[1] == 2
+    assert _align(["GLY"], ["ALA"]) == ([-1], None)
+
+
+def test_align_to_sequence_places_gaps_where_numbering_skips():
+    """Numbering places a gap inside a run of identical residues, where names alone cannot."""
+    # His-tag with residue 4 unresolved: by name alone the gap could be after any HIS.
+    sequence = list("MHHHHHHG")
+    observed, numbers = list("MHHHHHG"), [1, 2, 3, 5, 6, 7, 8]
+
+    assert _align(observed, sequence, numbers) == ([0, 1, 2, 4, 5, 6, 7], None)
+    assert _align(observed, sequence)[1] is not None
+
+
+def test_align_to_sequence_keeps_mismatches_in_place():
+    """A residue whose name matches nowhere it fits stays unplaced instead of shifting others."""
+    assert _align(list("MKXEF"), list("MKLEF"), [1, 2, 3, 4, 5]) == ([0, 1, -1, 3, 4], None)
 
 
 def test_reset_numbering_raises_malformed():

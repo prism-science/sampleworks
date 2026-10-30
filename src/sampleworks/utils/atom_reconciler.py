@@ -20,6 +20,7 @@ from sampleworks.utils.frame_transforms import (
     apply_forward_transform,
     weighted_rigid_align_differentiable,
 )
+from sampleworks.utils.sequence import align_to_sequence
 
 
 def _normalize_methionine_chalcogen_names(atom_array: AtomArray) -> AtomArray:
@@ -43,6 +44,102 @@ def _normalize_methionine_chalcogen_names(atom_array: AtomArray) -> AtomArray:
     normalized = atom_array.copy()
     normalized.atom_name[mse_selenium] = "SD"
     return normalized
+
+
+def _pair_struct_chains(model_array: AtomArray, struct_array: AtomArray) -> AtomArray:
+    """Rename structure chains to the model chains they correspond to.
+
+    ``make_normalized_atom_id`` pairs atoms by chain name. A structure chain pairs with the
+    model chain of the same name; the remaining structure chains pair with the remaining
+    model chains in order of first appearance (a model naming chains A, B against an input's
+    L, H pairs L with A).
+
+    Parameters
+    ----------
+    model_array
+        The generative model's atom array.
+    struct_array
+        The input structure's atom array.
+
+    Returns
+    -------
+    AtomArray
+        ``struct_array`` unchanged when every structure chain has a same-named model chain,
+        otherwise a copy with renamed chains. Structure chains left over once the model's
+        are used up keep their names.
+    """
+    model_chains = list(dict.fromkeys(model_array.chain_id.tolist()))
+    struct_chains = list(dict.fromkeys(struct_array.chain_id.tolist()))
+    unpaired_model = [chain for chain in model_chains if chain not in struct_chains]
+    unpaired_struct = [chain for chain in struct_chains if chain not in model_chains]
+    renames = dict(zip(unpaired_struct, unpaired_model))
+    if not renames:
+        return struct_array
+    paired = struct_array.copy()
+    paired.chain_id = np.array([renames.get(chain, chain) for chain in paired.chain_id])
+    return paired
+
+
+def _register_struct_residues(model_array: AtomArray, struct_array: AtomArray) -> AtomArray:
+    """Annotate ``seq_idx`` on structure chains that lack residues the model has.
+
+    ``make_normalized_atom_id`` numbers residues densely per chain, so a structure chain
+    with unresolved residues (e.g. a disordered terminus the model builds from the full
+    sequence) is shifted against the model and pairs atoms of different residues. For each
+    same-named chain pair where the structure has fewer residues, the structure's residues are
+    placed on the model's by name and numbering (:func:`align_to_sequence`), and ``seq_idx``
+    is set to the model position.
+
+    Parameters
+    ----------
+    model_array
+        The generative model's atom array.
+    struct_array
+        The input structure's atom array, chains named as their model partners.
+
+    Returns
+    -------
+    AtomArray
+        ``struct_array`` unchanged when it already has ``seq_idx`` or no chain is shorter
+        than its model chain, otherwise a copy with ``seq_idx``. Structure residues that
+        align to no model residue get positions past the model chain's end, so they match
+        nothing.
+    """
+    if "seq_idx" in struct_array.get_annotation_categories():
+        return struct_array
+
+    def residues(chain_array: AtomArray) -> tuple[np.ndarray, np.ndarray, list[str]]:
+        # A residue is a (res_id, ins_code) pair, as in make_normalized_atom_id.
+        keys = list(zip(chain_array.res_id.tolist(), chain_array.ins_code.tolist()))
+        key_to_residue = {key: index for index, key in enumerate(dict.fromkeys(keys))}
+        residue_of_atom = np.array([key_to_residue[key] for key in keys])  # (n_atoms,)
+        first_atoms = np.unique(residue_of_atom, return_index=True)[1]  # (n_residues,)
+        names = chain_array.res_name[first_atoms]
+        return residue_of_atom, first_atoms, np.where(names == "MSE", "MET", names).tolist()
+
+    seq_idx = np.full(len(struct_array), -1, dtype=np.int64)
+    for chain in set(model_array.chain_id) & set(struct_array.chain_id):
+        _, _, model_names = residues(model_array[model_array.chain_id == chain])
+        struct_mask = struct_array.chain_id == chain
+        struct_chain_array = struct_array[struct_mask]
+        residue_of_atom, first_atoms, struct_names = residues(struct_chain_array)
+        if len(struct_names) >= len(model_names):
+            continue
+        residue_seq_idx, _ = align_to_sequence(
+            struct_names,
+            model_names,
+            struct_chain_array.res_id[first_atoms],
+            struct_chain_array.ins_code[first_atoms],
+        )
+        unaligned = residue_seq_idx < 0
+        residue_seq_idx[unaligned] = len(model_names) + np.flatnonzero(unaligned)
+        seq_idx[struct_mask] = residue_seq_idx[residue_of_atom]
+
+    if not np.any(seq_idx >= 0):
+        return struct_array
+    registered = struct_array.copy()
+    registered.set_annotation("seq_idx", seq_idx)
+    return registered
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +204,12 @@ class AtomReconciler:
         AtomReconciler
         """
         model_array_for_matching = _normalize_methionine_chalcogen_names(model_array)
-        struct_array_for_matching = _normalize_methionine_chalcogen_names(struct_array)
+        struct_array_for_matching = _register_struct_residues(
+            model_array_for_matching,
+            _pair_struct_chains(
+                model_array_for_matching, _normalize_methionine_chalcogen_names(struct_array)
+            ),
+        )
         _, (m_idx, s_idx) = filter_to_common_atoms(
             model_array_for_matching,
             struct_array_for_matching,
