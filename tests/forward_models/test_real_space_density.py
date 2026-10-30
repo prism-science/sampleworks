@@ -41,7 +41,7 @@ def test_target_does_not_depend_on_map_units(model_map_and_mask):
     xmap = correlated_map(model_map, mask, correlation=0.5)
 
     reference = scale_map(xmap, model_map, mask)
-    for factor in (1 / 30, 30):
+    for factor in (1e-3, 1 / 30, 1, 30, 1e3):
         torch.testing.assert_close(scale_map(xmap * factor, model_map, mask), reference)
 
 
@@ -64,3 +64,19 @@ def test_constant_map_cannot_be_scaled(model_map_and_mask):
     model_map, mask = model_map_and_mask
     with pytest.raises(ValueError, match="constant within the mask"):
         scale_map(torch.full_like(model_map, 2.0), model_map, mask)
+
+
+def test_constant_model_cannot_be_scaled_to(model_map_and_mask):
+    """A flat model density would scale the target to a constant, losing all contrast."""
+    model_map, mask = model_map_and_mask
+    with pytest.raises(ValueError, match="constant within the mask"):
+        scale_map(model_map, torch.full_like(model_map, 2.0), mask)
+
+
+def test_single_voxel_mask_cannot_be_scaled(model_map_and_mask):
+    """One voxel has no spread to match, so its std is undefined rather than zero."""
+    model_map, _ = model_map_and_mask
+    mask = torch.zeros_like(model_map, dtype=torch.bool)
+    mask[8, 8, 8] = True
+    with pytest.raises(ValueError, match="constant within the mask"):
+        scale_map(model_map * 2.0, model_map, mask)
