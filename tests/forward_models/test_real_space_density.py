@@ -1,8 +1,14 @@
-"""Tests for scaling an experimental map to a model's computed density."""
+"""Tests for the real-space density forward model and for scaling a map to it."""
 
+import numpy as np
 import pytest
 import torch
-from sampleworks.core.forward_models.xray.real_space_density import scale_map
+from sampleworks.core.forward_models.xray.real_space_density import (
+    DifferentiableTransformer,
+    scale_map,
+    XMap_torch,
+)
+from sampleworks.core.losses.real_space_density import setup_scattering_params
 
 
 @pytest.fixture
@@ -80,3 +86,15 @@ def test_single_voxel_mask_cannot_be_scaled(model_map_and_mask):
     mask[8, 8, 8] = True
     with pytest.raises(ValueError, match="constant within the mask"):
         scale_map(model_map * 2.0, model_map, mask)
+
+
+def test_transformer_rejects_a_cropped_symmetric_map(density_map_1vme):
+    """The transformer places symmetry copies on the map's own grid, so a cropped P2_1 map
+    would put them in the wrong place."""
+    cropped = density_map_1vme.extract(np.array([[10.0, 10.0, 10.0]]), padding=5.0)
+
+    with pytest.raises(ValueError, match="unit cell"):
+        DifferentiableTransformer(
+            XMap_torch(cropped),
+            setup_scattering_params(em_mode=False, device=torch.device("cpu")),
+        )

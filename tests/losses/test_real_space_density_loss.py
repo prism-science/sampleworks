@@ -26,6 +26,7 @@ from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.sf import
     ATOM_STRUCTURE_FACTORS,
     ELEMENT_TO_ATOMIC_NUM,
 )
+from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.volume import XMap
 from sampleworks.core.losses.options import RealSpaceDensityOptions
 from sampleworks.core.losses.real_space_density import (
     build_real_space_density_loss,
@@ -513,6 +514,68 @@ class TestBuildRealSpaceDensityLoss:
         )
 
         assert torch.isfinite(loss(**loss.structure_to_loss_input(structure_1vme_density)))
+
+    def test_vmap_over_particles_on_cpu(self, structure_1vme_density, density_path_1vme):
+        """Particle methods score the loss under torch.vmap, which the CPU path must support,
+        giving the same losses as scoring each particle on its own."""
+        loss = build_real_space_density_loss(
+            RealSpaceDensityOptions(density=str(density_path_1vme), resolution=1.8),
+            LossBuildContext(structure=structure_1vme_density, device=torch.device("cpu")),
+        )
+        inputs = loss.structure_to_loss_input(structure_1vme_density)
+        unique_combinations, inverse_indices = loss.precompute_unique_combinations(
+            inputs["elements"], inputs["b_factors"]
+        )
+        score = partial(
+            loss,
+            elements=inputs["elements"],
+            b_factors=inputs["b_factors"],
+            occupancies=inputs["occupancies"],
+            unique_combinations=unique_combinations,
+            inverse_indices=inverse_indices,
+        )
+        particles = torch.stack([inputs["coordinates"], inputs["coordinates"] + 0.3])
+
+        torch.testing.assert_close(
+            torch.vmap(score)(particles), torch.stack([score(p) for p in particles])
+        )
+
+    def test_cropped_map_gives_the_full_map_target(
+        self, structure_1vme_density, density_path_1vme, resources_dir, tmp_path, device
+    ):
+        """A map boxed around the model has a grid offset and does not span the unit cell,
+        so symmetry copies only land correctly once the builder expands it back."""
+        context = LossBuildContext(structure=structure_1vme_density, device=device)
+        full = build_real_space_density_loss(
+            RealSpaceDensityOptions(density=str(density_path_1vme), resolution=1.8), context
+        )
+        inputs = full.structure_to_loss_input(structure_1vme_density)
+        coordinates = inputs["coordinates"].reshape(-1, 3)
+        # Boxed by gemmi rather than qfit, so the header (grid start, axis order) and a box
+        # wider than the cell along a come from an independent writer.
+        cropped_path = tmp_path / "cropped.ccp4"
+        boxed = gemmi.read_ccp4_map(str(density_path_1vme), setup=True)
+        cif_path = resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
+        boxed.set_extent(gemmi.read_structure(str(cif_path)).calculate_fractional_box(margin=5.0))
+        boxed.write_ccp4_map(str(cropped_path))
+        boxed_xmap = XMap.fromfile(str(cropped_path), resolution=1.8)
+        assert not boxed_xmap.is_canonical_unit_cell()
+        cropped = build_real_space_density_loss(
+            RealSpaceDensityOptions(density=str(cropped_path), resolution=1.8), context
+        )
+
+        with torch.no_grad():
+            torch.testing.assert_close(cropped.transformer(**inputs), full.transformer(**inputs))
+            mask = full.transformer.create_mask(coordinates, radius=2.0)
+        full_target = full.transformer.xmap.array[mask]
+        # The expanded map rebuilds the 2_1 mate from the crop, and the deposited map obeys
+        # that screw axis only to ~0.4% of its peak.
+        torch.testing.assert_close(
+            cropped.transformer.xmap.array[mask],
+            full_target,
+            rtol=0,
+            atol=0.01 * full_target.abs().max().item(),
+        )
 
     def test_target_does_not_depend_on_model_order(
         self, structure_1vme_density, density_path_1vme, device

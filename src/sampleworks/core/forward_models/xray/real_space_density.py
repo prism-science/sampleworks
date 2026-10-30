@@ -370,6 +370,16 @@ class DifferentiableTransformer(torch.nn.Module):
         self.unit_cell = xmap.unit_cell
         if space_group is not None:
             self.unit_cell.space_group = GetSpaceGroup(space_group)
+        # Symmetry copies and periodic wrapping are computed on the map's own grid, which
+        # is only the crystal's frame when the map spans exactly one unit cell.
+        if (
+            len(self.unit_cell.space_group.symop_list) > 1
+            and not xmap.xmap.is_canonical_unit_cell()
+        ):
+            raise ValueError(
+                "The map does not span exactly one unit cell, so symmetry copies would land "
+                "in the wrong place. Expand it first with XMap.canonical_unit_cell()."
+            )
 
         self.grid_shape = xmap.shape
 
@@ -983,11 +993,10 @@ def dilate_points_torch(
         + grid_points_flat[:, 0]  # x
     ).long()  # [n_active_atoms * n_nearby]
 
-    result.view(-1).scatter_add_(
-        0, flat_grid_indices, densities
+    # Out of place so torch.vmap can batch the source while result stays unbatched.
+    return (
+        result.view(-1).scatter_add(0, flat_grid_indices, densities).view_as(result)
     )  # Add onto [batch_size * grid_z * grid_y * grid_x] shape
-
-    return result
 
 
 def scattering_integrand(

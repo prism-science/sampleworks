@@ -437,6 +437,11 @@ def build_real_space_density_loss(
 
     logger.debug(f"Loading density map from {options.density}")
     xmap = XMap.fromfile(options.density, resolution=options.resolution)
+    # The forward model places symmetry copies on the map's own grid, so a cropped map must
+    # be expanded to the unit cell. P1 maps are left as they are: canonical_unit_cell drops
+    # the origin that cryo-EM maps carry, and the identity operation needs no expansion.
+    if len(xmap.unit_cell.space_group.symop_list) > 1 and not xmap.is_canonical_unit_cell():
+        xmap = xmap.canonical_unit_cell()
 
     logger.debug("Setting up scattering parameters")
     atom_array = context.structure["asym_unit"]
