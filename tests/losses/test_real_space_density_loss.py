@@ -532,3 +532,43 @@ class TestBuildRealSpaceDensityLoss:
             targets.append(build_real_space_density_loss(options, context).transformer.xmap.array)
 
         torch.testing.assert_close(targets[0], targets[1])
+
+    def test_mask_covers_the_computed_density(
+        self, structure_1vme_density, density_path_1vme, device
+    ):
+        """Every voxel the forward model puts density on lies within rmax of a symmetry copy
+        of an atom, so a mask of that radius must cover all of it. A mask in another frame,
+        axis order, or symmetry convention leaves density outside."""
+        loss = build_real_space_density_loss(
+            RealSpaceDensityOptions(density=str(density_path_1vme), resolution=1.8),
+            LossBuildContext(structure=structure_1vme_density, device=device),
+        )
+        inputs = loss.structure_to_loss_input(structure_1vme_density)
+        with torch.no_grad():
+            density = loss.transformer(**inputs).sum(0)
+            # A small margin keeps voxels at exactly rmax from failing on float rounding.
+            radius = loss.transformer.density_params.rmax + 0.1
+            mask = loss.transformer.create_mask(inputs["coordinates"].reshape(-1, 3), radius)
+
+        outside = density[~mask].abs().sum() / density.abs().sum()
+        assert outside == 0, f"{outside:.2%} of the computed density lies outside the mask"
+
+    @pytest.mark.gpu
+    def test_torch_and_cuda_density_agree(self, structure_1vme_density, density_path_1vme):
+        """The pure-torch path is the CPU fallback for the CUDA kernel, so both must compute
+        the same density."""
+        if not torch.cuda.is_available():
+            pytest.skip("needs CUDA")
+        loss = build_real_space_density_loss(
+            RealSpaceDensityOptions(density=str(density_path_1vme), resolution=1.8),
+            LossBuildContext(structure=structure_1vme_density, device=torch.device("cuda")),
+        )
+        inputs = loss.structure_to_loss_input(structure_1vme_density)
+        with torch.no_grad():
+            cuda_density = loss.transformer(**inputs)
+            loss.transformer.use_cuda_kernels = False
+            torch_density = loss.transformer(**inputs)
+
+        # The kernel reads the radial profile at the nearest 0.01 A step; the torch path
+        # interpolates linearly between steps.
+        torch.testing.assert_close(torch_density, cuda_density, rtol=1e-2, atol=1e-3)
