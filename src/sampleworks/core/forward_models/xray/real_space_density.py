@@ -208,88 +208,6 @@ class XMap_torch:
         xmap_writer.array = density
         xmap_writer.tofile(filename)
 
-    def apply_symmetry(
-        self,
-        density: torch.Tensor,
-    ) -> torch.Tensor:
-        """Apply crystallographic symmetry operations to density maps in batch.
-
-        Parameters
-        ----------
-        density: torch.Tensor
-            Input density grid of shape (batch_size, *grid_shape).
-
-        Returns
-        -------
-        torch.Tensor
-            Symmetry-expanded density grid.
-        """
-        batch_size = density.shape[0]
-        grid_shape = density.shape[1:]
-        device = density.device
-        n_ops = len(self.R_matrices)
-
-        base_coords = torch.stack(
-            torch.meshgrid(*[torch.arange(s, device=device) for s in grid_shape], indexing="ij"),
-            dim=-1,
-        ).float()  # [z, y, x, 3]
-
-        base_coords = base_coords.reshape(1, -1, 3)  # [1, z*y*x, 3]
-        grid_shape_tensor = torch.tensor(grid_shape, device=device)
-        grid_shape_tensor_xyz = torch.tensor(
-            grid_shape[::-1], device=device, dtype=self.t_vectors.dtype
-        )  # [nx, ny, nz]
-
-        base_coords_xyz = base_coords[..., [2, 1, 0]]  # [1, z*y*x, 3] -> (x,y,z order)
-
-        # Apply rotation to (x, y, z) coordinates
-        rotated_coords_xyz = torch.matmul(
-            base_coords_xyz, self.R_matrices.transpose(-1, -2)
-        )  # [1, z*y*x, 3] @ [n_ops, 3, 3] -> [n_ops, z*y*x, 3] (x,y,z order)
-
-        # Apply translation scaled by (nx, ny, nz)
-        translated_coords_xyz = rotated_coords_xyz + self.t_vectors.unsqueeze(
-            1
-        ) * grid_shape_tensor_xyz.view(1, 1, 3)  # [n_ops, z*y*x, 3] (x,y,z order)
-
-        translated_coords_zyx = translated_coords_xyz[
-            ..., [2, 1, 0]
-        ]  # [n_ops, z*y*x, 3] (z,y,x order)
-        translated_coords_zyx = translated_coords_zyx % grid_shape_tensor.view(
-            1, 1, 3
-        )  # Apply modulo in z,y,x order
-
-        transformed_coords = translated_coords_zyx.reshape(
-            n_ops, *grid_shape, 3
-        )  # [n_ops, z, y, x, 3] (z,y,x order)
-
-        # Normalize coordinates to [-1, 1] for grid_sample
-        normalized_coords = (
-            transformed_coords
-            / grid_shape_tensor.view(1, 1, 1, 1, 3)  # Use z,y,x shape for normalization
-        ) * 2 - 1
-
-        transposed_density = density.unsqueeze(0)  # [1, batch_size, z, y, x]
-        expanded_density = transposed_density.expand(
-            n_ops, batch_size, *grid_shape
-        )  # [n_ops, batch_size, z, y, x]
-        normalized_coords_xyz = normalized_coords[
-            ..., [2, 1, 0]
-        ]  # [n_ops, z, y, x, 3] (x,y,z order for sampling)
-
-        transformed_density = F.grid_sample(
-            expanded_density,  # Input: [n_ops, batch_size, z, y, x] (N, C, D, H, W)
-            # Grid: [n_ops, z, y, x, 3] (N, D, H, W, 3) expected order (x,y,z)
-            normalized_coords_xyz,
-            mode="bilinear",
-            align_corners=False,
-            padding_mode="border",
-        )  # Result: [n_ops, batch_size, z, y, x]
-
-        summed_density = transformed_density.sum(dim=0)  # [batch_size, z, y, x]
-
-        return summed_density
-
     def downsample_to_resolution(
         self,
         target_resolution: float,
@@ -572,21 +490,8 @@ class DifferentiableTransformer(torch.nn.Module):
             radial_densities = radial_densities.to(dtype=self.dtype).float()
             radial_derivatives = radial_derivatives.to(dtype=self.dtype).float()
 
-            grid_shape_tensor = torch.tensor(self.grid_shape, device=self.device)
-
-            grid_coor_rot = torch.einsum(
-                "rji,bni->brnj",
-                self.xmap.R_matrices,
-                grid_coordinates,
-            )
-
-            # Apply fractional translation scaled by (nx, ny, nz)
-            grid_coor_rot += self.xmap.t_vectors.unsqueeze(1) * grid_shape_tensor.flip(0).view(
-                1, 1, 3
-            )
-
             final_density = dilate_atom_centric(
-                grid_coor_rot,
+                self._symmetry_expand(grid_coordinates),
                 occupancies,
                 radial_densities,
                 radial_derivatives,
@@ -600,30 +505,58 @@ class DifferentiableTransformer(torch.nn.Module):
             radial_densities = self._compute_radial_densities(
                 elements, b_factors, unique_combinations, inverse_indices
             ).to(dtype=self.dtype)
-            base_density = dilate_points_torch(
-                grid_coordinates,
-                active,
-                occupancies,
+            # Dilate every symmetry copy of every atom, as the CUDA kernel does: flatten
+            # [batch, ops, atoms, 3] to [batch, ops * atoms, 3] (ops outer, atoms inner)
+            # and repeat the per-atom inputs over ops in the same order.
+            n_ops = len(self.xmap.R_matrices)
+            symmetry_coordinates = self._symmetry_expand(grid_coordinates)
+            final_density = dilate_points_torch(
+                symmetry_coordinates.reshape(symmetry_coordinates.shape[0], -1, 3),
+                active.repeat(1, n_ops),
+                occupancies.repeat(1, n_ops),
                 lmax,
-                radial_densities,
+                radial_densities.repeat(1, n_ops, 1),
                 self.density_params.rstep,
                 self.density_params.rmax,
                 self.grid_to_cartesian,
                 self.grid_shape,
             )
 
-            final_density = self.xmap.apply_symmetry(base_density)
-
         return final_density
+
+    def _symmetry_expand(self, grid_coordinates: torch.Tensor) -> torch.Tensor:
+        """Apply the space group's symmetry operations to atom grid coordinates.
+
+        Parameters
+        ----------
+        grid_coordinates: torch.Tensor
+            Grid coordinates in (a, b, c) order, of shape (batch_size, n_atoms, 3).
+
+        Returns
+        -------
+        torch.Tensor
+            Grid coordinates of every symmetry copy, in (a, b, c) order, of shape
+            (batch_size, n_ops, n_atoms, 3).
+        """
+        grid_shape_tensor = torch.tensor(self.grid_shape, device=self.device)
+
+        grid_coor_rot = torch.einsum(
+            "rji,bni->brnj",
+            self.xmap.R_matrices,
+            grid_coordinates,
+        )
+
+        # Apply fractional translation scaled by (nx, ny, nz)
+        grid_coor_rot += self.xmap.t_vectors.unsqueeze(1) * grid_shape_tensor.flip(0).view(1, 1, 3)
+        return grid_coor_rot
 
     def create_mask(self, coordinates: torch.Tensor, radius: float) -> torch.Tensor:
         """Create a boolean mask volume around atoms within a radius, considering
         symmetry.
 
-        This version calculates the mask for the input coordinates first, placing
-        mask values correctly within the grid boundaries using modulo arithmetic
-        for atoms outside the base grid box. Then, it applies symmetry to this
-        base mask.
+        Symmetry copies of the atoms are generated the same way as in forward(), and
+        voxels within the radius of any copy are marked, wrapping periodically at the
+        grid boundaries.
 
         Parameters
         ----------
@@ -649,9 +582,10 @@ class DifferentiableTransformer(torch.nn.Module):
 
         coordinates = coordinates.to(device=device, dtype=dtype)
 
-        grid_coordinates = self._compute_grid_coordinates(coordinates).squeeze(
-            0
-        )  # Shape: [n_atoms, 3]
+        # Carve around every symmetry copy of every atom, as forward() dilates them.
+        grid_coordinates = self._symmetry_expand(
+            self._compute_grid_coordinates(coordinates).reshape(1, -1, 3)
+        ).reshape(-1, 3)  # Shape: [n_ops * n_atoms, 3] (a, b, c order)
 
         min_voxel_spacing = torch.min(self.xmap.voxelspacing.to(device))
         max_extent_voxel = torch.ceil((radius + 1e-6) / min_voxel_spacing).int().item()
@@ -670,9 +604,7 @@ class DifferentiableTransformer(torch.nn.Module):
         ).reshape(-1, 3)  # Shape: [n_nearby, 3]
 
         mask_volume = torch.zeros(grid_shape, device=device, dtype=torch.bool)
-        grid_shape_tensor = torch.tensor(grid_shape, device=device, dtype=torch.int).view(
-            1, 1, 3
-        )  # Shape: [1, 1, 3]
+        grid_shape_abc = torch.tensor(grid_shape[::-1], device=device, dtype=torch.int)
 
         coord_floored = torch.floor(grid_coordinates).int()  # Shape: [n_atoms, 3]
         grid_points_absolute = coord_floored.unsqueeze(1) + nearby_grid_offsets.unsqueeze(
@@ -695,25 +627,14 @@ class DifferentiableTransformer(torch.nn.Module):
             within_radius_mask
         ]  # Shape: [n_valid_points, 3]
 
-        if points_to_mark_absolute.numel() > 0:
-            points_to_mark_wrapped = points_to_mark_absolute % grid_shape_tensor.squeeze(0).squeeze(
-                0
-            )  # Shape: [n_valid_points, 3]
+        points_to_mark_wrapped = (
+            points_to_mark_absolute % grid_shape_abc
+        )  # Shape: [n_valid_points, 3] (a, b, c order)
+        mask_volume[
+            points_to_mark_wrapped[:, 2], points_to_mark_wrapped[:, 1], points_to_mark_wrapped[:, 0]
+        ] = True
 
-            z_indices, y_indices, x_indices = (
-                points_to_mark_wrapped[:, 0],
-                points_to_mark_wrapped[:, 1],
-                points_to_mark_wrapped[:, 2],
-            )
-            mask_volume[z_indices, y_indices, x_indices] = True
-
-        symmetric_mask_float = self.xmap.apply_symmetry(
-            mask_volume.to(dtype=self.dtype).unsqueeze(0)  # Shape: [1, nz, ny, nx]
-        ).squeeze(0)  # Shape: [nz, ny, nx]
-
-        final_mask = symmetric_mask_float > 1e-6
-
-        return final_mask.bool()
+        return mask_volume
 
     def _compute_radial_densities(
         self,
@@ -1032,13 +953,19 @@ def dilate_points_torch(
         final_batch_indices, offset_indices, final_atom_indices
     ]
 
-    # Interpolate radial densities onto grid and scale by occupancy
+    within_rmax = distances_to_nearby <= rmax  # [batch_size, n_nearby, n_atoms]
+
+    # Interpolate radial densities onto grid and scale by occupancy; the search box reaches
+    # past rmax at its corners, so zero those points as the CUDA kernel does.
     densities = (
         weights_low[final_batch_indices, offset_indices, final_atom_indices]
         * radial_densities[final_batch_indices, final_atom_indices, rad_indices_low_final]
         + weights_high[final_batch_indices, offset_indices, final_atom_indices]
         * radial_densities[final_batch_indices, final_atom_indices, rad_indices_high_final]
-    ) * occupancies[final_batch_indices, final_atom_indices]  # [n_active_atoms * n_nearby]
+    ) * (
+        occupancies[final_batch_indices, final_atom_indices]
+        * within_rmax[final_batch_indices, offset_indices, final_atom_indices]
+    )  # [n_active_atoms * n_nearby]
 
     # scatter_add_ onto the grid
     grid_points_flat = grid_points.reshape(-1, 3).int()  # [n_active_atoms * n_nearby, 3]
@@ -1223,10 +1150,13 @@ def scale_map(
     xmap_array: torch.Tensor,
     model_map_array: torch.Tensor,
     mask: torch.Tensor,
-    similarity_threshold: float = 0.05,
-    min_scaling_denominator: float = 1e-10,
 ) -> torch.Tensor:
-    """Scale xmap_array to match model_map_array based on values within the mask.
+    """Scale xmap_array to match the mean and standard deviation of model_map_array
+    within the mask.
+
+    The scale is always positive and does not depend on the units of xmap_array, so
+    the target keeps the map's contrast however well the model fits it. Unlike a
+    least-squares fit, it does not shrink the map by its correlation with the model.
 
     Parameters
     ----------
@@ -1236,19 +1166,17 @@ def scale_map(
         The calculated model map array used as the reference for scaling.
     mask: torch.Tensor
         A boolean mask indicating the regions to use for calculating scaling factors.
-    similarity_threshold: float, optional
-        Threshold to determine if maps are already similar enough to skip aggressive
-        scaling.
-        Default is 0.05 (5% difference).
-    min_scaling_denominator: float, optional
-        Minimum value for denominator in scaling calculation to ensure numerical
-        stability.
-        Default is 1e-10.
 
     Returns
     -------
     torch.Tensor
         The scaled xmap_array.
+
+    Raises
+    ------
+    ValueError
+        If xmap_array or model_map_array is constant within the mask, or the mask
+        selects a single voxel.
     """
     if not mask.any():
         warnings.warn("Mask for map scaling is empty. Using all map.")
@@ -1257,41 +1185,20 @@ def scale_map(
     xmap_masked = xmap_array[mask]
     model_masked = model_map_array[mask]
 
-    xmap_std = xmap_masked.std()
-    model_std = model_masked.std()
+    xmap_std, model_std = xmap_masked.std(), model_masked.std()
+    # NaN for a one-voxel mask, so test for a positive spread rather than a nonzero one.
+    if not (xmap_std > 0 and model_std > 0):
+        raise ValueError("Cannot scale the map: it or the model is constant within the mask.")
 
-    xmap_masked_mean = xmap_masked.mean()
-    model_masked_mean = model_masked.mean()
+    correlation = torch.corrcoef(torch.stack([xmap_masked, model_masked]))[0, 1]
+    if correlation <= 0:
+        warnings.warn(
+            f"Map and model density are not positively correlated within the mask "
+            f"(r = {correlation:.3f}); the input structure may be misplaced relative to the map."
+        )
 
-    # Calculate normalized difference between maps
-    rel_mean_diff = torch.abs(xmap_masked_mean - model_masked_mean) / (
-        torch.max(torch.abs(model_masked_mean), torch.tensor(1e-8))
-    )
-    rel_std_diff = torch.abs(xmap_std - model_std) / (
-        torch.max(torch.abs(model_std), torch.tensor(1e-8))
-    )
-
-    # If maps are already very similar, apply gentle scaling
-    if rel_mean_diff < similarity_threshold and rel_std_diff < similarity_threshold:
-        scaling_factor = model_std / (xmap_std + 1e-10)
-        offset = model_masked_mean - scaling_factor * xmap_masked_mean
-        return scaling_factor * xmap_array + offset
-
-    # Standard scaling for maps with significant differences
-    xmap_masked_centered = xmap_masked - xmap_masked_mean
-    model_masked_centered = model_masked - model_masked_mean
-
-    s2 = torch.dot(model_masked_centered, xmap_masked_centered)
-    s1 = torch.dot(xmap_masked_centered, xmap_masked_centered)
-
-    s1 = torch.max(s1, torch.tensor(min_scaling_denominator, device=s1.device))
-
-    scaling_factor = s2 / s1
-    k = model_masked_mean - scaling_factor * xmap_masked_mean
-
-    scaled_xmap_array = scaling_factor * xmap_array + k
-
-    return scaled_xmap_array
+    scaling_factor = model_std / xmap_std
+    return scaling_factor * (xmap_array - xmap_masked.mean()) + model_masked.mean()
 
 
 def to_f_density(real_map: torch.Tensor) -> torch.Tensor:
