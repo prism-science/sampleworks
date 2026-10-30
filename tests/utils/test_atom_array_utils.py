@@ -15,6 +15,7 @@ from sampleworks.utils.atom_array_utils import (
     remove_atoms_with_any_nan_coords,
     remove_hydrogens,
     select_altloc,
+    use_author_numbering,
 )
 
 from tests.conftest import STRUCTURES
@@ -954,3 +955,62 @@ class TestRemoveAtomsWithAnyNanCoords:
 
         with pytest.raises(ValueError, match="Cannot remove atoms from empty AtomArray\|Stack"):
             remove_atoms_with_any_nan_coords(atom_stack)
+
+
+def _labeled_array(n_atoms: int = 4) -> AtomArray:
+    """Four CA atoms on label chain A, numbered 1..4, as atomworks loads them."""
+    atom_array = AtomArray(n_atoms)
+    atom_array.coord = np.arange(3 * n_atoms, dtype=float).reshape(n_atoms, 3)
+    atom_array.set_annotation("chain_id", np.array(["A"] * n_atoms))
+    atom_array.set_annotation("res_id", np.arange(1, n_atoms + 1))
+    atom_array.set_annotation("atom_name", np.array(["CA"] * n_atoms))
+    return atom_array
+
+
+class TestUseAuthorNumbering:
+    """Tests for use_author_numbering."""
+
+    def test_relabels_from_author_columns(self):
+        """res_id and chain_id take the author values, negative numbers included."""
+        atom_array = _labeled_array()
+        atom_array.set_annotation("auth_seq_id", np.array(["-11", "-10", "365", "366"]))
+        atom_array.set_annotation("auth_asym_id", np.array(["P", "P", "P", "P"]))
+
+        result = use_author_numbering(atom_array)
+
+        assert result is atom_array
+        assert list(cast(np.ndarray, result.res_id)) == [-11, -10, 365, 366]
+        assert list(cast(np.ndarray, result.chain_id)) == ["P"] * 4
+
+    def test_non_integer_author_number_keeps_res_id(self):
+        """A non-polymer row written as '.' keeps the res_id it was loaded with."""
+        atom_array = _labeled_array()
+        atom_array.set_annotation("auth_seq_id", np.array(["10", ".", "?", "13"]))
+
+        result = use_author_numbering(atom_array)
+
+        assert list(cast(np.ndarray, result.res_id)) == [10, 2, 3, 13]
+        assert list(cast(np.ndarray, result.chain_id)) == ["A"] * 4
+
+    def test_without_author_annotations_is_unchanged(self):
+        """An array loaded without the author columns comes back as it was."""
+        atom_array = _labeled_array()
+
+        result = use_author_numbering(atom_array)
+
+        assert list(cast(np.ndarray, result.res_id)) == [1, 2, 3, 4]
+        assert list(cast(np.ndarray, result.chain_id)) == ["A"] * 4
+
+    def test_stack_shares_the_relabeling(self):
+        """A stack's models share per-atom annotations, so every model is relabeled."""
+        atom_array = _labeled_array()
+        atom_array.set_annotation("auth_seq_id", np.array(["5", "6", "7", "8"]))
+        atom_array.set_annotation("auth_asym_id", np.array(["B"] * 4))
+        atom_stack = stack([atom_array, atom_array.copy()])
+
+        result = use_author_numbering(atom_stack)
+
+        assert isinstance(result, AtomArrayStack)
+        for model in result:
+            assert list(cast(np.ndarray, model.res_id)) == [5, 6, 7, 8]
+            assert list(cast(np.ndarray, model.chain_id)) == ["B"] * 4
