@@ -365,19 +365,7 @@ class GuidanceConfig:
         _GUIDANCE_ARG_ADDERS[guidance_type](parser)
 
         args = parser.parse_args(argv)
-
-        # The file names its own losses; taking a --loss-type alongside it would
-        # mean silently ignoring one of the two. --loss-type always has a default,
-        # so "was it passed" has to be answered from the command line itself.
-        given = argv if argv is not None else sys.argv[1:]
-        if args.loss_config is not None and any(
-            token.split("=", 1)[0] == "--loss-type" for token in given
-        ):
-            parser.error(
-                "--loss-type and --loss-config are alternatives: the configuration "
-                "file already names the losses it configures."
-            )
-        loss_config = cls._loss_config_from_args(parser, args)
+        loss_config = cls._loss_config_from_args(parser, args, argv)
 
         if model_preset and args.model_name != model_name:
             parser.error(
@@ -420,7 +408,7 @@ class GuidanceConfig:
 
     @staticmethod
     def _loss_config_from_args(
-        parser: argparse.ArgumentParser, args: argparse.Namespace
+        parser: argparse.ArgumentParser, args: argparse.Namespace, argv: list[str] | None
     ) -> LossConfig:
         """Resolve the run's losses from either CLI surface.
 
@@ -430,21 +418,15 @@ class GuidanceConfig:
             Parser to report user errors through, so they read as usage errors.
         args : argparse.Namespace
             Parsed arguments.
+        argv : list[str] or None
+            The arguments ``args`` was parsed from; ``None`` means ``sys.argv[1:]``.
 
         Returns
         -------
         LossConfig
             The losses this run scores against.
         """
-        if args.loss_config is None:
-            config = LossConfig.single(
-                args.loss_type, **loss_options_from_args(args)
-            ).with_effective_options()
-        else:
-            try:
-                config = LossConfig.from_file(args.loss_config).with_effective_options()
-            except (OSError, ValueError) as error:
-                parser.error(f"--loss-config {args.loss_config}: {error}")
+        config = loss_config_from_args(parser, args, argv).with_effective_options()
 
         # Report a missing input as a usage error now, rather than after a model
         # has been loaded. The loss builders check this too.
@@ -505,6 +487,11 @@ class GuidanceConfig:
         self.resolution = density_options.get("resolution")
         self.loss_order = density_options.get("loss_order", 2)
         self.em = density_options.get("em", False)
+
+    @property
+    def loss_type(self) -> str:
+        """Comma-separated names of the losses this run scores against."""
+        return ",".join(self.loss_config)
 
     def resolved_loss_config(self) -> LossConfig:
         """Return this run's losses as a validated :class:`LossConfig`.
@@ -570,7 +557,7 @@ class GuidanceConfig:
         output["structure"] = _remap_container_path(str(self.structure))
         output["output_dir"] = _remap_container_path(str(self.output_dir))
         output["log_path"] = _remap_container_path(str(self.log_path))
-        output["loss_type"] = ",".join(self.loss_config)
+        output["loss_type"] = self.loss_type
         output["loss_config"] = json.dumps(
             self.resolved_loss_config().remapped_paths(_remap_container_path)
         )
@@ -613,6 +600,51 @@ def add_loss_selection_args(parser: argparse.ArgumentParser):
         "weight and loss_options. Takes the place of --loss-type and the "
         "per-loss flags, and is the only way to combine losses.",
     )
+
+
+def loss_config_from_args(
+    parser: argparse.ArgumentParser, args: argparse.Namespace, argv: list[str] | None
+) -> LossConfig:
+    """Build the losses a command line selected, from ``--loss-type`` or ``--loss-config``.
+
+    Only what was given is recorded: defaults are not materialized and required
+    options are not checked, so a grid search can still fill in per-protein data.
+
+    Parameters
+    ----------
+    parser : argparse.ArgumentParser
+        Parser to report user errors through, so they read as usage errors.
+    args : argparse.Namespace
+        Arguments parsed by a parser carrying :func:`add_loss_selection_args`.
+    argv : list[str] or None
+        The arguments ``args`` was parsed from; ``None`` means ``sys.argv[1:]``.
+
+    Returns
+    -------
+    LossConfig
+        The selected losses and the options given for them.
+    """
+    # The --loss-config file names its own losses; taking a --loss-type alongside it would
+    # mean silently ignoring one of the two. --loss-type always has a default,
+    # so "was it passed" has to be answered from the command line itself.
+    given = argv if argv is not None else sys.argv[1:]
+    if args.loss_config is not None and any(
+        token.split("=", 1)[0] == "--loss-type" for token in given
+    ):
+        parser.error(
+            "--loss-type and --loss-config are alternatives: the configuration "
+            "file already names the losses it configures."
+        )
+
+    if args.loss_config is None:
+        try:
+            return LossConfig.single(args.loss_type, **loss_options_from_args(args))
+        except ValueError as error:
+            parser.error(str(error))
+    try:
+        return LossConfig.from_file(args.loss_config)
+    except (OSError, ValueError) as error:
+        parser.error(f"--loss-config {args.loss_config}: {error}")
 
 
 def add_loss_args(parser: argparse.ArgumentParser, loss: Losses | str):
@@ -960,8 +992,9 @@ class JobConfig:
 
     protein: str
     structure_path: Path | str
-    density_path: Path | str
-    resolution: float
+    # {loss: {weight, loss_options}} with this protein's data filled in; see
+    # GuidanceConfig.loss_config for why it is a plain mapping.
+    loss_config: dict[str, Any]
     model_name: str
     scaler: str
     ensemble_size: int
@@ -991,6 +1024,9 @@ class JobResult:
     finished_at: str
     log_path: str
     output_dir: str
+    # Comma-separated loss names. Results written before losses were selectable
+    # were all density runs.
+    loss_type: str = DEFAULT_LOSS_TYPE.value
 
     def as_dict(self) -> dict[str, Any]:
         """Return a dictionary representation of the job result.

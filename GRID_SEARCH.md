@@ -28,7 +28,7 @@ script described below.
 
 To run grid search, you can use the `run_grid_search.py` script. It primarily sweeps
 supplied values of gradient weights and ensemble sizes. It requires a CSV file with
-protein structure, density map, and resolution columns, described below.
+protein structure columns plus the experimental data for the chosen loss, described below.
 
 ```bash
 pixi run -e boltz python run_grid_search.py \
@@ -46,9 +46,19 @@ pixi run -e boltz python run_grid_search.py \
 
 **`proteins.csv` format**
 
-Required columns are `name`, `structure`, `density`, and `resolution`. Supported density map formats: `.ccp4`, `.mrc`, `.map` (not MTZ or SF-CIF yet).
-The optional `sequence` column overrides the protein sequence, for example for cases where the structure is missing full sequence metadata and there are missing termini or gaps. Give either a one-letter
+Required columns are `name` and `structure`. The optional `sequence` column overrides the protein sequence, for example for cases where the structure is missing full sequence metadata and there are missing termini or gaps. Give either a one-letter
 amino-acid string or a path to a single-record FASTA file (relative paths resolve against the CSV's directory). Leave it empty to use the structure's own sequence.
+
+Every other column is named after a loss option and holds that protein's value for it. Any
+option a loss declares can be a column (`--help` with a `--loss-type` lists them); paths resolve
+against the CSV's directory, and an empty cell leaves the option unset. The columns each loss
+needs:
+
+| Loss                 | Required columns                                                                 |
+| -------------------- | -------------------------------------------------------------------------------- |
+| `real_space_density` | `density` (`.ccp4`, `.mrc`, `.map`), `resolution`                                |
+| `structure_factor`   | `mtzfile` (`resolution` optional: truncates the MTZ)                             |
+| `diffuse_bragg`      | `bragg_target` unless `bragg_weight` is 0; `diffuse_target` unless it is 1       |
 
 ```csv
 name,structure,density,resolution,sequence
@@ -56,11 +66,21 @@ name,structure,density,resolution,sequence
 2xyz,/data/structures/2xyz.cif,/data/maps/2xyz.mrc,1.8,sequences/2xyz.fasta
 ```
 
+**Choosing the loss.** The grid search takes the same `--loss-type` / `--loss-config`
+as `sampleworks-guidance` (see [Losses](README.md#losses)). A column feeds every selected loss
+that has an option of that name and is ignored by the others, so one CSV with `density`,
+`mtzfile` and `resolution` columns serves density, structure-factor, and combined sweeps. Option
+flags on the command line (e.g. `--bulk-solvent combined`) and values in a `--loss-config` file
+apply to every protein and win over the CSV. A protein with a missing required option or an
+invalid value (e.g. a non-positive `resolution`) fails the grid before any job is queued.
+
 **Key arguments:**
 
 | Argument                    | Description                                                | Default                     |
 | --------------------------- | ---------------------------------------------------------- | --------------------------- |
-| `--proteins`                | CSV of name/structure/density/resolution(/sequence)        | required                    |
+| `--proteins`                | CSV of name/structure(/sequence) plus loss-option columns | required                    |
+| `--loss-type`             | Loss to guide with; its option flags become available    | `real_space_density`        |
+| `--loss-config`           | Loss configuration file, to combine losses              | none                        |
 | `--models`                  | Model to run. One of `boltz1`, `boltz2`, `protenix`, `rf3` | required                    |
 | `--scalers`                 | Guidance method(s) to sweep                                | `pure_guidance fk_steering` |
 | `--ensemble-sizes`          | Space-separated values, e.g. `"1 4"`                       | `"1 2 4 8"`                 |
@@ -81,7 +101,7 @@ name,structure,density,resolution,sequence
 
 ## Location and contents of results
 
-Output layout: `grid_search_results/<protein>/<model>[_<method>]/<scaler>/ens<N>_gw<W>/`
+Output layout: `grid_search_results/<protein>/<model>[_<method>]/<scaler>/ens<N>_gw<W>[_<losses>]/`
 
 This layout is subject to change. Directory names are constructed as follows:
 
@@ -93,6 +113,11 @@ This layout is subject to change. Directory names are constructed as follows:
 | `scaler`  | the guidance method, e.g. `pure_guidance` or `fk_steering`.         |
 | `N`       | the ensemble size.                                                  |
 | `W`       | the gradient weight.                                                |
+| `losses`  | the losses, joined by `+`; omitted for `real_space_density` alone.  |
+
+The eval scripts read `N`, `W` and the `gd` steps from the directory name and ignore the
+`losses` suffix; they take the loss from `loss_type` in `job_metadata.json` (absent in older runs,
+which are treated as `real_space_density`).
 
 In that directory, you will find the following files generated by Sampleworks
 (in addition to model-specific files, e.g. the Boltz imput YAML file):

@@ -283,7 +283,7 @@ class LossConfig:
         defaults change between versions, and an option that was defaulted is
         otherwise indistinguishable from one that did not exist. Options left at
         ``None`` stay absent, so they remain fillable by
-        :meth:`with_experimental_data`.
+        :meth:`with_unset_options_from`.
 
         Returns
         -------
@@ -317,8 +317,9 @@ class LossConfig:
         missing = {}
         for entry in self.entries:
             spec = get_loss_spec(entry.loss)
+            options = coerce_options(spec, entry.options)
             absent = tuple(
-                name for name in spec.required_options if entry.options.get(name) is None
+                name for name in spec.required_for(options) if getattr(options, name) is None
             )
             if absent:
                 missing[entry.loss.value] = absent
@@ -358,40 +359,31 @@ class LossConfig:
             )
         return weights
 
-    def with_experimental_data(
-        self, *, path: str | Path | None = None, resolution: float | None = None
-    ) -> LossConfig:
-        """Fill in per-run experimental data without knowing which loss is configured.
+    def with_unset_options_from(self, options: Mapping[str, Any]) -> LossConfig:
+        """Fill in options this configuration leaves unset, for whichever losses declare them.
 
-        Grid search resolves a map or MTZ and a resolution per protein, long after
-        the loss type was chosen. Each loss declares which of its options hold
-        those (``data_path_option`` / ``resolution_option``), so they can be
-        injected generically. Options already set are left alone -- an explicit
-        value from the user or a config file wins.
+        Grid search reads one protein's options from its proteins-CSV row (see
+        :class:`~sampleworks.utils.protein_input.ProteinInput`) long after the loss
+        was chosen. Each value goes to every configured loss that has an option of
+        that name and is ignored by the rest, so one proteins CSV serves any loss.
+        Where ``options`` and an entry both set an option, the entry wins: a value
+        from the command line or a config file overrides the CSV.
 
         Parameters
         ----------
-        path
-            Experimental data file for this run (map or MTZ).
-        resolution
-            Resolution in Angstroms for this run.
+        options
+            Option name to value, e.g. ``{"mtzfile": "/data/1vme.mtz"}``.
 
         Returns
         -------
         LossConfig
-            A new configuration with the data filled in where it was missing.
+            A new configuration with unset options filled in.
         """
         entries = []
         for entry in self.entries:
-            spec = get_loss_spec(entry.loss)
-            options = dict(entry.options)
-            for option_name, value in (
-                (spec.data_path_option, None if path is None else str(path)),
-                (spec.resolution_option, resolution),
-            ):
-                if option_name is not None and value is not None:
-                    options.setdefault(option_name, value)
-            entries.append(replace(entry, options=options))
+            declared = {f.name for f in dataclasses.fields(get_loss_spec(entry.loss).options_cls)}
+            fill = {name: value for name, value in options.items() if name in declared}
+            entries.append(replace(entry, options={**fill, **entry.options}))
 
         return LossConfig(tuple(entries))
 

@@ -3,7 +3,12 @@
 import json
 from pathlib import Path
 
-from sampleworks.eval.grid_search_eval_utils import load_job_metadata, scan_grid_search_results
+import pytest
+from sampleworks.eval.grid_search_eval_utils import (
+    load_job_metadata,
+    parse_trial_dir,
+    scan_grid_search_results,
+)
 
 
 def test_scan_grid_search_results_prefers_job_metadata(tmp_path) -> None:
@@ -39,6 +44,33 @@ def test_scan_grid_search_results_prefers_job_metadata(tmp_path) -> None:
     assert trial.input_structure_path == Path("/inputs/1abc.cif")
     assert trial.density_path == Path("/inputs/1abc.ccp4")
     assert trial.resolution == 1.8
+    assert trial.loss_type == "real_space_density"
+
+
+def test_scan_records_the_loss_a_trial_was_guided_with(tmp_path) -> None:
+    """A structure-factor trial is told apart from a density trial by its metadata."""
+    trial_dir = tmp_path / "1ABC_1.0occA" / "boltz2_MD" / "pure_guidance" / "ens8_gw0.1"
+    trial_dir.mkdir(parents=True)
+    (trial_dir / "refined.cif").write_text("data_test")
+    (trial_dir / "job_metadata.json").write_text(
+        json.dumps({"loss_type": "structure_factor", "density": None, "resolution": None})
+    )
+
+    (trial,) = scan_grid_search_results(trial_dir, current_depth=4, target_depth=4)
+
+    assert trial.loss_type == "structure_factor"
+    assert trial.density_path is None
+
+
+@pytest.mark.parametrize(
+    "suffix", ["", "_structure_factor", "_real_space_density+structure_factor", "_diffuse_bragg"]
+)
+def test_trial_dir_loss_suffix_does_not_change_parsed_parameters(suffix) -> None:
+    assert parse_trial_dir(Path(f"ens8_gw0.1_gd2{suffix}")) == {
+        "ensemble_size": 8,
+        "guidance_weight": 0.1,
+        "gd_steps": 2,
+    }
 
 
 def test_load_job_metadata_rejects_non_object_json(tmp_path) -> None:

@@ -23,7 +23,7 @@ from sampleworks.eval.occupancy_utils import (
     rcsb_id_from_protein_name,
 )
 from sampleworks.utils.atom_array_utils import BLANK_ALTLOC_IDS, map_altlocs_to_stack
-from sampleworks.utils.guidance_constants import StructurePredictor
+from sampleworks.utils.guidance_constants import Losses, StructurePredictor
 
 
 def _metadata_value(
@@ -313,6 +313,7 @@ def scan_grid_search_results(
         input_structure_value = _metadata_value(metadata, "structure", "")
         density_value = _metadata_value(metadata, "density", "")
         resolution = _metadata_float(metadata, "resolution", None)
+        loss_type = str(_metadata_value(metadata, "loss_type", Losses.REAL_SPACE_DENSITY.value))
 
         # Validate parameters to satisfy ty
         if (
@@ -343,6 +344,7 @@ def scan_grid_search_results(
                 ),
                 density_path=Path(str(density_value)) if density_value else None,
                 resolution=resolution,
+                loss_type=loss_type,
             )
         )
 
