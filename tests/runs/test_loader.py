@@ -152,13 +152,13 @@ def test_set_coerces_bool_and_int(monkeypatch: pytest.MonkeyPatch) -> None:
         "rf3_partial",
         overrides=[
             "shared_args.gradient-normalization=false",
-            "jobs.rf3.args.partial-diffusion-step=200",
+            "jobs.rf3.args.num-diffusion-steps=200",
         ],
     )
     assert preset.shared_args["gradient-normalization"] is False
-    # job.args["partial-diffusion-step"] doesn't exist by default in rf3_partial,
+    # job.args["num-diffusion-steps"] doesn't exist by default in rf3_partial,
     # but --set should still create or override it
-    assert preset.job("rf3").args["partial-diffusion-step"] == 200
+    assert preset.job("rf3").args["num-diffusion-steps"] == 200
 
 
 def test_load_preset_from_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
