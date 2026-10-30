@@ -47,6 +47,8 @@ from sampleworks.utils.cif_utils import (
     carry_polymer_entity_categories,
     renumber_atom_site_ids,
     resolve_mixed_hetatm_atom_altlocs,
+    scheme_positions,
+    SchemePosition,
 )
 from sampleworks.utils.guidance_constants import (
     GuidanceType,
@@ -108,9 +110,9 @@ def _load_reference_cif(protein: str) -> CIFFile | None:
     Returns
     -------
     CIFFile | None
-        Parsed deposited CIF from the local RCSB cache, or ``None`` when the name is not an
-        RCSB id. The cache entry is populated atomically, so concurrent first-time fetches
-        cannot read a truncated file.
+        Parsed deposited CIF from the local RCSB cache, or ``None`` (with a warning) when the
+        name is not an RCSB id or the deposit cannot be fetched or read. The cache entry is
+        populated atomically, so concurrent first-time fetches cannot read a truncated file.
     """
     rcsb_id = rcsb_id_from_protein_name(protein)
     if rcsb_id is None:
@@ -119,16 +121,23 @@ def _load_reference_cif(protein: str) -> CIFFile | None:
         )
         return None
     rcsb_id = rcsb_id.lower()
-    _RCSB_CACHE.mkdir(parents=True, exist_ok=True)
-    cached_path = _RCSB_CACHE / f"{rcsb_id}.cif"
-    if not cached_path.is_file():
-        # Grid-search workers share the cache directory. Fetching straight into it lets one
-        # worker read another's partially written entry, so stage the download in a private
-        # directory on the same filesystem and move it into place atomically.
-        with TemporaryDirectory(dir=_RCSB_CACHE) as staging_dir:
-            fetched_path = fetch(rcsb_id, format="cif", target_path=staging_dir)
-            os.replace(fetched_path, cached_path)
-    return CIFFile.read(str(cached_path))
+    try:
+        _RCSB_CACHE.mkdir(parents=True, exist_ok=True)
+        cached_path = _RCSB_CACHE / f"{rcsb_id}.cif"
+        if not cached_path.is_file():
+            # Grid-search workers share the cache directory. Fetching straight into it lets one
+            # worker read another's partially written entry, so stage the download in a private
+            # directory on the same filesystem and move it into place atomically.
+            with TemporaryDirectory(dir=_RCSB_CACHE) as staging_dir:
+                fetched_path = fetch(rcsb_id, format="cif", target_path=staging_dir)
+                os.replace(fetched_path, cached_path)
+        return CIFFile.read(str(cached_path))
+    except Exception as error:
+        logger.warning(
+            f"Writing outputs without polymer entity categories because the deposited "
+            f"CIF for {protein!r} could not be loaded: {error}"
+        )
+        return None
 
 
 def save_trajectory(
@@ -179,15 +188,19 @@ def relabel_model_residues(
     model_atom_array: AtomArray,
     struct_atom_array: AtomArray,
     reconciler: AtomReconciler,
+    reference_cif: CIFFile | None = None,
 ) -> AtomArray:
     """Give the model topology the input's residue labels and the B-factors the loss scored.
 
     Chain, residue number and insertion code come from the input for every model residue with a
-    matched atom. Residues the input lacks (termini or gaps predicted under a sequence override)
-    take the chain and numbering of the nearest matched residue in the same model chain,
-    continuing consecutively. Everything else (atoms, order, names, elements, occupancy) stays
-    the model's, except ``b_factor`` on matched atoms, which is the input's, as in
-    ``SampleworksProcessedStructure.to_loss_inputs``.
+    matched atom. A residue the input lacks (a terminus or gap the model built) ``k`` residues
+    from the nearest matched residue in its model chain (before it, else after) continues that
+    residue's numbering consecutively, which is the deposit's numbering for an input read by
+    label ids. For an input in the deposit's author numbering, it instead takes the author ids
+    of the deposited position ``k`` positions from that residue's in ``pdbx_poly_seq_scheme``,
+    so a residue built inside thrombin's 149A-149E loop gets its insertion code. Everything
+    else (atoms, order, names, elements, occupancy) stays the model's, except ``b_factor`` on
+    matched atoms, which is the input's, as in ``SampleworksProcessedStructure.to_loss_inputs``.
 
     Parameters
     ----------
@@ -197,6 +210,8 @@ def relabel_model_residues(
         Filtered input topology the reconciler was built against, ``n_struct`` atoms.
     reconciler : AtomReconciler
         Mapping between the two.
+    reference_cif : CIFFile | None
+        Deposited CIF whose ``pdbx_poly_seq_scheme`` places the residues the model built.
 
     Returns
     -------
@@ -220,9 +235,17 @@ def relabel_model_residues(
     ins_code = np.full(len(starts), "", dtype=model_atom_array.ins_code.dtype)
     ins_code[matched] = struct_atom_array.ins_code[struct_idx]
 
-    # Residues the input lacks (chain ends, or gaps the model built) get residue numbers starting
-    # from their neighbor. Those numbers can clash with the input's own numbers, and such a residue
-    # can take another input chain's label. The duplicate-label warning below reports these cases.
+    # Each deposited chain's positions in scheme order, and author (chain, number, insertion
+    # code) -> (deposited asym_id, index in that order).
+    deposited: dict[str, list[SchemePosition]] = {}
+    positions: dict[tuple[str, int, str], tuple[str, int]] = {}
+    for position in scheme_positions(reference_cif) if reference_cif is not None else []:
+        chain_positions = deposited.setdefault(position.asym_id, [])
+        author_key = (position.strand_id, int(position.number), position.ins_code)
+        positions[author_key] = (position.asym_id, len(chain_positions))
+        chain_positions.append(position)
+
+    model_res_id = model_atom_array.res_id[starts]  # (n_residues,)
     for model_chain in np.unique(residue_chain):
         residues = np.flatnonzero(residue_chain == model_chain)
         known = residues[np.isin(residues, matched)]
@@ -232,16 +255,33 @@ def relabel_model_residues(
         nearest = known[np.clip(np.searchsorted(known, residues, side="right") - 1, 0, None)]
         offset[residues] = offset[nearest]
         chain[residues] = chain[nearest]
+        # Label numbering is dense, so the consecutive numbering above already places built
+        # residues in it; author numbering can skip and insert, so take the deposit's ids.
+        keys = [(chain[r], int(model_res_id[r] + offset[r]), ins_code[r]) for r in known]
+        if not all(key in positions for key in keys):
+            continue
+        found = [positions[key] for key in keys]
+        if len({asym for asym, _ in found}) != 1:
+            continue
+        chain_positions = deposited[found[0][0]]
+        # Scheme index minus residue index, per matched residue.
+        index_offset = dict(zip(known.tolist(), (i - r for r, (_, i) in zip(known, found))))
+        for residue, neighbor in zip(residues, nearest):
+            index = residue + index_offset[neighbor]
+            if 0 <= index < len(chain_positions):
+                position = chain_positions[index]
+                chain[residue], ins_code[residue] = position.strand_id, position.ins_code
+                offset[residue] = int(position.number) - model_res_id[residue]
 
     relabeled = model_atom_array.copy()
     relabeled.chain_id = chain[residue_of_atom]
-    relabeled.res_id = (model_atom_array.res_id[starts] + offset)[residue_of_atom]
+    relabeled.res_id = (model_res_id + offset)[residue_of_atom]
     relabeled.ins_code = ins_code[residue_of_atom]
     relabeled.b_factor[model_idx] = struct_atom_array.b_factor[struct_idx]
     residue_labels = list(
         zip(
             chain.tolist(),
-            (model_atom_array.res_id[starts] + offset).tolist(),
+            (model_res_id + offset).tolist(),
             ins_code.tolist(),
         )
     )
@@ -539,13 +579,7 @@ def save_everything(
 
     logger.info("Saving results")
     if reference_cif is None:
-        try:
-            reference_cif = _load_reference_cif(args.protein)
-        except Exception as error:
-            logger.warning(
-                f"Writing outputs without polymer entity categories because the deposited "
-                f"CIF for {args.protein!r} could not be loaded: {error}"
-            )
+        reference_cif = _load_reference_cif(args.protein)
 
     base_atom_array = ensure_atom_array_stack(refined_structure["asym_unit"])[0]
 
@@ -916,10 +950,11 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
         raise TypeError("Unknown guidance type!")
 
     metadata = result.metadata or {}
+    reference_cif = _load_reference_cif(args.protein)
     model_atom_array = metadata.get("model_atom_array")
     if model_atom_array is not None:
         model_atom_array = relabel_model_residues(
-            model_atom_array, metadata["struct_atom_array"], metadata["reconciler"]
+            model_atom_array, metadata["struct_atom_array"], metadata["reconciler"], reference_cif
         )
 
     save_everything(
@@ -931,6 +966,7 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
         guidance_type,
         final_state=torch.as_tensor(result.final_state),
         model_atom_array=model_atom_array,
+        reference_cif=reference_cif,
     )
 
     if hasattr(model_wrapper, "_chiral_grad_stats") and model_wrapper._chiral_grad_stats:
