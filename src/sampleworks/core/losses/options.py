@@ -70,7 +70,12 @@ def opt(
 def _check_resolution(resolution: float | None):
     # Zero, negative or non-finite values otherwise surface as a division by zero
     # or an empty reflection set inside a worker, after the model has loaded.
-    if resolution is not None and not (math.isfinite(resolution) and resolution > 0):
+    if resolution is None:
+        return
+    # A config file can hand over a string or a bool; reject it here rather than
+    # let math.isfinite raise a TypeError that callers do not catch.
+    is_number = isinstance(resolution, (int, float)) and not isinstance(resolution, bool)
+    if not (is_number and math.isfinite(resolution) and resolution > 0):
         raise ValueError(
             f"resolution must be a positive, finite number of Angstroms; got {resolution}."
         )

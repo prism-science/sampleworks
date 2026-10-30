@@ -231,7 +231,7 @@ class TestPerProteinOptions:
         assert config.missing_required_options() == {}
 
     @pytest.mark.parametrize("loss", list(Losses))
-    @pytest.mark.parametrize("resolution", [0.0, -1.0, float("nan"), float("inf")])
+    @pytest.mark.parametrize("resolution", [0.0, -1.0, float("nan"), float("inf"), "1.8", True])
     def test_each_loss_rejects_an_invalid_resolution(self, loss, resolution):
         with pytest.raises(ValueError, match="resolution must be a positive, finite number"):
             LossConfig.single(loss).with_unset_options_from({"resolution": resolution})
