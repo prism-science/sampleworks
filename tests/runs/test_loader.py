@@ -158,7 +158,7 @@ def test_set_coerces_bool_and_float(monkeypatch: pytest.MonkeyPatch) -> None:
     assert preset.shared_args["gradient-normalization"] is False
     # job.args["partial-diffusion-start"] exists by default in rf3_partial, set to 0.6
     # but it should be overridden above
-    assert preset.job("rf3").args["num-diffusion-steps"] == 0.4
+    assert preset.job("rf3").args["partial-diffusion-start"] == 0.4
 
 
 def test_load_preset_from_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
