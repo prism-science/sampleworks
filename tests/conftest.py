@@ -3,7 +3,7 @@
 import importlib
 import inspect
 import sys
-from collections.abc import Callable, Generator
+from collections.abc import Generator
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
@@ -24,6 +24,7 @@ from atomworks.io.utils.io_utils import load_any
 from biotite.structure import AtomArray, AtomArrayStack, stack
 from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
 from sampleworks.core.samplers.protocol import StepParams
+from sampleworks.models.annotation import annotate_structure_for_model
 from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.guidance_constants import (
     Losses,
@@ -128,12 +129,14 @@ class ComponentInfo:
         the path to the config class. When set, default_kwargs are passed to the
         config constructor, and the resulting config is then passed to the component
         constructor.
-    annotate_fn_path
-        For wrappers, fully qualified path to the annotate function.
     conditioning_type_path
         For wrappers, fully qualified path to the conditioning type.
-    requires_out_dir
-        For wrappers, whether the annotate function requires out_dir.
+
+    Notes
+    -----
+    Which annotate function a wrapper uses, and whether it takes ``out_dir``, now lives in
+    :data:`sampleworks.models.annotation.MODEL_ANNOTATION_REGISTRY`; the annotate helpers
+    below dispatch through it by model type.
     """
 
     name: str
@@ -143,9 +146,7 @@ class ComponentInfo:
     requires_loss: bool = False
     default_kwargs: tuple[tuple[str, Any], ...] = ()
     config_class_path: str = ""
-    annotate_fn_path: str = ""
     conditioning_type_path: str = ""
-    requires_out_dir: bool = True
 
 
 MODEL_WRAPPER_REGISTRY: dict[StructurePredictor, ComponentInfo] = {
@@ -153,41 +154,31 @@ MODEL_WRAPPER_REGISTRY: dict[StructurePredictor, ComponentInfo] = {
         name="boltz1",
         module_path="sampleworks.models.boltz.wrapper.Boltz1Wrapper",
         requires_checkpoint=True,
-        annotate_fn_path="sampleworks.models.boltz.wrapper.process_structure_for_boltz",
         conditioning_type_path="sampleworks.models.boltz.wrapper.BoltzConditioning",
-        requires_out_dir=True,
     ),
     StructurePredictor.BOLTZ_2: ComponentInfo(
         name="boltz2",
         module_path="sampleworks.models.boltz.wrapper.Boltz2Wrapper",
         requires_checkpoint=True,
-        annotate_fn_path="sampleworks.models.boltz.wrapper.process_structure_for_boltz",
         conditioning_type_path="sampleworks.models.boltz.wrapper.BoltzConditioning",
-        requires_out_dir=True,
     ),
     StructurePredictor.PROTENIX: ComponentInfo(
         name="protenix",
         module_path="sampleworks.models.protenix.wrapper.ProtenixWrapper",
         requires_checkpoint=True,
-        annotate_fn_path="sampleworks.models.protenix.wrapper.annotate_structure_for_protenix",
         conditioning_type_path="sampleworks.models.protenix.wrapper.ProtenixConditioning",
-        requires_out_dir=True,
     ),
     StructurePredictor.RF3: ComponentInfo(
         name="rf3",
         module_path="sampleworks.models.rf3.wrapper.RF3Wrapper",
         requires_checkpoint=True,
-        annotate_fn_path="sampleworks.models.rf3.wrapper.annotate_structure_for_rf3",
         conditioning_type_path="sampleworks.models.rf3.wrapper.RF3Conditioning",
-        requires_out_dir=False,
     ),
     StructurePredictor.PROTPARDELLE: ComponentInfo(
         name="protpardelle",
         module_path="sampleworks.models.protpardelle.wrapper.ProtpardelleWrapper",
         requires_checkpoint=True,
-        annotate_fn_path="sampleworks.models.protpardelle.wrapper.annotate_structure_for_protpardelle",
         conditioning_type_path="sampleworks.models.protpardelle.wrapper.ProtpardelleConditioning",
-        requires_out_dir=False,
     ),
 }
 
@@ -330,9 +321,7 @@ MOCK_WRAPPER_INFO = ComponentInfo(
     name="mock",
     module_path="tests.mocks.model_wrappers.MockFlowModelWrapper",
     requires_checkpoint=False,
-    annotate_fn_path="",
     conditioning_type_path="",
-    requires_out_dir=False,
 )
 
 
@@ -403,13 +392,6 @@ def create_model_wrapper_from_type(
     return create_component_from_info(info, device=device, **extra_kwargs)
 
 
-def get_annotate_fn(wrapper: ComponentInfo) -> Callable[..., dict]:
-    """Get the annotate function for a wrapper configuration."""
-    if not wrapper.annotate_fn_path:
-        raise ValueError(f"Wrapper {wrapper.name} does not have an annotate function")
-    return _import_from_path(wrapper.annotate_fn_path)
-
-
 def get_conditioning_type(wrapper: ComponentInfo) -> type:
     """Get the conditioning type for a wrapper configuration."""
     if not wrapper.conditioning_type_path:
@@ -425,6 +407,10 @@ def annotate_structure_for_wrapper(
 ) -> dict:
     """Call the appropriate annotate function for a wrapper configuration.
 
+    Thin adapter over :func:`sampleworks.models.annotation.annotate_structure_for_model`
+    for tests parametrized over :class:`ComponentInfo`. A wrapper's ``name`` is its
+    :class:`StructurePredictor` value, which keys the shared registry.
+
     Parameters
     ----------
     wrapper
@@ -432,7 +418,7 @@ def annotate_structure_for_wrapper(
     structure
         The structure dictionary to annotate.
     temp_output_dir
-        Temporary output directory (required if wrapper.requires_out_dir is True).
+        Temporary output directory (used by wrappers whose annotate function accepts one).
     **kwargs
         Additional keyword arguments passed to the annotate function.
 
@@ -441,10 +427,9 @@ def annotate_structure_for_wrapper(
     dict
         The annotated structure.
     """
-    annotate_fn = get_annotate_fn(wrapper)
-    if wrapper.requires_out_dir:
-        return annotate_fn(structure, out_dir=temp_output_dir, **kwargs)
-    return annotate_fn(structure, **kwargs)
+    return annotate_structure_for_model(
+        StructurePredictor(wrapper.name), structure, out_dir=temp_output_dir, **kwargs
+    )
 
 
 @pytest.fixture(scope="session")
@@ -683,8 +668,7 @@ def annotate_structure_for_wrapper_type(
     dict
         The annotated structure.
     """
-    info = MODEL_WRAPPER_REGISTRY[wrapper_type]
-    return annotate_structure_for_wrapper(info, structure, temp_output_dir, **kwargs)
+    return annotate_structure_for_model(wrapper_type, structure, out_dir=temp_output_dir, **kwargs)
 
 
 def _checkpoint_or_skip(model_key: str) -> Path:

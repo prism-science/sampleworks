@@ -40,6 +40,10 @@ from sampleworks.eval.occupancy_utils import (
     extract_protein_and_occupancy,
     rcsb_id_from_protein_name,
 )
+
+# Safe to import unconditionally: the dispatcher resolves each model's annotate function
+# lazily, so it pulls in no model dependencies at import time.
+from sampleworks.models.annotation import annotate_structure_for_model
 from sampleworks.utils.atom_array_utils import parse_structure
 from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.cif_utils import (
@@ -673,60 +677,46 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
         LossBuildContext(structure=structure, device=device),
     )
 
-    # Determine model type from wrapper class name
-    wrapper_class_name = model_wrapper.__class__.__name__
-    is_boltz = "Boltz" in wrapper_class_name
+    model_type = StructurePredictor(args.model_name)
+    is_boltz = model_type in (StructurePredictor.BOLTZ_1, StructurePredictor.BOLTZ_2)
 
     structure = apply_sequence_override(structure, args.sequence)
 
-    # Annotate structure with model-specific configuration (including recycling_steps)
-    # See https://github.com/prism-science/sampleworks/issues/192 for a plan to organize this
-    # better.
+    # Annotate the structure with model-specific inference configuration. The dispatch and
+    # lazy import live in annotate_structure_for_model; here we only assemble the kwargs each
+    # model needs and, for Protpardelle, the sampler overrides.
     recycling_steps = getattr(args, "recycling_steps", None)
     if recycling_steps is not None and recycling_steps <= 0:
         raise ValueError("recycling_steps must be > 0")
     if args.num_diffusion_steps is not None and args.num_diffusion_steps <= 0:
         raise ValueError("num_diffusion_steps must be > 0")
 
-    edm_sampler_kwargs = {}  # i.e. use defaults.
-    if "Protenix" in wrapper_class_name:
-        from sampleworks.models.protenix.wrapper import annotate_structure_for_protenix
-
-        structure = annotate_structure_for_protenix(
-            structure,
-            # TODO(#404, #412): affects every Protenix run, not just latent-opt; own PR.
-            # out_dir=str(Path(args.output_dir) / "protenix_input"),
-            recycling_steps=recycling_steps,
-            # Disable diffusion shared-vars cache for LATENT_OPT so gradients can
-            # flow to z_trunk; cached tensors can otherwise become stale.
-            # Keep cache enabled for other guidance types.
-            enable_diffusion_shared_vars_cache=(guidance_type != GuidanceType.LATENT_OPT),
-        )
-    elif "RF3" in wrapper_class_name:
-        from sampleworks.models.rf3.wrapper import annotate_structure_for_rf3
-
-        structure = annotate_structure_for_rf3(
-            structure,
-            recycling_steps=recycling_steps,
-            msa_path=args.msa_path,
-            disable_chiral_features=args.disable_chiral_features,
-            track_chiral_features=args.track_chiral_features,
-        )
-    elif "Boltz" in wrapper_class_name:
-        from sampleworks.models.boltz.wrapper import process_structure_for_boltz
-
-        # Boltz preprocessing writes manifest/NPZ/MSA files as a side effect.
-        # Keep those under the per-job output directory so concurrent grid jobs
-        # for the same protein do not race on a shared metadata-derived path.
-        structure = process_structure_for_boltz(
-            structure,
-            out_dir=args.output_dir,
-            recycling_steps=recycling_steps,
-        )
-    elif "Protpardelle" in wrapper_class_name:
-        from sampleworks.models.protpardelle.wrapper import annotate_structure_for_protpardelle
-
-        structure = annotate_structure_for_protpardelle(structure)
+    out_dir: str | None = None
+    edm_sampler_kwargs: dict[str, Any] = {}  # i.e. use defaults.
+    annotate_kwargs: dict[str, Any] = {}
+    if model_type == StructurePredictor.PROTENIX:
+        annotate_kwargs = {
+            # TODO(#404, #412): pass out_dir for every Protenix run, not just latent-opt; own PR.
+            # out_dir below is left at None so the function uses its default.
+            "recycling_steps": recycling_steps,
+            # Disable the diffusion shared-vars cache for LATENT_OPT so gradients can flow to
+            # z_trunk; cached tensors can otherwise become stale. Keep it on otherwise.
+            "enable_diffusion_shared_vars_cache": guidance_type != GuidanceType.LATENT_OPT,
+        }
+    elif model_type == StructurePredictor.RF3:
+        annotate_kwargs = {
+            "recycling_steps": recycling_steps,
+            "msa_path": args.msa_path,
+            "disable_chiral_features": args.disable_chiral_features,
+            "track_chiral_features": args.track_chiral_features,
+        }
+    elif is_boltz:
+        # Boltz preprocessing writes manifest/NPZ/MSA files as a side effect. Keep those under
+        # the per-job output directory so concurrent grid jobs for the same protein do not race
+        # on a shared metadata-derived path.
+        out_dir = args.output_dir
+        annotate_kwargs = {"recycling_steps": recycling_steps}
+    elif model_type == StructurePredictor.PROTPARDELLE:
         edm_sampler_kwargs = {
             "s_max": 80,
             "s_min": 0.001,
@@ -735,8 +725,10 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
             "sigma_data": 10.3,
             "step_scale": 1.0,
         }
-    else:
-        raise ValueError(f"Unknown model wrapper class: {wrapper_class_name}")
+
+    structure = annotate_structure_for_model(
+        model_type, structure, out_dir=out_dir, **annotate_kwargs
+    )
 
     use_alignment_for_reverse_diffusion = _three_state_resolver(
         args.alignment_reverse_diffusion, is_boltz
