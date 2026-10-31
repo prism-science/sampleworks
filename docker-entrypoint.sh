@@ -158,7 +158,7 @@ BAKED-IN CHECKPOINTS:
       --fk-resampling-interval N  How often to apply resampling (default: 1)
 
     Advanced:
-      --partial-diffusion-step N  Diffusion step to start from (default: 0)
+      --partial-diffusion-start F Reverse-time fraction in [0, 1) to start from (default: 0.0)
       --loss-order N              L1 (1) or L2 (2) loss (default: 2)
 
 METADATA HOST PATH REMAPPING:

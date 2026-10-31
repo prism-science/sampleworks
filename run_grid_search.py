@@ -220,7 +220,7 @@ def build_args_for_process_pool(
         guidance_type=job.scaler,
         log_path=job.log_path,
         output_dir=job.output_dir,
-        partial_diffusion_step=args.partial_diffusion_step,
+        partial_diffusion_start=args.partial_diffusion_start,
         guidance_start=args.guidance_start,
         device=f"cuda:{device_num}" if device_num is not None else "",
         gradient_normalization=args.gradient_normalization,
@@ -858,13 +858,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Space-separated gradient weights/step sizes",
     )
     parser.add_argument(
-        "--partial-diffusion-step", type=int, default=0, help="Partial diffusion step"
+        "--partial-diffusion-start",
+        type=float,
+        default=0.0,
+        help="Reverse-time fraction in [0, 1) to start partial diffusion from "
+        "(0 = full diffusion). A fraction, not a step count, so it is portable across models.",
     )
     parser.add_argument(
         "--guidance-start",
-        type=int,
-        default=-1,
-        help="Guidance start step for model inference, defaults to -1, meaning start immediately",
+        type=float,
+        default=0.0,
+        help="Reverse-time fraction in [0, 1] after which to start applying guidance, "
+        "defaults to 0.0, meaning start immediately",
     )
 
     parser.add_argument(

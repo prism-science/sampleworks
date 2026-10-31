@@ -781,9 +781,8 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
     if guidance_type == GuidanceType.PURE_GUIDANCE:
         logger.info("Initializing pure guidance")
 
-        # TODO(#246): these should be fractions in the args directly
-        guidance_t_start = args.guidance_start / num_steps if args.guidance_start > 0 else 0.0
-        t_start = args.partial_diffusion_step / num_steps if args.partial_diffusion_step else 0.0
+        guidance_t_start = args.guidance_start
+        t_start = args.partial_diffusion_start
 
         guidance = PureGuidance(
             ensemble_size=args.ensemble_size,
@@ -809,11 +808,8 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
     elif guidance_type == GuidanceType.FK_STEERING:
         logger.info("Initializing Feynman-Kac steering")
 
-        # TODO(#246): same as above
-        gs = args.guidance_start
-        guidance_start_fraction = gs / num_steps if gs > 0 else 0.0
-        pd = args.partial_diffusion_step
-        t_start = pd / num_steps if pd else 0.0
+        guidance_start_fraction = args.guidance_start
+        t_start = args.partial_diffusion_start
 
         guidance = FKSteering(
             ensemble_size=args.ensemble_size,
@@ -858,12 +854,10 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
             DEFAULT_SINGLE_REP_ATTR,
         )
 
-        # LatentOptimization expects guidance start as a fraction of the schedule, but the config
-        # carries it as an integer step count, so we convert it here and default to optimizing from
-        # the first step.
-        guidance_t_start = args.guidance_start / num_steps if args.guidance_start > 0 else 0.0
-        # Same conversion for partial diffusion, matching the pure-guidance branch above.
-        t_start = args.partial_diffusion_step / num_steps if args.partial_diffusion_step else 0.0
+        # The config already carries both as reverse-time fractions of the schedule, which is
+        # exactly what LatentOptimization expects; 0.0 defaults to optimizing from the first step.
+        guidance_t_start = args.guidance_start
+        t_start = args.partial_diffusion_start
         which_latent = args.which_latent  # This is "single", "pair", or "both".
         anchor_weight = args.anchor_weight
         bond_length_weight = args.bond_length_weight

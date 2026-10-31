@@ -9,7 +9,7 @@ PROTEINS_CSV = "${DATA_DIR}/proteins.csv"
 [shared_args]
 proteins = "${PROTEINS_CSV}"
 scalers = "pure_guidance"
-partial-diffusion-step = 120
+partial-diffusion-start = 0.6
 ensemble-sizes = "8"
 gradient-normalization = true
 augmentation = true

@@ -205,9 +205,9 @@ class TestFromCliDefaults:
         argv = ["--model", "boltz1", "--guidance-type", "pure_guidance"] + COMMON_ARGS
         config = GuidanceConfig.from_cli(argv)
         assert config.output_dir == "output"
-        assert config.partial_diffusion_step == 0
+        assert config.partial_diffusion_start == 0.0
         assert config.loss_order == 2
-        assert config.guidance_start == -1
+        assert config.guidance_start == 0.0
         assert config.augmentation is False
         assert config.align_to_input is False
         assert config.ensemble_size == 4
@@ -388,17 +388,17 @@ class TestArgPassthrough:
         config = GuidanceConfig.from_cli(argv)
         assert config.output_dir == "/custom/output"
 
-    def test_partial_diffusion_step(self):
+    def test_partial_diffusion_start(self):
         argv = [
             "--model",
             "boltz1",
             "--guidance-type",
             "pure_guidance",
-            "--partial-diffusion-step",
-            "50",
+            "--partial-diffusion-start",
+            "0.25",
         ] + COMMON_ARGS
         config = GuidanceConfig.from_cli(argv)
-        assert config.partial_diffusion_step == 50
+        assert config.partial_diffusion_start == 0.25
 
     def test_log_path(self):
         argv = [
@@ -456,10 +456,10 @@ class TestArgPassthrough:
             "--guidance-type",
             "pure_guidance",
             "--guidance-start",
-            "10",
+            "0.5",
         ] + COMMON_ARGS
         config = GuidanceConfig.from_cli(argv)
-        assert config.guidance_start == 10
+        assert config.guidance_start == 0.5
 
     def test_recycling_steps(self):
         argv = [
@@ -557,6 +557,68 @@ class TestValidationEdgeCases:
             "invalid",
         ] + COMMON_ARGS
         with pytest.raises(SystemExit):
+            GuidanceConfig.from_cli(argv)
+
+
+def _config(**overrides):
+    """Build a minimal valid GuidanceConfig, overriding the fields under test.
+
+    Parameters
+    ----------
+    **overrides
+        Field values to set in place of the defaults.
+
+    Returns
+    -------
+    GuidanceConfig
+        A configuration whose required inputs are satisfied.
+    """
+    kwargs = dict(
+        protein="1VME",
+        structure="test.cif",
+        density="test.ccp4",
+        model_name="boltz1",
+        guidance_type="pure_guidance",
+        log_path="",
+        resolution=1.8,
+    )
+    kwargs.update(overrides)
+    return GuidanceConfig(**kwargs)
+
+
+class TestStepFractionValidation:
+    """partial_diffusion_start / guidance_start are validated as [0, 1] fractions (#246, #411)."""
+
+    @pytest.mark.parametrize("value", [0.0, 0.5, 0.999])
+    def test_partial_diffusion_start_accepts_in_range(self, value):
+        assert _config(partial_diffusion_start=value).partial_diffusion_start == value
+
+    @pytest.mark.parametrize("value", [-0.1, 1.0, 1.5])
+    def test_partial_diffusion_start_rejects_out_of_range(self, value):
+        # 1.0 maps to the final step, leaving an empty sampling loop; negatives index backwards.
+        with pytest.raises(ValueError, match="partial_diffusion_start"):
+            _config(partial_diffusion_start=value)
+
+    @pytest.mark.parametrize("value", [0.0, 0.5, 1.0])
+    def test_guidance_start_accepts_in_range(self, value):
+        # 1.0 is allowed here: it simply means guidance is never applied.
+        assert _config(guidance_start=value).guidance_start == value
+
+    @pytest.mark.parametrize("value", [-0.5, 1.5])
+    def test_guidance_start_rejects_out_of_range(self, value):
+        with pytest.raises(ValueError, match="guidance_start"):
+            _config(guidance_start=value)
+
+    def test_from_cli_rejects_out_of_range_partial_diffusion_start(self):
+        argv = [
+            "--model",
+            "boltz1",
+            "--guidance-type",
+            "pure_guidance",
+            "--partial-diffusion-start",
+            "1.5",
+        ] + COMMON_ARGS
+        with pytest.raises(ValueError, match="partial_diffusion_start"):
             GuidanceConfig.from_cli(argv)
 
 

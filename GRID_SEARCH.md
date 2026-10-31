@@ -202,8 +202,8 @@ see what trial is actually being run by looking for lines like this one:
 2026-03-10 02:03:23.664 | INFO     | sampleworks.utils.guidance_script_utils:run_guidance_job_queue:589 - Running job 1/15: GuidanceConfig(protein='5I
 MV_1.0occB', structure='/data/inputs/processed/5IMV/5IMV_single_001_density_input.cif', density='/data/inputs/occ_sweeps/1.0occB/density_maps/5IMV_1.0
 occB_1.00A.ccp4', model_name='boltz2', guidance_type='pure_guidance', log_path='/data/results/5IMV_1.0occB/boltz2_X-RAY_DIFFRACTION/pure_guidance/ens8_gw0.
-1/run.log', output_dir='/data/results/5IMV_1.0occB/boltz2_X-RAY_DIFFRACTION/pure_guidance/ens8_gw0.1', partial_diffusion_step=120, loss_order=2, resol
-ution=1.0, device='cuda:0', gradient_normalization=True, em=False, guidance_start=-1, augmentation=True, align_to_input=True)
+1/run.log', output_dir='/data/results/5IMV_1.0occB/boltz2_X-RAY_DIFFRACTION/pure_guidance/ens8_gw0.1', partial_diffusion_start=0.6, loss_order=2, resol
+ution=1.0, device='cuda:0', gradient_normalization=True, em=False, guidance_start=0.0, augmentation=True, align_to_input=True)
 ```
 
 which also gives you a path to the `run.log` file for that job. If that job fails, there will be
