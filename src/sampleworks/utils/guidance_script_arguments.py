@@ -238,7 +238,6 @@ _DYNAMIC_ATTRS = [
     "protpardelle_config_path",
     "bioemu2_mode",
     "bioemu2_no_msa_server",
-    "bioemu2_exclude_ligands",
     # generic (overridable)
     "ensemble_size",
     "recycling_steps",
@@ -565,6 +564,10 @@ class GuidanceConfig:
         if job.model_name == StructurePredictor.RF3:
             self.disable_chiral_features = getattr(args, "disable_chiral_features", False)
             self.track_chiral_features = getattr(args, "track_chiral_features", False)
+
+        if job.model_name == StructurePredictor.BIOEMU2:
+            self.bioemu2_mode = getattr(args, "bioemu2_mode", "equilibrium")
+            self.bioemu2_no_msa_server = getattr(args, "bioemu2_no_msa_server", False)
 
         if job.scaler == GuidanceType.FK_STEERING:
             self.guidance_weight = job.gradient_weight
@@ -1014,11 +1017,6 @@ def add_bioemu2_specific_args(parser: argparse.ArgumentParser | GuidanceConfig):
         "--bioemu2-no-msa-server",
         action="store_true",
         help="Without --msa-path, use single-sequence MSAs instead of querying ColabFold",
-    )
-    parser.add_argument(
-        "--bioemu2-exclude-ligands",
-        action="store_true",
-        help="Do not model non-polymer chains as CCD ligands",
     )
 
 
