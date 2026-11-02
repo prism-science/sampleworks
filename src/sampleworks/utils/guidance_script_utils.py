@@ -751,25 +751,13 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
     elif is_bioemu2:
         from sampleworks.models.bioemu2.wrapper import annotate_structure_for_bioemu2
 
-        mode = getattr(args, "bioemu2_mode", None) or "equilibrium"
+        bioemu2_mode = getattr(args, "bioemu2_mode", None) or "equilibrium"
         structure = annotate_structure_for_bioemu2(
             structure,
-            mode=mode,
+            mode=bioemu2_mode,
             msa_path=getattr(args, "msa_path", None),
             use_msa_server=not bool(getattr(args, "bioemu2_no_msa_server", False)),
-            include_ligands=not bool(getattr(args, "bioemu2_exclude_ligands", False)),
         )
-        # BioEmu2's own EDM sampler settings; the schedule comes from the checkpoint.
-        schedule = model_wrapper.edm_schedule
-        edm_sampler_kwargs = {
-            "sigma_data": schedule.sigma_data,
-            "s_max": schedule.sigma_max,
-            "s_min": schedule.sigma_min,
-            "gamma_0": 0.8,
-            "gamma_min": 1.0,
-            "noise_scale": 1.0,
-            "step_scale": 1.0 if mode == "equilibrium" else 1.5,
-        }
     else:
         raise ValueError(f"Unknown model wrapper class: {wrapper_class_name}")
 
@@ -779,16 +767,26 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
     )
 
     # Create sampler with model-appropriate settings
-    sampler_config = EDMSamplerConfig(
-        device=str(device),
-        augmentation=args.augmentation,
-        align_to_input=args.align_to_input,
-        alignment_reverse_diffusion=use_alignment_for_reverse_diffusion,
-        **edm_sampler_kwargs,
-    )
-    sampler = AF3EDMSampler(
-        config=sampler_config,
-    )
+    if is_bioemu2:
+        from sampleworks.models.bioemu2.sampler import build_bioemu2_edm_sampler
+
+        sampler = build_bioemu2_edm_sampler(
+            model_wrapper,
+            structure["_bioemu2_config"].mode,
+            device=str(device),
+            augmentation=args.augmentation,
+            align_to_input=args.align_to_input,
+            alignment_reverse_diffusion=use_alignment_for_reverse_diffusion,
+        )
+    else:
+        sampler_config = EDMSamplerConfig(
+            device=str(device),
+            augmentation=args.augmentation,
+            align_to_input=args.align_to_input,
+            alignment_reverse_diffusion=use_alignment_for_reverse_diffusion,
+            **edm_sampler_kwargs,
+        )
+        sampler = AF3EDMSampler(config=sampler_config)
 
     # Create step scaler for gradient-based guidance.
     # TODO: unify this arg, no need for both of them now

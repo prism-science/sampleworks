@@ -99,14 +99,12 @@ class TestFromCliUnified:
             "--msa-path",
             "/data/msa.a3m",
             "--bioemu2-no-msa-server",
-            "--bioemu2-exclude-ligands",
         ] + COMMON_ARGS
         config = GuidanceConfig.from_cli(argv)
         assert getattr(config, "model_checkpoint") == "/data/bioemu2-preview/checkpoint.ckpt"
         assert getattr(config, "bioemu2_mode") == "structure"
         assert getattr(config, "msa_path") == "/data/msa.a3m"
         assert getattr(config, "bioemu2_no_msa_server") is True
-        assert getattr(config, "bioemu2_exclude_ligands") is True
 
     def test_bioemu2_defaults_to_equilibrium_mode(self):
         argv = ["--model", "bioemu2", "--guidance-type", "pure_guidance"] + COMMON_ARGS
