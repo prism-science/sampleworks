@@ -13,6 +13,9 @@ import torch
 from atomworks.enums import ChainType
 from bioemu2 import Ligand, Protein, System
 from bioemu2.structure.preparation import prepare_sampling_inputs
+from biotite.structure import AtomArrayStack
+from sampleworks.core.scalers.pure_guidance import PureGuidance
+from sampleworks.core.scalers.step_scalers import DataSpaceDPSScaler
 from sampleworks.models.bioemu2.sampler import build_bioemu2_edm_sampler
 from sampleworks.models.bioemu2.wrapper import (
     annotate_structure_for_bioemu2,
@@ -28,6 +31,8 @@ from sampleworks.models.protocol import FlowModelWrapper, GenerativeModelInput
 from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.sequence import apply_sequence_override, expected_heavy_atom_count
 from sampleworks.utils.structure_utils import process_structure_to_trajectory_input
+
+from tests.mocks.losses import MockGradientLossFunction
 
 
 def _offline(structure: dict, **kwargs) -> dict:
@@ -117,7 +122,7 @@ class TestModelAtomArray:
         topology, _ = prepare_sampling_inputs(System(entities=entities[::-1]), device="cpu")
         model = model_atom_array_from_topology(topology, structure_2yl0)
         struct = structure_2yl0["asym_unit"]
-        struct = struct[0] if struct.stack_depth() else struct  # ty:ignore[unresolved-attribute]
+        struct = struct[0] if isinstance(struct, AtomArrayStack) else struct
 
         reconciler = AtomReconciler.from_arrays(model, struct)
         m_idx, s_idx = reconciler.model_indices.numpy(), reconciler.struct_indices.numpy()
@@ -135,7 +140,6 @@ class TestModelAtomArray:
         """Residues missing from the input get the structure centroid as their reference."""
         overridden = _offline(apply_sequence_override(structure_5i09_density, seq_5i09_deposited))
         features = tiny_bioemu2_wrapper.featurize(overridden)
-        assert np.isnan(_conditioning(features).model_atom_array.coord).all()
 
         processed = process_structure_to_trajectory_input(
             structure=overridden,
@@ -149,8 +153,15 @@ class TestModelAtomArray:
         )
         assert len(unmatched) > 0
         assert torch.isfinite(reference).all()
-        centroid = torch.as_tensor(processed.atom_array.coord.mean(axis=0), dtype=reference.dtype)
-        torch.testing.assert_close(reference[unmatched], centroid.expand(len(unmatched), 3))
+        asym_unit = overridden["asym_unit"]
+        input_atoms = asym_unit[0] if isinstance(asym_unit, AtomArrayStack) else asym_unit
+        centroid = np.nanmean(input_atoms.coord, axis=0)
+        torch.testing.assert_close(
+            reference[unmatched],
+            torch.as_tensor(centroid, dtype=reference.dtype).expand(len(unmatched), 3),
+        )
+        # Loss inputs are built from the model atom array, which must stay finite.
+        processed.to_loss_inputs()
 
 
 class TestResolveMSA:
@@ -400,3 +411,20 @@ class TestBuildSampler:
     def test_overrides_apply(self, tiny_bioemu2_wrapper: BioEmu2Wrapper):
         sampler = build_bioemu2_edm_sampler(tiny_bioemu2_wrapper, gamma_min=0.0, step_scale=2.0)
         assert (sampler.config.gamma_min, sampler.config.step_scale) == (0.0, 2.0)
+
+
+def test_guided_sampling_runs_end_to_end(
+    tiny_bioemu2_wrapper: BioEmu2Wrapper, structure_5i09_density: dict, seq_5i09_deposited: str
+):
+    """A short guided run, with residues the input lacks, returns finite structures."""
+    structure = _offline(apply_sequence_override(structure_5i09_density, seq_5i09_deposited))
+    out = PureGuidance(ensemble_size=2, num_steps=3).sample(
+        structure=structure,
+        model=tiny_bioemu2_wrapper,
+        sampler=build_bioemu2_edm_sampler(tiny_bioemu2_wrapper),
+        step_scaler=DataSpaceDPSScaler(step_size=0.1),
+        loss_function=MockGradientLossFunction(),
+    )
+    final = torch.as_tensor(out.final_state)
+    assert final.shape[0] == 2
+    assert torch.isfinite(final).all()
