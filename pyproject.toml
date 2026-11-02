@@ -139,6 +139,14 @@ python = ">=3.12,<3.14"
 [tool.pixi.feature.bioemu2.pypi-dependencies]
 bioemu2 = "==0.1.0rc0"
 
+# The override replaces the Linux torch requirement below, index and all, and PyPI's Linux
+# torch >=2.11 is a CUDA 13 build. Offering the cu126 index too lets Linux resolve to its
+# `+cu126` wheel (a local version, so it ranks above PyPI's); it has no macOS wheels, so macOS
+# keeps PyPI's CPU build.
+[tool.pixi.feature.bioemu2.pypi-options]
+extra-index-urls = ["https://download.pytorch.org/whl/cu126"]
+index-strategy = "unsafe-best-match"
+
 # atomworks 2.1.1 pins biotite==1.4.0 and caps torch<2.8 for its `ml` extra;
 # bioemu2 asks for biotite>=1.5 and torch>=2.11. Keep the shared structure stack
 # on biotite 1.4.0 (bioemu2 only uses AtomArray, pdbx and load_structure, which
@@ -172,8 +180,8 @@ click = "==8.1.7"
 # Unpinned these float to 0.11.x, which imports a torch symbol torch <2.8 lacks.
 [tool.pixi.feature.boltz.target.linux-64.pypi-dependencies]
 cuequivariance = "==0.9.0"
-cuequivariance-torch = "==0.9.0"
 cuequivariance-ops-torch-cu12 = "==0.9.0"
+cuequivariance-torch = "==0.9.0"
 
 [tool.pixi.feature.boltz.target.osx-arm64.pypi-dependencies]
 cuequivariance = "==0.9.0"
