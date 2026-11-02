@@ -45,22 +45,29 @@ class TestResampleIndices:
 
 
 class TestFKSteeringOutput:
-    def _sample(self, steering: FKSteering, structure: dict, edm_sampler: AF3EDMSampler):
+    def _sample(
+        self,
+        steering: FKSteering,
+        structure: dict,
+        model: MockFlowModelWrapper,
+        edm_sampler: AF3EDMSampler,
+    ):
         return steering.sample(
             structure=structure,
-            model=MockFlowModelWrapper(num_atoms=50),
+            model=model,
             sampler=edm_sampler,
             step_scaler=DataSpaceDPSScaler(step_size=0.0),
             loss_function=MockGradientLossFunction(),
             num_particles=3,
         )
 
-    def test_default_returns_lowest_loss_particle(self, mock_structure, edm_sampler):
-        out = self._sample(FKSteering(ensemble_size=2, num_steps=4), mock_structure, edm_sampler)
+    def test_default_returns_lowest_loss_particle(self, mock_structure, mock_wrapper, edm_sampler):
+        steering = FKSteering(ensemble_size=2, num_steps=4)
+        out = self._sample(steering, mock_structure, mock_wrapper, edm_sampler)
         assert torch.as_tensor(out.final_state).shape == (2, 50, 3)
 
     @pytest.mark.parametrize("method", ["multinomial", "systematic"])
-    def test_return_all_particles(self, mock_structure, edm_sampler, method):
+    def test_return_all_particles(self, mock_structure, mock_wrapper, edm_sampler, method):
         steering = FKSteering(
             ensemble_size=2,
             num_steps=4,
@@ -69,7 +76,8 @@ class TestFKSteeringOutput:
             resampling_group_size=2,
             return_all_particles=True,
         )
-        final = torch.as_tensor(self._sample(steering, mock_structure, edm_sampler).final_state)
+        out = self._sample(steering, mock_structure, mock_wrapper, edm_sampler)
+        final = torch.as_tensor(out.final_state)
         assert final.shape == (6, 50, 3)
         assert torch.isfinite(final).all()
 
