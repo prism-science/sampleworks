@@ -41,6 +41,8 @@ _POLYMER_ENTITIES = {
     ChainType.DNA: DNA,
 }
 
+# B-factor for model atoms; reconciliation replaces it with the input's where an atom matches.
+# TODO(#534): atoms with no input match keep it without a warning, as in the other wrappers.
 _DEFAULT_B_FACTOR = 20.0
 
 
@@ -55,18 +57,16 @@ class BioEmu2Config:
         conformational ensemble; ``"structure"`` predicts a single folded state.
     msa_path : str | Path | dict | None
         A3M file for every protein chain, a ``{chain_id: path}`` mapping, or a JSON
-        file holding that mapping. ``None`` fetches MSAs from the ColabFold server.
+        file holding that mapping. ``None`` fetches MSAs from the ColabFold server when
+        ``use_msa_server`` is True.
     use_msa_server : bool
         When False and no ``msa_path`` is given, use single-sequence MSAs
         (offline, lower quality).
-    include_ligands : bool
-        Model non-polymer, non-water chains as CCD ligands.
     """
 
     mode: SamplingMode = "equilibrium"
     msa_path: str | Path | dict | None = None
     use_msa_server: bool = True
-    include_ligands: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,9 +87,10 @@ class BioEmu2Conditioning:
         Distogram logits, shape ``(1, tokens, tokens, bins)``.
     static_context : StaticContext
         Coordinate-independent structure-module inputs computed from the embeddings.
-    static_context_source : tuple[Tensor, Tensor]
-        The ``pair`` and ``relative_position_encoding`` tensors ``static_context`` was built from.
-        :meth:`BioEmu2Wrapper.step` rebuilds the context when either has been replaced.
+    static_context_source : tuple[Tensor, Tensor, Tensor]
+        The ``single``, ``pair`` and ``relative_position_encoding`` tensors ``static_context``
+        was built from. :meth:`BioEmu2Wrapper.step` rebuilds the context when any of them has
+        been replaced.
     batch : BatchAllAtomStructure
         Model input structure, batch size 1, atoms right-padded to a multiple of 32.
     num_atoms : int
@@ -112,7 +113,7 @@ class BioEmu2Conditioning:
     relative_position_encoding: Tensor
     distogram: Tensor
     static_context: StaticContext
-    static_context_source: tuple[Tensor, Tensor]
+    static_context_source: tuple[Tensor, Tensor, Tensor]
     batch: BatchAllAtomStructure
     num_atoms: int
     num_padded_atoms: int
@@ -139,7 +140,6 @@ def annotate_structure_for_bioemu2(
     mode: SamplingMode = "equilibrium",
     msa_path: str | Path | dict | None = None,
     use_msa_server: bool = True,
-    include_ligands: bool = True,
 ) -> dict:
     """Attach a :class:`BioEmu2Config` to an Atomworks structure.
 
@@ -153,20 +153,13 @@ def annotate_structure_for_bioemu2(
         MSA specification, see :class:`BioEmu2Config`.
     use_msa_server : bool
         Whether to query ColabFold when no ``msa_path`` is given.
-    include_ligands : bool
-        Whether to model non-polymer chains as ligands.
 
     Returns
     -------
     dict
         Copy of ``structure`` with a ``"_bioemu2_config"`` entry.
     """
-    config = BioEmu2Config(
-        mode=mode,
-        msa_path=msa_path,
-        use_msa_server=use_msa_server,
-        include_ligands=include_ligands,
-    )
+    config = BioEmu2Config(mode=mode, msa_path=msa_path, use_msa_server=use_msa_server)
     return {**structure, "_bioemu2_config": config}
 
 
@@ -209,22 +202,20 @@ def ligand_residues(structure: dict) -> dict[str, tuple[str, int, str]]:
     return assigned
 
 
-def system_from_structure(structure: dict, *, include_ligands: bool = True) -> System:
+def system_from_structure(structure: dict) -> System:
     """Build a BioEmu2 ``System`` from an Atomworks structure's ``chain_info``.
 
     Polymer chains use ``processed_entity_canonical_sequence``, so a sequence override
     applied with ``apply_sequence_override`` carries through and modified residues
     (e.g. MSE) become their canonical parents. Every non-polymer residue becomes a CCD
     ligand (see :func:`ligand_residues` for its ``asym_id``); ligands BioEmu2 cannot
-    build, such as residues missing from the CCD, are skipped with a warning. Waters
-    are dropped.
+    build are skipped with a warning. Waters are dropped. To leave a ligand out, remove
+    it from the input file.
 
     Parameters
     ----------
     structure : dict
         Atomworks structure dictionary with a ``chain_info`` mapping.
-    include_ligands : bool
-        Whether to include non-polymer chains.
 
     Returns
     -------
@@ -249,16 +240,17 @@ def system_from_structure(structure: dict, *, include_ligands: bool = True) -> S
         elif chain_type not in (ChainType.WATER, ChainType.NON_POLYMER):
             raise ValueError(f"BioEmu2 does not support chain {chain_id} of type {chain_type!r}")
 
-    if include_ligands:
-        for asym_id, (chain_id, res_id, ccd_code) in ligand_residues(structure).items():
-            try:
-                entities.append(Ligand(ccd_code=ccd_code, asym_ids=[asym_id]))
-            except ValidationError as error:
-                # e.g. atomworks' "~"-prefixed names for residues missing from the CCD.
-                logger.warning(
-                    f"Skipping ligand {ccd_code} (chain {chain_id}, residue {res_id}): "
-                    f"BioEmu2 rejected it: {error.errors()[0]['msg']}"
-                )
+    for asym_id, (chain_id, res_id, ccd_code) in ligand_residues(structure).items():
+        try:
+            entities.append(Ligand(ccd_code=ccd_code, asym_ids=[asym_id]))
+        except ValidationError as error:
+            # Atomworks marks residue names it cannot find in the CCD with "~": components
+            # that are not in the CCD, and 5-character CCD codes cut to 3 by a PDB file.
+            # TODO: accept custom CCD definitions for these.
+            logger.warning(
+                f"Skipping ligand {ccd_code} (chain {chain_id}, residue {res_id}): "
+                f"BioEmu2 rejected it: {error.errors()[0]['msg']}"
+            )
 
     if not entities:
         raise ValueError("Structure has no chains BioEmu2 can model")
@@ -271,7 +263,9 @@ def model_atom_array_from_topology(topology: mdtraj.Topology, structure: dict) -
     Polymer residues are renumbered from the structure's ``chain_info`` residue IDs
     when they cover the chain's sequence, otherwise from 1. Ligands go back to their
     input chain and residue ID, so a chain split by :func:`ligand_residues` reads as
-    the original chain.
+    the original chain. BioEmu2 groups identical ligands, so its ligand order can differ
+    from the input's; a ``seq_idx`` annotation (the residue's position in its input chain,
+    -1 for polymers) lets atom reconciliation pair ligands by input position.
 
     Parameters
     ----------
@@ -283,37 +277,40 @@ def model_atom_array_from_topology(topology: mdtraj.Topology, structure: dict) -
     Returns
     -------
     AtomArray
-        Atoms with chain, residue, atom and element annotations, zero coordinates,
-        occupancy 1 and B-factor 20.
+        Atoms with chain, residue, atom, element and ``seq_idx`` annotations, NaN
+        coordinates (reconciliation fills the atoms it matches), occupancy 1 and B-factor 20.
     """
     chain_info = structure["chain_info"]
     ligands = ligand_residues(structure)
 
-    # topology residue index -> (output chain_id, output res_id)
-    residue_label: dict[int, tuple[str, int]] = {}
+    # topology residue index -> (output chain_id, output res_id, input position or -1)
+    residue_label: dict[int, tuple[str, int, int]] = {}
     for chain in topology.chains:
         residues = list(chain.residues)
         if chain.chain_id in ligands:
             input_chain, res_id, _ = ligands[chain.chain_id]
+            input_res_ids = [int(r) for r in chain_info[input_chain].get("res_id", [])]
+            position = input_res_ids.index(res_id) if res_id in input_res_ids else 0
             for residue in residues:
-                residue_label[residue.index] = (input_chain, res_id)
+                residue_label[residue.index] = (input_chain, res_id, position)
             continue
         listed_ids = [int(r) for r in chain_info[chain.chain_id].get("res_id", [])]
         use_listed = len(listed_ids) == len(residues)
         for position, residue in enumerate(residues):
             res_id = listed_ids[position] if use_listed else position + 1
-            residue_label[residue.index] = (chain.chain_id, res_id)
+            residue_label[residue.index] = (chain.chain_id, res_id, -1)
 
     atoms = list(topology.atoms)
     labels = [residue_label[atom.residue.index] for atom in atoms]
     atom_array = AtomArray(len(atoms))
-    atom_array.chain_id = np.array([chain_id for chain_id, _ in labels])
-    atom_array.res_id = np.array([res_id for _, res_id in labels], dtype=int)
+    atom_array.chain_id = np.array([chain_id for chain_id, _, _ in labels])
+    atom_array.res_id = np.array([res_id for _, res_id, _ in labels], dtype=int)
     atom_array.res_name = np.array([atom.residue.name for atom in atoms])
     atom_array.atom_name = np.array([atom.name for atom in atoms])
     atom_array.element = np.array([atom.element.symbol.upper() for atom in atoms])
     atom_array.hetero = np.array([atom.residue.chain.chain_id in ligands for atom in atoms])
-    atom_array.coord = np.zeros((len(atoms), 3), dtype=np.float32)
+    atom_array.set_annotation("seq_idx", np.array([pos for _, _, pos in labels], dtype=np.int64))
+    atom_array.coord = np.full((len(atoms), 3), np.nan, dtype=np.float32)
     atom_array.set_annotation("occupancy", np.ones(len(atoms), dtype=np.float32))
     atom_array.set_annotation("b_factor", np.full(len(atoms), _DEFAULT_B_FACTOR, dtype=np.float32))
     return atom_array
@@ -400,11 +397,6 @@ class BioEmu2Wrapper:
     def device(self) -> torch.device:
         return self._device
 
-    @property
-    def edm_schedule(self):
-        """The checkpoint's EDM schedule (``sigma_data``, ``sigma_min``, ``sigma_max``)."""
-        return self.model.edm_schedule
-
     def featurize(self, structure: dict) -> GenerativeModelInput[BioEmu2Conditioning]:
         """Run BioEmu2's trunk and build the static denoiser inputs.
 
@@ -423,7 +415,7 @@ class BioEmu2Wrapper:
         if "asym_unit" not in structure:
             raise ValueError("structure must contain 'asym_unit' key")
 
-        system = system_from_structure(structure, include_ligands=config.include_ligands)
+        system = system_from_structure(structure)
         msa = resolve_msa(system, config)
         embeddings = self.model.embed(system, msa=msa, mode=config.mode)
         topology, batch = prepare_sampling_inputs(system, device=self.device)
@@ -450,7 +442,11 @@ class BioEmu2Wrapper:
             relative_position_encoding=embeddings.relative_position_encoding,
             distogram=embeddings.distogram,
             static_context=static_context,
-            static_context_source=(embeddings.pair, embeddings.relative_position_encoding),
+            static_context_source=(
+                embeddings.single,
+                embeddings.pair,
+                embeddings.relative_position_encoding,
+            ),
             batch=batch,
             num_atoms=num_atoms,
             num_padded_atoms=num_padded_atoms,
@@ -499,11 +495,11 @@ class BioEmu2Wrapper:
 
         embeddings = cond.trunk_embeddings
         static_context = cond.static_context
-        # The pair and relative-position embeddings enter only through the static context.
-        # IT-opt swaps in optimized copies, so rebuild it whenever they are not the tensors it
-        # was built from (an identity check, so the final no-grad pass sees them too).
-        source_pair, source_relpos = cond.static_context_source
-        if cond.pair is not source_pair or cond.relative_position_encoding is not source_relpos:
+        # The static context is built from single, pair and the relative-position encoding.
+        # IT-opt swaps in optimized copies, so rebuild it whenever any of them is not the tensor
+        # it was built from (an identity check, so the final no-grad pass sees them too).
+        current = (cond.single, cond.pair, cond.relative_position_encoding)
+        if any(now is not source for now, source in zip(current, cond.static_context_source)):
             # load_model's wrapper computes the context under no_grad; its score model does not.
             score_model = cast(BioMoaCModel, getattr(self.model, "score_model"))
             static_context = score_model.compute_static_context(cond.batch, embeddings)

@@ -11,19 +11,23 @@ import numpy as np
 import pytest
 import torch
 from atomworks.enums import ChainType
-from bioemu2 import Ligand, Protein
+from bioemu2 import Ligand, Protein, System
+from bioemu2.structure.preparation import prepare_sampling_inputs
+from sampleworks.models.bioemu2.sampler import build_bioemu2_edm_sampler
 from sampleworks.models.bioemu2.wrapper import (
     annotate_structure_for_bioemu2,
     BioEmu2Conditioning,
     BioEmu2Config,
     BioEmu2Wrapper,
     ligand_residues,
+    model_atom_array_from_topology,
     resolve_msa,
     system_from_structure,
 )
 from sampleworks.models.protocol import FlowModelWrapper, GenerativeModelInput
 from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.sequence import apply_sequence_override, expected_heavy_atom_count
+from sampleworks.utils.structure_utils import process_structure_to_trajectory_input
 
 
 def _offline(structure: dict, **kwargs) -> dict:
@@ -53,7 +57,7 @@ class TestSystemFromStructure:
         assert isinstance(entity, Protein)
         assert entity.sequence == info["processed_entity_canonical_sequence"]
 
-    def test_ligand_chains_follow_include_ligands(self, structure_1vme: dict):
+    def test_every_ligand_chain_is_modeled(self, structure_1vme: dict):
         chain_info = structure_1vme["chain_info"]
         ligand_chains = {
             chain_id
@@ -62,17 +66,13 @@ class TestSystemFromStructure:
         }
         assert ligand_chains, "1vme_final should carry ligand chains"
 
-        with_ligands = system_from_structure(structure_1vme, include_ligands=True)
-        without_ligands = system_from_structure(structure_1vme, include_ligands=False)
-
         ligand_ids = {
             chain_id
-            for entity in with_ligands.entities
+            for entity in system_from_structure(structure_1vme).entities
             if isinstance(entity, Ligand)
             for chain_id in entity.asym_ids
         }
         assert ligand_ids == ligand_chains
-        assert set(without_ligands.chain_ids) == set(chain_info) - ligand_chains
 
     def test_multi_residue_ligand_chain_is_split(self, structure_2yl0: dict):
         """PDB files often put several hetero groups in one chain."""
@@ -108,6 +108,49 @@ class TestSystemFromStructure:
         }
         with pytest.raises(ValueError, match="does not support"):
             system_from_structure({**structure_2yl0_density, "chain_info": chain_info})
+
+
+class TestModelAtomArray:
+    def test_ligands_keep_input_identity_in_any_topology_order(self, structure_2yl0: dict):
+        """BioEmu2 groups identical ligands, so its order can differ from the input's."""
+        entities = list(system_from_structure(structure_2yl0).entities)
+        topology, _ = prepare_sampling_inputs(System(entities=entities[::-1]), device="cpu")
+        model = model_atom_array_from_topology(topology, structure_2yl0)
+        struct = structure_2yl0["asym_unit"]
+        struct = struct[0] if struct.stack_depth() else struct  # ty:ignore[unresolved-attribute]
+
+        reconciler = AtomReconciler.from_arrays(model, struct)
+        m_idx, s_idx = reconciler.model_indices.numpy(), reconciler.struct_indices.numpy()
+        ligand = model.hetero[m_idx]
+        assert ligand.any()
+        np.testing.assert_array_equal(model.res_id[m_idx][ligand], struct.res_id[s_idx][ligand])
+        np.testing.assert_array_equal(model.res_name[m_idx][ligand], struct.res_name[s_idx][ligand])
+
+    def test_unmatched_atoms_start_at_the_structure_not_the_origin(
+        self,
+        tiny_bioemu2_wrapper: BioEmu2Wrapper,
+        structure_5i09_density: dict,
+        seq_5i09_deposited: str,
+    ):
+        """Residues missing from the input get the structure centroid as their reference."""
+        overridden = _offline(apply_sequence_override(structure_5i09_density, seq_5i09_deposited))
+        features = tiny_bioemu2_wrapper.featurize(overridden)
+        assert np.isnan(_conditioning(features).model_atom_array.coord).all()
+
+        processed = process_structure_to_trajectory_input(
+            structure=overridden,
+            coords_from_prior=tiny_bioemu2_wrapper.initialize_from_prior(1, features),
+            features=features,
+            ensemble_size=1,
+        )
+        reference = processed.input_coords[0]  # (atoms, 3)
+        unmatched = np.setdiff1d(
+            np.arange(len(reference)), processed.reconciler.model_indices.numpy()
+        )
+        assert len(unmatched) > 0
+        assert torch.isfinite(reference).all()
+        centroid = torch.as_tensor(processed.atom_array.coord.mean(axis=0), dtype=reference.dtype)
+        torch.testing.assert_close(reference[unmatched], centroid.expand(len(unmatched), 3))
 
 
 class TestResolveMSA:
@@ -286,6 +329,33 @@ class TestStep:
         torch.testing.assert_close(same, reference)
         assert not torch.allclose(moved, reference)
 
+    def test_replaced_single_rebuilds_static_context(
+        self,
+        tiny_bioemu2_wrapper: BioEmu2Wrapper,
+        features_2yl0: GenerativeModelInput[BioEmu2Conditioning],
+    ):
+        """IT-opt on single must see the static context built from the optimized single."""
+        cond = _conditioning(features_2yl0)
+        perturbed = cond.single + 3 * cond.single.std() * torch.randn_like(cond.single)
+        swapped = replace(cond, single=perturbed)
+        rebuilt_context = tiny_bioemu2_wrapper.model.compute_static_context(
+            cond.batch, swapped.trunk_embeddings, multiplicity=1
+        )
+        rebuilt = replace(
+            swapped,
+            static_context=rebuilt_context,
+            static_context_source=(perturbed, *cond.static_context_source[1:]),
+        )
+        x_t = 16.0 * tiny_bioemu2_wrapper.initialize_from_prior(1, features_2yl0)
+        with torch.no_grad():
+            from_swap = tiny_bioemu2_wrapper.step(
+                x_t, 4.0, features=GenerativeModelInput(conditioning=swapped)
+            )
+            from_rebuilt = tiny_bioemu2_wrapper.step(
+                x_t, 4.0, features=GenerativeModelInput(conditioning=rebuilt)
+            )
+        torch.testing.assert_close(from_swap, from_rebuilt)
+
     def test_requires_features(self, tiny_bioemu2_wrapper: BioEmu2Wrapper):
         with pytest.raises(ValueError, match="features"):
             tiny_bioemu2_wrapper.step(torch.zeros(1, 4, 3), torch.tensor(1.0))
@@ -308,3 +378,25 @@ class TestInitializeFromPrior:
     def test_requires_features_or_shape(self, tiny_bioemu2_wrapper: BioEmu2Wrapper):
         with pytest.raises(ValueError, match="features or shape"):
             tiny_bioemu2_wrapper.initialize_from_prior(2)
+
+
+class TestBuildSampler:
+    @pytest.mark.parametrize(("mode", "step_scale"), [("equilibrium", 1.0), ("structure", 1.5)])
+    def test_uses_checkpoint_schedule_and_bioemu2_defaults(
+        self, tiny_bioemu2_wrapper: BioEmu2Wrapper, mode, step_scale
+    ):
+        schedule = tiny_bioemu2_wrapper.model.edm_schedule
+        config = build_bioemu2_edm_sampler(tiny_bioemu2_wrapper, mode).config
+
+        assert (config.sigma_data, config.s_max, config.s_min) == (
+            schedule.sigma_data,
+            schedule.sigma_max,
+            schedule.sigma_min,
+        )
+        assert (config.gamma_0, config.gamma_min, config.noise_scale) == (0.8, 1.0, 1.0)
+        assert config.step_scale == step_scale
+        assert config.alignment_reverse_diffusion
+
+    def test_overrides_apply(self, tiny_bioemu2_wrapper: BioEmu2Wrapper):
+        sampler = build_bioemu2_edm_sampler(tiny_bioemu2_wrapper, gamma_min=0.0, step_scale=2.0)
+        assert (sampler.config.gamma_min, sampler.config.step_scale) == (0.0, 2.0)
