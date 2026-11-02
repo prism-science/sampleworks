@@ -277,8 +277,10 @@ def model_atom_array_from_topology(topology: mdtraj.Topology, structure: dict) -
     Returns
     -------
     AtomArray
-        Atoms with chain, residue, atom, element and ``seq_idx`` annotations, NaN
-        coordinates (reconciliation fills the atoms it matches), occupancy 1 and B-factor 20.
+        Atoms with chain, residue, atom, element and ``seq_idx`` annotations, occupancy 1 and
+        B-factor 20. Every atom sits at the input's centroid; reconciliation replaces that with
+        the input coordinates of the atoms it matches, so the rest (missing side chains,
+        residues added by a sequence override) start from the structure, not the origin.
     """
     chain_info = structure["chain_info"]
     ligands = ligand_residues(structure)
@@ -310,7 +312,11 @@ def model_atom_array_from_topology(topology: mdtraj.Topology, structure: dict) -
     atom_array.element = np.array([atom.element.symbol.upper() for atom in atoms])
     atom_array.hetero = np.array([atom.residue.chain.chain_id in ligands for atom in atoms])
     atom_array.set_annotation("seq_idx", np.array([pos for _, _, pos in labels], dtype=np.int64))
-    atom_array.coord = np.full((len(atoms), 3), np.nan, dtype=np.float32)
+    asym_unit = structure["asym_unit"]
+    input_atoms = asym_unit[0] if isinstance(asym_unit, AtomArrayStack) else asym_unit
+    input_coords = np.asarray(input_atoms.coord)
+    centroid = input_coords[np.isfinite(input_coords).all(axis=-1)].mean(axis=0)
+    atom_array.coord = np.broadcast_to(centroid, (len(atoms), 3)).astype(np.float32)
     atom_array.set_annotation("occupancy", np.ones(len(atoms), dtype=np.float32))
     atom_array.set_annotation("b_factor", np.full(len(atoms), _DEFAULT_B_FACTOR, dtype=np.float32))
     return atom_array

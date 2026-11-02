@@ -47,9 +47,10 @@ BioEmu2's `single` / `pair` through `models/latent_adapter.py`. The trunk itself
 - BioEmu2 models heavy atoms and no terminal OXT. On the test structures, every input atom
   reconciles except OXT and atoms of modified residues.
 - `model_atom_array` takes residue numbers from `chain_info["res_id"]` when it covers the
-  sequence, so `refined.cif` keeps the input numbering. Its coordinates are NaN: reconciliation
-  fills the atoms the input has, and the rest (missing side chains, residues added by a sequence
-  override) start partial diffusion at the input centroid, not the origin.
+  sequence, so `refined.cif` keeps the input numbering. Its atoms start at the input centroid:
+  reconciliation replaces that with the input coordinates of the atoms the input has, and the
+  rest (missing side chains, residues added by a sequence override) start partial diffusion from
+  the centroid, not the origin.
 
 ## Usage
 
