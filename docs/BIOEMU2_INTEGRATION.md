@@ -76,6 +76,48 @@ The checkpoint resolves from `--model-checkpoint`, `BIOEMU2_CHECKPOINT`,
 `/checkpoints/bioemu2-preview/checkpoint.ckpt`, then
 `/mnt/diffuse-shared/raw/checkpoints/bioemu2-preview/checkpoint.ckpt`.
 
+## Steering
+
+BioEmu2's `edm_fk` sampler (`GuidedFKSampler`) is FK steering per Singhal et al., the same
+algorithm as sampleworks' `FKSteering` with single structures as particles.
+`build_bioemu_fksteering()` (`models/bioemu2/steering.py`) returns an `FKSteering` with its
+settings: resample every 3 steps and at the last step, `fk_lambda=4.0`, systematic resampling,
+optional independent groups (`resampling_group_size`), and every particle returned. Pair it with
+`build_bioemu2_edm_sampler`, whose EDM settings match the steered sampler's:
+
+```python
+from sampleworks.core.scalers.step_scalers import DataSpaceDPSScaler
+from sampleworks.models.bioemu2.sampler import build_bioemu2_edm_sampler
+from sampleworks.models.bioemu2.steering import build_bioemu_fksteering
+
+result = build_bioemu_fksteering(num_steps=200).sample(
+    structure=structure,
+    model=wrapper,
+    sampler=build_bioemu2_edm_sampler(wrapper),
+    step_scaler=DataSpaceDPSScaler(step_size=0.0),  # resample only; >0 adds gradient guidance
+    loss_function=loss,
+    num_particles=16,  # 16 structures, all returned
+)
+```
+
+`FKSteering` gained the options this needs, all off by default: `resampling_method`
+(`"multinomial"` or `"systematic"`), `resampling_group_size` and `return_all_particles`. Two
+changes apply to every run:
+
+- With `resampling_interval > 1`, a resample now weighs particles by the loss change since the
+  previous resample, as BioEmu2 does, instead of the change over the last step only.
+  `resampling_interval=1` (the CLI default) is unchanged.
+- A particle with a non-finite loss gets a weight that loses every resample, instead of making
+  the softmax NaN.
+
+What is not reproduced:
+
+- BioEmu2's gradient guidance runs 20 gradient-descent steps on the denoised prediction with
+  per-potential, time-dependent weights; here the step scaler takes one guidance step per
+  diffusion step.
+- BioEmu2's potentials can anneal their resampling weight with time; `fk_lambda` is constant.
+- BioEmu2's FKC sampler (`edm_fkc`, annealed tilt with a reheat schedule) is not ported.
+
 ## Environment
 
 `bioemu2` / `bioemu2-dev` pixi environments (Python 3.12, `bioemu2==0.1.0rc0`). Linux uses
@@ -129,4 +171,4 @@ high-quality physicality check, and the median CA-RMSD to the input.
 
 - Bake the checkpoint into the checkpoints image used by `Dockerfile` (`CHECKPOINTS_IMAGE`).
 - Disulfide `Bond`s and contact conditioning are not passed to BioEmu2.
-- Reproducing BioEmu2's steered sampling with sampleworks' `FKSteering` is a separate, stacked PR.
+- CLI flags for the new `FKSteering` options; `build_bioemu_fksteering` is Python-only for now.
