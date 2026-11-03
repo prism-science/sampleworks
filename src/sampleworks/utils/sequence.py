@@ -17,6 +17,7 @@ from biotite.sequence import ProteinSequence
 from biotite.sequence.io.fasta import FastaFile
 from biotite.structure import get_residue_starts
 from biotite.structure.info import residue as ccd_residue
+from loguru import logger
 
 
 @functools.cache
@@ -321,9 +322,15 @@ def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> 
         )
 
     # Map each observed residue to its position in the full (potentially longer) override.
-    residue_seq_idx, _ = align_to_sequence(
+    residue_seq_idx, ambiguous_at = align_to_sequence(
         observed_seq, sequence, residue_ids, chain_array.ins_code[starts[:-1]]
     )
+    if ambiguous_at is not None:
+        logger.warning(
+            f"Protein chain {chain_id_str} fits the override sequence in several equally good "
+            f"ways around override position {ambiguous_at} (a gap inside a run of repeated "
+            "residues that the residue numbering does not place). Using one of them."
+        )
 
     # Every observed residue must map to the override sequence.  Unmapped
     # residues (seq_idx == -1) would corrupt downstream tensor indexing in
