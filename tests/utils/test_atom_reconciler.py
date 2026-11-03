@@ -181,31 +181,21 @@ class TestFromArrays:
         assert rec.model_indices.tolist() == rec.struct_indices.tolist()
         assert rec.has_mismatch
 
-    def test_unresolved_terminus_pairs_same_residues(self):
-        # Model built from the full sequence, but the structure lacks the first 3 residues
-        # and numbers the rest by sequence position e.g. unmodeled N-term
-        names = ["MET", "THR", "GLU", "ARG", "LYS", "GLY"]
-        model = build_test_atom_array(
-            chain_ids=["A"] * 12,
-            res_ids=[i for i in range(6) for _ in "NC"],
-            atom_names=["N", "CA"] * 6,
-        )
-        model.res_name[:] = [n for n in names for _ in "NC"]
-        struct = build_test_atom_array(
-            chain_ids=["A"] * 6,
-            res_ids=[i for i in range(4, 7) for _ in "NC"],
-            atom_names=["N", "CA"] * 3,
-        )
-        struct.res_name[:] = [n for n in names[3:] for _ in "NC"]
+    @pytest.mark.parametrize(
+        "first_resolved", [3, 0], ids=["unmodeled_n_terminus", "unmodeled_c_terminus"]
+    )
+    def test_unresolved_terminus_pairs_same_residues(self, first_resolved):
+        # Model built from the full sequence, but the structure lacks 3 terminal residues
+        # and numbers the rest by sequence position
+        model = _chain_a(range(6), MODEL_NAMES)
+        resolved = range(first_resolved, first_resolved + 3)
+        struct = _chain_a([i + 1 for i in resolved], [MODEL_NAMES[i] for i in resolved])
 
         rec = AtomReconciler.from_arrays(model, struct)
 
-        assert rec.n_common == len(struct)
-        assert (
-            model.res_name[rec.model_indices.numpy()].tolist()
-            == struct.res_name[rec.struct_indices.numpy()].tolist()
-        )
-        assert sorted(rec.model_indices.tolist()) == list(range(6, 12))
+        # Two atoms per residue
+        offset = 2 * first_resolved
+        assert _pairs(rec) == {index: index + offset for index in range(len(struct))}
 
     def test_differently_named_chains_pair_in_order_of_appearance(self):
         # The model names chains A, B; the input names the same chains L, H (sorted: H, L).
@@ -233,24 +223,12 @@ class TestFromArrays:
     def test_gap_in_repeated_residues_follows_input_numbering(self):
         # His-tag HHHH with the input missing residue 3: by name alone the gap could be anywhere.
         names = ["MET", "HIS", "HIS", "HIS", "HIS", "GLY"]
-        model = build_test_atom_array(
-            chain_ids=["A"] * 6, res_ids=list(range(1, 7)), atom_names=["CA"] * 6
-        )
-        model.res_name[:] = names
-        struct = build_test_atom_array(
-            chain_ids=["A"] * 5, res_ids=[11, 12, 14, 15, 16], atom_names=["CA"] * 5
-        )
-        struct.res_name[:] = [names[i] for i in (0, 1, 3, 4, 5)]
+        model = _chain_a(range(1, 7), names, ["CA"])
+        struct = _chain_a([11, 12, 14, 15, 16], [names[i] for i in (0, 1, 3, 4, 5)], ["CA"])
 
         rec = AtomReconciler.from_arrays(model, struct)
 
-        assert dict(zip(rec.struct_indices.tolist(), rec.model_indices.tolist())) == {
-            0: 0,
-            1: 1,
-            2: 3,
-            3: 4,
-            4: 5,
-        }
+        assert _pairs(rec) == {0: 0, 1: 1, 2: 3, 3: 4, 4: 5}
 
     def test_mse_se_maps_to_met_sd(self):
         model = build_test_atom_array(chain_ids=["A", "A"], res_ids=[0, 0], atom_names=["N", "SD"])
