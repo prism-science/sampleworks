@@ -163,8 +163,9 @@ def align_to_sequence(
     -------
     tuple[np.ndarray, int | None]
         Position in ``sequence`` of each observed residue, ``-1`` where its name matches no
-        position it can take, shape ``(n_observed,)``; and the smallest sequence position at
-        which two optimal placements disagree, ``None`` when the optimum is unique.
+        position it can take, shape ``(n_observed,)``; and a sequence position at which two
+        optimal placements disagree (not necessarily the first), ``None`` when the optimum is
+        unique. When it is not unique, the positions follow one of the optimal placements.
     """
     n_observed, n_sequence = len(observed), len(sequence)
     positions = np.full(n_observed, -1, dtype=np.int64)
