@@ -615,6 +615,17 @@ class TestNormalizedAtomId:
 
         np.testing.assert_array_equal(ids_a, ids_b)
 
+    def test_insertion_codes_are_positions_and_repeats_are_suffixed(self):
+        """Residues 1, 1A, 2 take three positions; a repeated atom (altloc) gets ``#1``."""
+        arr = AtomArray(4)
+        arr.chain_id[:] = "A"
+        arr.res_id[:] = [1, 1, 2, 2]
+        arr.ins_code[:] = ["", "A", "", ""]
+        arr.res_name[:] = "ALA"
+        arr.atom_name[:] = "CA"
+
+        assert make_normalized_atom_id(arr).tolist() == ["A_0_CA", "A_1_CA", "A_2_CA", "A_2_CA#1"]
+
     def test_6b8x_unique_ids_per_atom(self, structure_6b8x):
         """Every atom in 6b8x gets a unique normalized ID (single-chain, no duplication)."""
         arr = structure_6b8x["asym_unit"]
