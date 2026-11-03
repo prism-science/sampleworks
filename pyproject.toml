@@ -278,10 +278,10 @@ cmd = "pytest -m gpu"
 # depends-on/alias mechanism only works within a single environment.
 # This continues past failures, exits 1 if any env failed.
 [tool.pixi.tasks.test-all]
-cmd = "f=0; pixi run -e boltz-dev all-tests || f=1; pixi run -e protenix-dev all-tests || f=1; pixi run -e rf3-dev all-tests || f=1; pixi run -e protpardelle-dev all-tests || f=1; exit $f"
+cmd = "f=0; pixi run -e boltz-dev all-tests || f=1; pixi run -e protenix-dev all-tests || f=1; pixi run -e rf3-dev all-tests || f=1; pixi run -e protpardelle-dev all-tests || f=1; pixi run -e esmfold2-dev all-tests || f=1; exit $f"
 
 [tool.pixi.tasks.test-fast]
-cmd = "f=0; pixi run -e boltz-dev tests || f=1; pixi run -e protenix-dev tests || f=1; pixi run -e rf3-dev tests || f=1; pixi run -e protpardelle-dev tests || f=1; exit $f"
+cmd = "f=0; pixi run -e boltz-dev tests || f=1; pixi run -e protenix-dev tests || f=1; pixi run -e rf3-dev tests || f=1; pixi run -e protpardelle-dev tests || f=1; pixi run -e esmfold2-dev tests || f=1; exit $f"
 
 # NOTE: if new model environment is added, we need new entries here
 # Per-env: pixi run -e rf3-dev tests "-k integration"
