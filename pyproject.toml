@@ -186,6 +186,10 @@ index-strategy = "unsafe-best-match"
 # upgraded to >=2.2.1, which removes the torch upper bound altogether.
 torch = "==2.11.0"
 
+[tool.pixi.feature.esmfold2.target.osx-arm64.activation.env]
+# Make Torch-compiled code use the same OpenMP runtime as the PyTorch wheel.
+OMP_PREFIX = "$CONDA_PREFIX/lib/python3.12/site-packages/torch"
+
 [tool.pixi.feature.esmfold2.target.osx-arm64.dependencies]
 # Use Apple's BLAS to avoid "OMP: Error #15".
 libblas = {build = "*accelerate", version = "*"}
