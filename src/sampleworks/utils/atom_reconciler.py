@@ -200,8 +200,8 @@ def _register_struct_residues(model_array: AtomArray, struct_array: AtomArray) -
                 f"around model residue index {ambiguous_at} (a gap inside a run of repeated "
                 "residues that the input numbering does not place). Using one of them."
             )
-        # A run of unmatched residues exactly filling the space between two matched ones is
-        # considered a substitution: the residues between the matched ones are renamed.
+        # A run of unmatched residues exactly filling the space between two matched ones is a
+        # substitution: it takes the model positions between them.
         placed = np.flatnonzero(residue_seq_idx >= 0)
         for before, after in zip(placed[:-1].tolist(), placed[1:].tolist()):
             if after - before > 1 and (
