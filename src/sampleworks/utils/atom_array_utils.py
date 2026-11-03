@@ -768,7 +768,7 @@ def make_normalized_atom_id(arr: AtomArray | AtomArrayStack) -> np.ndarray:
         seq_pos[chain_mask] = [key_to_pos[key] for key in residue_keys]
 
     # Override with alignment-derived seq_idx when present (set by
-    # apply_sequence_override to handle gaps / missing residues).
+    # apply_sequence_override or AtomReconciler to handle gaps / missing residues).
     if "seq_idx" in arr.get_annotation_categories():
         override = cast(np.ndarray, arr.seq_idx)
         mask = override >= 0
