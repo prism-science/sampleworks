@@ -257,7 +257,7 @@ def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> 
         If a non-empty sequence is supplied but the structure has no protein
         chains, has multiple protein chains, contains invalid amino-acid
         characters, or if the protein chain looks malformed (non-amino-acid residues,
-        residue numbering that contradicts the sequence, or residues that cannot be
+        residue numbering that restarts, or residues that cannot be
         aligned to the override).
     """
     if sequence is None or not sequence.strip():
