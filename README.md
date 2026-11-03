@@ -112,6 +112,8 @@ Output files appear in `output/boltz2_pure_guidance/`: `refined.cif` (final ense
 
 Model-specific arguments (e.g. `--method` for boltz2, `--msa-path` for rf3) and guidance-type-specific arguments (e.g. `--num-particles` for fk_steering) are included automatically. Run `sampleworks-guidance --model <model> --guidance-type <type> --help` to see all available options.
 
+MSAs fetched from the MSA server are cached in `~/.sampleworks/msa`; set `MSA_CACHE_DIR` to cache them elsewhere.
+
 ### Latent optimization (IT-opt)
 
 `--guidance-type latent_opt` optimizes the model's cached post-trunk latents — the single

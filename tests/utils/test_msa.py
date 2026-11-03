@@ -56,15 +56,64 @@ def test_cache_dir_explicit_string_converted_to_path(tmp_path: Path):
     assert manager.msa_dir == tmp_path
 
 
-def test_cache_dir_default_created_under_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_cache_dir_explicit_is_created_when_missing(tmp_path: Path):
+    cache_dir = tmp_path / "nested" / "msa"
+
+    manager = MSAManager(msa_cache_dir=cache_dir)
+
+    assert manager.msa_dir == cache_dir
+    assert cache_dir.is_dir()
+
+
+@pytest.mark.parametrize("env_value", [None, "", "  "], ids=["unset", "empty", "blank"])
+def test_cache_dir_default_created_under_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env_value: str | None
+):
     # Redirect Path.home() so we don't pollute the real home directory.
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    if env_value is None:
+        monkeypatch.delenv(msa_module.MSA_CACHE_DIR_ENV_VAR, raising=False)
+    else:
+        monkeypatch.setenv(msa_module.MSA_CACHE_DIR_ENV_VAR, env_value)
 
     manager = MSAManager(msa_cache_dir=None)
 
     expected = tmp_path / ".sampleworks" / "msa"
     assert manager.msa_dir == expected
     assert expected.exists()
+
+
+def test_cache_dir_from_environment_variable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cache_dir = tmp_path / "shared" / "msa"
+    monkeypatch.setenv(msa_module.MSA_CACHE_DIR_ENV_VAR, str(cache_dir))
+
+    manager = MSAManager()
+
+    assert manager.msa_dir == cache_dir
+    assert cache_dir.is_dir()
+
+
+def test_cache_dir_environment_variable_expands_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv(msa_module.MSA_CACHE_DIR_ENV_VAR, "~/msa-cache")
+
+    manager = MSAManager()
+
+    assert manager.msa_dir == tmp_path / "msa-cache"
+    assert manager.msa_dir.is_dir()
+
+
+def test_cache_dir_explicit_overrides_environment_variable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv(msa_module.MSA_CACHE_DIR_ENV_VAR, str(tmp_path / "from_env"))
+
+    manager = MSAManager(msa_cache_dir=tmp_path / "explicit")
+
+    assert manager.msa_dir == tmp_path / "explicit"
+    assert not (tmp_path / "from_env").exists()
 
 
 # ============================================================================
