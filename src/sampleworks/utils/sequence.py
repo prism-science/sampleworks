@@ -211,7 +211,18 @@ def align_to_sequence(
     totals = np.minimum(costs[-1] + trailing, unreachable)  # (n_sequence,)
 
     def trace(pick: Callable[[np.ndarray], int]) -> np.ndarray:
-        """Trace one optimal placement back, choosing among tied predecessors with ``pick``."""
+        """Trace one optimal placement back from the end.
+
+        Parameters
+        ----------
+        pick : Callable[[np.ndarray], int]
+            Chooses one sequence position among tied candidates (e.g. ``np.min``).
+
+        Returns
+        -------
+        np.ndarray
+            Sequence position of each observed residue, shape ``(n_observed,)``.
+        """
         path = np.empty(n_observed, dtype=np.int64)
         path[-1] = pick(np.flatnonzero(totals == totals.min()))
         for index in range(n_observed - 1, 0, -1):
