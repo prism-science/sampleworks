@@ -267,7 +267,7 @@ def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> 
         If a non-empty sequence is supplied but the structure has no protein
         chains, has multiple protein chains, contains invalid amino-acid
         characters, or if the protein chain looks malformed (non-amino-acid residues,
-        residue numbering that restarts, or residues that cannot be
+        residue numbering that restarts or repeats, or residues that cannot be
         aligned to the override).
     """
     if sequence is None or not sequence.strip():
@@ -326,15 +326,18 @@ def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> 
         )
 
     residue_ids = chain_array.res_id[starts[:-1]]
-    if np.any(np.diff(residue_ids) < 0):
+    insertion_codes = chain_array.ins_code[starts[:-1]]
+    # A repeated (res_id, ins_code), e.g. microheterogeneity, would take two override positions.
+    residue_keys = set(zip(residue_ids.tolist(), insertion_codes.tolist()))
+    if np.any(np.diff(residue_ids) < 0) or len(residue_keys) < len(residue_ids):
         raise ValueError(
             f"Sequence override failed: residue numbering of protein chain {chain_id_str} "
-            f"restarts. The CIF may be malformed."
+            f"restarts or repeats. The CIF may be malformed."
         )
 
     # Map each observed residue to its position in the full (potentially longer) override.
     residue_seq_idx, ambiguous_at = align_to_sequence(
-        observed_seq, sequence, residue_ids, chain_array.ins_code[starts[:-1]]
+        observed_seq, sequence, residue_ids, insertion_codes
     )
     if ambiguous_at is not None:
         logger.warning(
