@@ -561,6 +561,15 @@ def test_insertion_codes_next_to_gap():
     np.testing.assert_array_equal(updated.seq_idx, [0, 1, 2, 3, 4, 7, 8])
 
 
+def test_override_warns_when_numbering_does_not_place_a_gap(caplog):
+    """A His-tag renumbered contiguously with one HIS missing fits several ways; say so."""
+    structure = _single_chain_structure([1, 2, 3, 4, 5], "MHHHG")
+
+    apply_sequence_override(structure, "MHHHHG")
+
+    assert "several equally good ways" in caplog.text
+
+
 def _align(observed, sequence, numbers=None, codes=None):
     """Run align_to_sequence on lists, returning positions as a list and the ambiguity."""
     positions, ambiguous_at = align_to_sequence(
