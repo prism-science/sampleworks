@@ -33,7 +33,7 @@ def test_argv_for_rf3_partial_matches_bash(monkeypatch: pytest.MonkeyPatch) -> N
     assert pairs["--proteins"] == "/data/inputs/proteins.csv"
     assert pairs["--model"] == "rf3"
     assert pairs["--scalers"] == "pure_guidance"
-    assert pairs["--partial-diffusion-step"] == "120"
+    assert pairs["--partial-diffusion-start"] == "0.6"
     assert pairs["--ensemble-sizes"] == "8"
     assert pairs["--gradient-weights"] == "0.0 0.005 0.01 0.02 0.035 0.05 0.1"
     assert pairs["--model-checkpoint"] == "/checkpoints/rf3_foundry_01_24_latest.ckpt"

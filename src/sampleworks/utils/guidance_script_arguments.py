@@ -251,13 +251,15 @@ class GuidanceConfig:
     guidance_type: str | GuidanceType
     log_path: str
     output_dir: str = "output"
-    partial_diffusion_step: int = 0
+    # Reverse-time fractions in [0, 1], not step counts: a step number only means something
+    # relative to a model's num_diffusion_steps, which differs per model (see #246).
+    partial_diffusion_start: float = 0.0
     loss_order: int = 2
     resolution: float | None = None
     device: str = ""
     gradient_normalization: bool = False
     em: bool = False
-    guidance_start: int = -1
+    guidance_start: float = 0.0
     augmentation: bool = False
     align_to_input: bool = False
     alignment_reverse_diffusion: bool | None = None
@@ -386,7 +388,7 @@ class GuidanceConfig:
             guidance_type=guidance_type,
             log_path=getattr(args, "log_path", None) or "",
             output_dir=args.output_dir,
-            partial_diffusion_step=args.partial_diffusion_step,
+            partial_diffusion_start=args.partial_diffusion_start,
             device=getattr(args, "device", "") or "",
             gradient_normalization=args.gradient_normalization,
             guidance_start=args.guidance_start,
@@ -444,6 +446,8 @@ class GuidanceConfig:
 
     def __post_init__(self):
         """Set up guidance config for a given model and guidance type"""
+        self._validate_step_fractions()
+
         try:
             _GUIDANCE_ARG_ADDERS[self.guidance_type](self)
         except KeyError:
@@ -455,6 +459,38 @@ class GuidanceConfig:
             raise ValueError(f"Unknown model type: {self.model_name}")
 
         self._reconcile_loss_config()
+
+    def _validate_step_fractions(self):
+        """Reject out-of-range ``partial_diffusion_start`` / ``guidance_start``.
+
+        Both are reverse-time fractions of the diffusion schedule, converted to a step
+        index downstream as ``int(fraction * num_steps)``. This is the single
+        construction chokepoint (``from_cli``, grid-search ``build_args_for_process_pool``,
+        and direct construction all reach it), so catching bad values here stops them
+        before a job is pickled into the queue (#411).
+
+        ``partial_diffusion_start`` is bounded on ``[0, 1)``: ``1.0`` maps to the final
+        step, leaving an empty ``range(num_steps, num_steps)`` sampling loop. ``guidance_start``
+        is bounded on ``[0, 1]``: ``1.0`` simply means guidance is never applied. ``0.0`` is
+        the default for both (full diffusion / guide from the first step).
+
+        Raises
+        ------
+        ValueError
+            If either fraction falls outside its allowed range.
+        """
+        if not 0.0 <= self.partial_diffusion_start < 1.0:
+            raise ValueError(
+                "partial_diffusion_start must be a reverse-time fraction in [0, 1), "
+                f"got {self.partial_diffusion_start}. It is a fraction of the diffusion "
+                "schedule, not a step count (see #246)."
+            )
+        if not 0.0 <= self.guidance_start <= 1.0:
+            raise ValueError(
+                "guidance_start must be a reverse-time fraction in [0, 1], "
+                f"got {self.guidance_start}. It is a fraction of the diffusion schedule, "
+                "not a step count (see #246)."
+            )
 
     def _reconcile_loss_config(self):
         """Keep ``loss_config`` and the flat density fields agreeing with each other.
@@ -737,10 +773,12 @@ def add_generic_args(parser: argparse.ArgumentParser | GuidanceConfig):
         "--log-path", type=str, default=None, help="Log file path (default: output-dir/run.log)"
     )
     parser.add_argument(
-        "--partial-diffusion-step",
-        type=int,
-        default=0,
-        help="Diffusion step to start from",
+        "--partial-diffusion-start",
+        type=float,
+        default=0.0,
+        help="Reverse-time fraction in [0, 1) to start partial diffusion from "
+        "(0 = full diffusion). A fraction, not a step count, so it is portable across "
+        "models with different schedules.",
     )
     parser.add_argument("--device", type=str, default=None, help="Device (cuda/cpu, auto-detect)")
     parser.add_argument(
@@ -750,9 +788,10 @@ def add_generic_args(parser: argparse.ArgumentParser | GuidanceConfig):
     )
     parser.add_argument(
         "--guidance-start",
-        type=int,
-        default=-1,
-        help="Step to start guidance (default: -1, starts immediately)",
+        type=float,
+        default=0.0,
+        help="Reverse-time fraction in [0, 1] after which to start applying guidance "
+        "(default: 0.0, starts immediately). A fraction, not a step count.",
     )
     parser.add_argument(
         "--augmentation",

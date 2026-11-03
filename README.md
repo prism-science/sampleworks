@@ -86,7 +86,7 @@ pixi run -e boltz sampleworks-guidance \
     --density tests/resources/1vme/1vme_final_carved_edited_0.5occA_0.5occB_1.80A.ccp4 \
     --resolution 1.8 \
     --output-dir output/boltz2_pure_guidance \
-    --guidance-start 130 \
+    --guidance-start 0.65 \
     --ensemble-size 4 \
     --gradient-normalization \
     --augmentation \
