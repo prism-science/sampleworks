@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -347,38 +348,29 @@ class ProtenixWrapper:
         json_path, json_dict = create_protenix_input_from_structure(structure, out_dir)
 
         if use_msa:
-            # first try the MSAManager
+            # Rebuilt every call: MSAManager caches the MSA search itself by sequence hash,
+            # so a file cache here only risks reusing another structure's input (#412).
+            sequence_data: dict[str | int, str] = {
+                n: seq_data["proteinChain"]["sequence"]
+                for n, seq_data in enumerate(json_dict["sequences"])
+                if "proteinChain" in seq_data
+            }
+            msa_paths = self.msa_manager.get_msa(
+                sequence_data,
+                msa_pairing_strategy="complete",  # not actually passed through for Protenix
+                structure_predictor=StructurePredictor.PROTENIX,
+            )
 
-            import json
-
-            updated_json_path = json_path.with_name(f"{json_path.stem}-add-msa.json")
-            if not updated_json_path.exists():
-                # get all the required sequences from the json_dict
-                sequence_data: dict[str | int, str] = {
-                    n: seq_data["proteinChain"]["sequence"]
-                    for n, seq_data in enumerate(json_dict["sequences"])
-                    if "proteinChain" in seq_data
+            for idx in sequence_data:
+                # see https://github.com/bytedance/Protenix/blob/main/runner/msa_search.py#L57
+                json_dict["sequences"][idx]["proteinChain"]["msa"] = {
+                    "precomputed_msa_dir": str(msa_paths[idx]),
+                    "pairing_db": "uniref100",
                 }
-                msa_paths = self.msa_manager.get_msa(
-                    sequence_data,
-                    msa_pairing_strategy="complete",  # not actually passed through for Protenix
-                    structure_predictor=StructurePredictor.PROTENIX,
-                )
 
-                for idx in sequence_data:
-                    # see https://github.com/bytedance/Protenix/blob/main/runner/msa_search.py#L57
-                    json_dict["sequences"][idx]["proteinChain"]["msa"] = {
-                        "precomputed_msa_dir": str(msa_paths[idx]),
-                        "pairing_db": "uniref100",
-                    }
-
-                # Dump the new config to a file--for consistency with Protenix, not really needed.
-                with open(updated_json_path, "w") as f:
-                    json.dump([json_dict], f)
-
-            with open(updated_json_path) as f:
-                json_data = json.load(f)
-                json_dict = json_data[0]
+            # Written for inspection only, mirroring Protenix's own layout; never read back.
+            with open(json_path.with_name(f"{json_path.stem}-add-msa.json"), "w") as f:
+                json.dump([json_dict], f)
 
         try:
             sample2feat = SampleDictToFeatures(json_dict)
