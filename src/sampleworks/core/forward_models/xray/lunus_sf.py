@@ -50,9 +50,10 @@ autograd holds each cutoff sphere fixed, so its gradient omits the voxels that
 cross the sphere as the atom moves. The raised-cosine taper of width
 ``taper_width`` (0.1 Å by default) removes the edge and makes the autograd and
 true gradients agree. Since lunus v0.2.1 the taper begins at the threshold and
-occupies ``[R, R + taper_width]``: inside ``R`` the density is a hard cutoff's,
-only the tail below the threshold is attenuated, and the width affects the
-candidate-voxel count but not the forward values. Before that it occupied
+occupies ``[R, R + taper_width]``: inside ``R`` the density is a hard cutoff's
+and only the tail below the threshold is attenuated, so the width changes the
+forward values by at most the threshold times the tail volume, and otherwise
+sets the candidate-voxel count. Before that it occupied
 ``[R - taper_width, R]`` and removed density above the threshold; lunus
 measured parity with gemmi improving 4.5x on the correction. What remains of
 the disagreement with gemmi is dominated by the cutoff value and the two
