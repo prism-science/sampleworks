@@ -624,6 +624,14 @@ def test_reset_numbering_raises_malformed():
         apply_sequence_override(structure, "MKLMK")
 
 
+def test_repeated_residue_number_raises_malformed():
+    """Two residues under one number (ASN/ASP at 3) cannot each take an override position."""
+    structure = _single_chain_structure([1, 2, 3, 3, 4], "MKNDE")
+
+    with pytest.raises(ValueError, match="malformed"):
+        apply_sequence_override(structure, "MKNDEF")
+
+
 def test_ligand_in_protein_chain_raises_malformed(structure_1vme_density_input: dict):
     """Ligands deposited inside the protein chain are reported and not silently misaligned."""
     chain_a = structure_1vme_density_input["chain_info"]["A"]
