@@ -749,6 +749,12 @@ def make_normalized_atom_id(arr: AtomArray | AtomArrayStack) -> np.ndarray:
     altlocs) gets an occurrence suffix, so ids are unique and a repeat pairs only with the same
     repeat in another array.
 
+    Parameters
+    ----------
+    arr : AtomArray | AtomArrayStack
+        Atoms to identify. Where its optional ``seq_idx`` annotation is ``>= 0``, it replaces
+        the dense residue position.
+
     Returns
     -------
     np.ndarray
