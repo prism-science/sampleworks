@@ -208,8 +208,6 @@ def align_to_sequence(
             best >= unreachable, unreachable, best + np.where(matches[index], 0, mismatch)
         )
     totals = np.minimum(costs[-1] + trailing, unreachable)  # (n_sequence,)
-    if totals.min() >= unreachable:
-        return positions, None
 
     def trace(pick: Callable[[np.ndarray], int]) -> np.ndarray:
         """Trace one optimal placement back, choosing among tied predecessors with ``pick``."""
