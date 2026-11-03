@@ -322,6 +322,17 @@ class TestFromArrays:
         assert "paired with it by position" in caplog.text
         assert "SER0" in caplog.text
 
+    def test_longer_chain_with_matching_names_warns_without_differing_names(self, caplog):
+        # One extra C-terminal residue: the names that overlap all match.
+        model = _chain_a(range(1, 7), MODEL_NAMES)
+        struct = _chain_a(range(1, 8), [*MODEL_NAMES, "SER"])
+
+        with caplog.at_level(logging.WARNING):
+            AtomReconciler.from_arrays(model, struct)
+
+        assert "has 7 residues to the model's 6 and is paired with it by position." in caplog.text
+        assert "differ at" not in caplog.text
+
     def test_waters_in_a_protein_chain_warn(self, caplog):
         model = _chain_a(range(1, 7), MODEL_NAMES)
         struct = _chain_a(range(2, 7), MODEL_NAMES[1:]) + _chain_a([101], ["HOH"], ["O"])
