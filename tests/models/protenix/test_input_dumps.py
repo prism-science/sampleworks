@@ -24,12 +24,13 @@ def _protein_sequences(input_json: Path) -> list[str]:
     list[str]
         Sequence of every ``proteinChain`` entry, in file order.
     """
-    (sample,) = json.loads(input_json.read_text())
-    sequences = []
-    for entry in sample["sequences"]:
-        if "proteinChain" in entry:
-            sequences.append(entry["proteinChain"]["sequence"])
-    return sequences
+    with input_json.open() as f:
+        (sample,) = json.load(f)
+    return [
+        entry["proteinChain"]["sequence"]
+        for entry in sample["sequences"]
+        if "proteinChain" in entry
+    ]
 
 
 @pytest.mark.slow
