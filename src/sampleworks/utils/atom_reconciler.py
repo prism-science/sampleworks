@@ -251,7 +251,10 @@ class AtomReconciler:
         """Build reconciler from model and structure atom arrays.
 
         Uses normalized atom IDs (sequential per-chain residue numbering)
-        to handle numbering differences between representations.
+        to handle numbering differences between representations. Structure chains are first
+        renamed to the model chains they correspond to (:func:`_pair_struct_chains`), and
+        structure chains shorter than their model chain are placed on it by name and
+        numbering (:func:`_register_struct_residues`).
 
         Parameters
         ----------
