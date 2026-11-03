@@ -166,7 +166,7 @@ platforms = ["linux-64-cuda-12", "osx-arm64"]
 # Pinned to a release tag, not a branch -- a branch pin resolves once at lock
 # time and never moves, so new work would never arrive. Bump the tag instead.
 # The `sf` extra pulls torch and gemmi, already in every environment.
-lunus = {extras = ["sf"], git = "https://github.com/lanl/lunus.git", tag = "v0.2.0"}
+lunus = {extras = ["sf"], git = "https://github.com/lanl/lunus.git", tag = "v0.2.1"}
 
 [tool.pixi.feature.external-tools]
 # Binaries the eval scripts shell out to. Kept separate from the `analysis`
