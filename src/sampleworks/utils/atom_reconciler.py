@@ -180,11 +180,12 @@ def _register_struct_residues(model_array: AtomArray, struct_array: AtomArray) -
                 if not names & model
             ]
             if differ or len(struct_names) > len(model_names):
+                names_differ = f", but residue names differ at {differ[:10]}" if differ else ""
                 logger.warning(
                     f"Input chain {chain} has {len(struct_names)} residues to the model's "
-                    f"{len(model_names)} and is paired with it by position, but residue names "
-                    f"differ at {differ[:10]}. If the input has residues the model lacks (e.g. "
-                    "an expression tag), every pair after them is shifted."
+                    f"{len(model_names)} and is paired with it by position{names_differ}. If the "
+                    "input has residues the model lacks (e.g. an expression tag), every pair "
+                    "after them is shifted."
                 )
             continue
         residue_seq_idx, ambiguous_at = align_to_sequence(
