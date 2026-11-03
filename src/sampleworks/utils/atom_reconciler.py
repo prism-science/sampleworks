@@ -172,9 +172,9 @@ def _register_struct_residues(model_array: AtomArray, struct_array: AtomArray) -
         )
         if ambiguous_at is not None:
             logger.warning(
-                f"Input chain {chain} fits the model sequence in several equally good ways from "
-                f"model residue index {ambiguous_at} on (a gap inside a run of repeated "
-                "residues that the input numbering does not place). Using the earliest."
+                f"Input chain {chain} fits the model sequence in several equally good ways "
+                f"around model residue index {ambiguous_at} (a gap inside a run of repeated "
+                "residues that the input numbering does not place). Using one of them."
             )
         # A run of unmatched residues exactly filling the space between two matched ones is
         # considered a substitution: the residues between the matched ones are renamed.
