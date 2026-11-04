@@ -754,9 +754,11 @@ def parse_args() -> argparse.Namespace:
 
     sf_group = parser.add_argument_group("Structure Factor Options")
     sf_group.add_argument("--resolution", "-r", type=float, default=1.0, help="d_min in Angstroms")
-    sf_group.add_argument("--remove-hydrogens", action="store_true", help="Single-model input only")
-    sf_group.add_argument("--remove-waters", action="store_true", help="Single-model input only")
-    sf_group.add_argument("--remove-ligands", action="store_true", help="Single-model input only")
+    sf_group.add_argument("--remove-hydrogens", action="store_true", help="Remove hydrogen atoms")
+    sf_group.add_argument("--remove-waters", action="store_true", help="Remove water molecules")
+    sf_group.add_argument(
+        "--remove-ligands", action="store_true", help="Keep only polymer amino acids"
+    )
 
     solvent_group = parser.add_argument_group("Bulk Solvent Options")
     solvent_group.add_argument(
