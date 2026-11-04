@@ -453,8 +453,8 @@ def test_latent_opt_cli_flags_reach_the_config():
 
     Regression guard: these attribute names have to be listed in
     ``_DYNAMIC_ATTRS`` or ``from_cli`` silently drops the parsed values and
-    ``_run_guidance``'s ``getattr(args, ...)`` falls back to the defaults, making
-    every flag a no-op. Passing *non-default* values here catches that.
+    ``_run_guidance`` reads the defaults instead, making every flag a no-op.
+    Passing *non-default* values here catches that.
     """
     config = GuidanceConfig.from_cli(
         argv=[

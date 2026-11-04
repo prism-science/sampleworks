@@ -135,8 +135,8 @@ click = "==8.1.7"
 # Unpinned these float to 0.11.x, which imports a torch symbol torch <2.8 lacks.
 [tool.pixi.feature.boltz.target.linux-64.pypi-dependencies]
 cuequivariance = "==0.9.0"
-cuequivariance-torch = "==0.9.0"
 cuequivariance-ops-torch-cu12 = "==0.9.0"
+cuequivariance-torch = "==0.9.0"
 
 [tool.pixi.feature.boltz.target.osx-arm64.pypi-dependencies]
 cuequivariance = "==0.9.0"

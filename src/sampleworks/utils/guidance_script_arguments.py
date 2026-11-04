@@ -7,6 +7,7 @@ import os
 import sys
 import typing
 from dataclasses import dataclass, field
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
@@ -220,7 +221,7 @@ _DYNAMIC_ATTRS = [
     "guidance_weight",
     "guidance_interval",
     # latent optimization (IT-opt) -- must be listed here or from_cli() drops the parsed
-    # values and _run_guidance()'s getattr(args, ...) always sees the defaults (flags = no-ops).
+    # values and _run_guidance() always sees the defaults (flags = no-ops).
     *_LATENT_OPT_ATTRS,
     # model-specific
     "model_checkpoint",
@@ -966,11 +967,13 @@ def add_protpardelle_specific_args(parser: argparse.ArgumentParser | GuidanceCon
             "(default: auto-resolved from /checkpoints/ or pixi env)"
         ),
     )
+    default_ppdl_config = files("sampleworks.data").joinpath("cc89_epoch415.yaml")
     parser.add_argument(
         "--protpardelle-config-path",
         type=str,
-        default=None,
-        help="Path to the Protpardelle model config YAML (default: bundled cc89 config)",
+        default=default_ppdl_config,
+        help=f"Path to the Protpardelle model config YAML "
+        f"(default: bundled cc89 config at {default_ppdl_config})",
     )
 
 
