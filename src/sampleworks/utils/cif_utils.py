@@ -393,13 +393,12 @@ def _matching_entity(reference_block: CIFBlock, residue_names: list[str]) -> tup
     ambiguous: list[str] = []  # "entity 1 around deposited residue 158 (ALA)"
     for entity_id in reference_block[_ENTITY_POLY]["entity_id"].as_array(str):
         rows = np.flatnonzero(sequence_ids == entity_id)
-        # Microheterogeneity lists several monomers at one num (e.g. CYS/CSO, or a point
-        # mutation ASN/ASP): one alignment position, any of its monomers may match.
+        # Microheterogeneity (several monomers at one residue): any of them may match.
         nums = sorted({str(num) for num in sequence_nums[rows]}, key=lambda num: int(num))
         reference_names = [
             [str(name) for name in sequence_names[rows][sequence_nums[rows] == num]] for num in nums
         ]
-        # The output's own numbering is not the deposit's here, so it places no gaps.
+        # Output numbering says nothing about the deposit's gaps.
         positions, ambiguous_at = align_to_sequence(
             [_canonical_monomer(name) for name in residue_names],
             [{_canonical_monomer(name) for name in names} for names in reference_names],
