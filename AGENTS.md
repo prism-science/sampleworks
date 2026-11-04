@@ -10,6 +10,14 @@ Respond in a measured, clear tone. Consider alternatives carefully. Include conf
 
 Code reuse is paramount. Whenever possible, locate high-quality implementations in this codebase or high-quality open-source implementations for algorithms and use those instead of implementing something yourself. Chances are someone has already solved the problem, no need to reinvent the wheel. In particular, check whether something from atomworks, biotite, or gemmi could be used in place of a custom function.
 
+- Keep functions short and single-purpose: a function that needs section comments is typically several functions.
+- Name by role, in full. Model output is `predicted_*` and the input structure is `input_*`; avoid locals like `model`, `names`, `differ`.
+- Define domain jargon on first use (e.g. "microheterogeneity (two residue names at one position)").
+- Comment any sentinel values (`-1`, past-the-end indices) where they are produced.
+- A helper either always copies or always mutates; it never returns its input on some paths and a copy on others.
+- Don't encode structured data in strings; use tuples or structured arrays. Prefer to return a `NamedTuple` or dataclass rather than a tuple of more than three values.
+- Comments, when used, should explain *why* in one line and should be understandable without the context of the PR or conversation: no worked examples in prose, no bug narratives, no file-layout listings, no terms invented in the PR.
+
 ## Project Overview
 
 **sampleworks** is a Python framework for guiding generative biomolecular structure models with experimental data. It bridges the gap between structure prediction (single-state ML models) and experimental reality (thermodynamic ensembles).
