@@ -60,6 +60,7 @@ from sampleworks.synthetic.synthetic_utils import (
     resolve_crystal_metadata,
     resolve_mtz_column,
     resolve_parallel_jobs,
+    SyntheticStructureOptions,
 )
 from sampleworks.utils.atom_array_utils import detect_altlocs
 from sampleworks.utils.torch_utils import try_gpu
@@ -244,11 +245,8 @@ def load_models_with_populations(
     structure_path: Path,
     occupancy_mode: str,
     occupancy_values: list[float],
-    strip_hydrogens: bool = False,
-    strip_waters: bool = False,
-    strip_ligands: bool = False,
+    structure_options: SyntheticStructureOptions = SyntheticStructureOptions(),
     selection: str | None = None,
-    b_factor: float | None = None,
 ) -> tuple[list[AtomArray], list[float]]:
     """Load a structure file as models and the population that weights each one.
 
@@ -261,16 +259,10 @@ def load_models_with_populations(
         or the population of each model of a multi-model file, where 'default' is refused.
     occupancy_values
         Altloc occupancies (single model) or one population per model (multi-model).
-    strip_hydrogens
-        If True, remove hydrogen atoms from every model.
-    strip_waters
-        If True, remove water molecules from every model.
-    strip_ligands
-        If True, keep only polymer amino-acid atoms (removes ligands and waters).
+    structure_options
+        Atom filters and B-factor override applied to each loaded structure.
     selection
         Optional atom selection applied to every model.
-    b_factor
-        Isotropic B-factor written over every atom, or None to keep the file's values.
 
     Returns
     -------
@@ -288,11 +280,8 @@ def load_models_with_populations(
     n_models = len(gemmi.read_structure(str(structure_path)))
     load_filtered = partial(
         load_structure_for_synthetic_loss,
-        strip_hydrogens=strip_hydrogens,
-        strip_waters=strip_waters,
-        strip_ligands=strip_ligands,
+        structure_options=structure_options,
         selection=selection,
-        b_factor=b_factor,
     )
     if n_models == 0:
         raise ValueError(f"{structure_path} holds no models.")
@@ -475,11 +464,8 @@ def _process_single_row(
     seed: int | None,
     device: torch.device,
     occupancy_mode: str = "default",
-    strip_hydrogens: bool = False,
-    strip_waters: bool = False,
-    strip_ligands: bool = False,
+    structure_options: SyntheticStructureOptions = SyntheticStructureOptions(),
     save_structure: bool = False,
-    b_factor: float | None = None,
     bulk_solvent: str = "off",
 ) -> None:
     """Compute and write the structure factors of one structure file. Assume no anomalous
@@ -508,17 +494,11 @@ def _process_single_row(
         PyTorch device for SFcalculator.
     occupancy_mode
         'default', 'uniform', or 'custom'; see ``compute_ensemble_structure_factors``.
-    strip_hydrogens
-        If True, remove hydrogen atoms before computing structure factors.
-    strip_waters
-        If True, remove water molecules before computing structure factors.
-    strip_ligands
-        If True, keep only polymer amino-acid atoms (removes ligands and waters).
+    structure_options
+        Atom filters and B-factor override applied to each loaded structure.
     save_structure
         If True, save the processed structure as ``<input_stem>_sf_input.cif`` beside
         the MTZ.
-    b_factor
-        Optional isotropic B-factor assigned to every retained atom.
     bulk_solvent
         Bulk-solvent mode: ``"off"``, ``"combined"``, or ``"per_conformer"``; see
         ``compute_ensemble_structure_factors``.
@@ -538,11 +518,8 @@ def _process_single_row(
             structure_path,
             occupancy_mode,
             row.occupancy_values,
-            strip_hydrogens=strip_hydrogens,
-            strip_waters=strip_waters,
-            strip_ligands=strip_ligands,
+            structure_options=structure_options,
             selection=row.selection,
-            b_factor=b_factor,
         )
         if save_structure:
             saved_structure = atomarray_to_gemmi(models[0], cell, space_group)
@@ -598,11 +575,8 @@ def process_batch(
     device: torch.device,
     n_jobs: int = -1,
     occupancy_mode: str = "default",
-    strip_hydrogens: bool = False,
-    strip_waters: bool = False,
-    strip_ligands: bool = False,
+    structure_options: SyntheticStructureOptions = SyntheticStructureOptions(),
     save_structure: bool = False,
-    b_factor: float | None = None,
     bulk_solvent: str = "off",
 ) -> None:
     """Process multiple structure files from a CSV file in batch mode.
@@ -629,16 +603,10 @@ def process_batch(
         Number of parallel jobs. -1 means use all available CPUs.
     occupancy_mode
         'default', 'uniform', or 'custom'; see ``compute_ensemble_structure_factors``.
-    strip_hydrogens
-        If True, remove hydrogen atoms before computing structure factors.
-    strip_waters
-        If True, remove water molecules before computing structure factors.
-    strip_ligands
-        If True, keep only polymer amino-acid atoms (removes ligands and waters).
+    structure_options
+        Atom filters and B-factor override applied to each loaded structure.
     save_structure
         If True, save each processed structure as mmCIF beside its MTZ.
-    b_factor
-        Optional isotropic B-factor assigned to every retained atom.
     bulk_solvent
         Bulk-solvent mode: ``"off"``, ``"combined"``, or ``"per_conformer"``.
     """
@@ -659,11 +627,8 @@ def process_batch(
             seed=seed,
             device=device,
             occupancy_mode=occupancy_mode,
-            strip_hydrogens=strip_hydrogens,
-            strip_waters=strip_waters,
-            strip_ligands=strip_ligands,
+            structure_options=structure_options,
             save_structure=save_structure,
-            b_factor=b_factor,
             bulk_solvent=bulk_solvent,
         )
         for row in rows
@@ -828,6 +793,12 @@ def main() -> None:
     """Generate synthetic MTZs using command-line arguments."""
     args = parse_args()
     device = try_gpu()
+    structure_options = SyntheticStructureOptions(
+        strip_hydrogens=args.remove_hydrogens,
+        strip_waters=args.remove_waters,
+        strip_ligands=args.remove_ligands,
+        b_factor=args.b_factor,
+    )
 
     if args.batch_csv:
         process_batch(
@@ -841,11 +812,8 @@ def main() -> None:
             device=device,
             n_jobs=args.n_jobs,
             occupancy_mode=args.occupancy_mode,
-            strip_hydrogens=args.remove_hydrogens,
-            strip_waters=args.remove_waters,
-            strip_ligands=args.remove_ligands,
+            structure_options=structure_options,
             save_structure=args.save_structure,
-            b_factor=args.b_factor,
             bulk_solvent=args.bulk_solvent,
         )
     elif args.structure:
@@ -869,11 +837,8 @@ def main() -> None:
             seed=args.seed,
             device=device,
             occupancy_mode=args.occupancy_mode,
-            strip_hydrogens=args.remove_hydrogens,
-            strip_waters=args.remove_waters,
-            strip_ligands=args.remove_ligands,
+            structure_options=structure_options,
             save_structure=args.save_structure,
-            b_factor=args.b_factor,
             bulk_solvent=args.bulk_solvent,
         )
     else:

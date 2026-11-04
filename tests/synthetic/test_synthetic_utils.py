@@ -20,6 +20,7 @@ from sampleworks.synthetic.synthetic_utils import (
     resolve_mtz_column,
     resolve_parallel_jobs,
     rfree_flags,
+    SyntheticStructureOptions,
 )
 from sampleworks.utils.atom_array_utils import (
     BLANK_ALTLOC_IDS,
@@ -186,11 +187,10 @@ def test_load_structure_overrides_b_factors(resources_dir: Path, b_factor: float
         resources_dir / "6b8x" / "6b8x_final.pdb",
         occupancy_mode="default",
         occupancy_values=[],
-        strip_hydrogens=True,
-        strip_waters=True,
-        strip_ligands=True,
+        structure_options=SyntheticStructureOptions(
+            strip_hydrogens=True, strip_waters=True, strip_ligands=True, b_factor=b_factor
+        ),
         selection="chain A",
-        b_factor=b_factor,
     )
 
     assert atom_array is not None
@@ -214,15 +214,10 @@ def test_load_structure_drops_zero_occupancy_atoms_after_assignment(
 
 
 @pytest.mark.parametrize("b_factor", [-1.0, float("inf"), float("nan")])
-def test_load_structure_rejects_invalid_b_factor(resources_dir: Path, b_factor: float) -> None:
+def test_structure_options_reject_invalid_b_factor(b_factor: float) -> None:
     """B-factor overrides must be finite and non-negative."""
     with pytest.raises(ValueError, match="B-factor must be finite and non-negative"):
-        load_structure_for_synthetic_loss(
-            resources_dir / "6b8x" / "6b8x_final.pdb",
-            occupancy_mode="default",
-            occupancy_values=[],
-            b_factor=b_factor,
-        )
+        SyntheticStructureOptions(b_factor=b_factor)
 
 
 def test_resolve_crystal_metadata_prefers_the_row_over_the_file(resources_dir: Path) -> None:

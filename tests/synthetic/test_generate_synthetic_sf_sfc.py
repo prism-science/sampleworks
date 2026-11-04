@@ -13,7 +13,7 @@ from sampleworks.synthetic.generate_synthetic_sf_sfc import (
     load_models_with_populations,
     process_batch,
 )
-from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ
+from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ, SyntheticStructureOptions
 from sampleworks.utils.atom_array_utils import load_structure_with_altlocs
 
 
@@ -31,8 +31,7 @@ SHARED_SETTINGS: dict[str, Any] = {
     "test_fraction": 0.1,
     "seed": 7,
     "device": torch.device("cpu"),
-    "strip_hydrogens": True,
-    "b_factor": 20.0,
+    "structure_options": SyntheticStructureOptions(strip_hydrogens=True, b_factor=20.0),
 }
 
 

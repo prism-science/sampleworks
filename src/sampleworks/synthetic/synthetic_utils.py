@@ -2,6 +2,7 @@
 
 import csv
 import traceback
+from argparse import Namespace
 from collections import Counter
 from collections.abc import Hashable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -14,7 +15,7 @@ import numpy as np
 import reciprocalspaceship as rs
 import torch
 from atomworks.io.transforms.atom_array import remove_waters
-from biotite.structure import AtomArray, get_residue_starts
+from biotite.structure import AtomArray, AtomArrayStack, get_residue_starts
 from loguru import logger
 from reciprocalspaceship.dtypes.base import MTZDtype
 
@@ -265,15 +266,87 @@ def assign_occupancies(
     return result
 
 
+@dataclass(frozen=True)
+class SyntheticStructureOptions:
+    """Atom filters and B-factor override shared by every synthetic data generator.
+
+    Attributes
+    ----------
+    strip_hydrogens
+        If True, remove hydrogen atoms.
+    strip_waters
+        If True, remove water molecules.
+    strip_ligands
+        If True, keep only polymer amino-acid atoms (removes ligands and waters).
+    b_factor
+        Isotropic B-factor assigned to every retained atom, or None to keep the values
+        from the input structure.
+
+    Raises
+    ------
+    ValueError
+        If ``b_factor`` is negative or not finite.
+    """
+
+    strip_hydrogens: bool = False
+    strip_waters: bool = False
+    strip_ligands: bool = False
+    b_factor: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.b_factor is not None and (not np.isfinite(self.b_factor) or self.b_factor < 0.0):
+            raise ValueError(f"B-factor must be finite and non-negative, got {self.b_factor}")
+
+    def strip(self, atoms: AtomArray | AtomArrayStack) -> AtomArray | AtomArrayStack:
+        """Remove the atom classes these options exclude.
+
+        Parameters
+        ----------
+        atoms
+            Structure to filter. Annotations are shared across the models of a stack, so
+            one mask filters every model.
+
+        Returns
+        -------
+        AtomArray | AtomArrayStack
+            The retained atoms, of the same type as ``atoms``.
+        """
+        atoms = remove_hydrogens(atoms) if self.strip_hydrogens else atoms
+        atoms = remove_waters(atoms) if self.strip_waters else atoms
+        # This is currently a sort of hacky way to remove ligands by keeping only polymer atoms
+        # TODO: there's probably a more robust way to do this
+        return keep_polymer(keep_amino_acids(atoms)) if self.strip_ligands else atoms
+
+    def apply_b_factor(self, atoms: AtomArray | AtomArrayStack) -> None:
+        """Write the B-factor override over every atom, if one is set.
+
+        Parameters
+        ----------
+        atoms
+            Structure whose ``b_factor`` annotation is overwritten in place.
+        """
+        if self.b_factor is None:
+            return
+        n_atoms = atoms.array_length()
+        atoms.set_annotation("b_factor", np.full(n_atoms, self.b_factor, dtype=np.float32))
+        logger.info(f"Assigned B-factor {self.b_factor:g} to {n_atoms} atoms")
+
+    @classmethod
+    def from_args(cls, args: Namespace) -> "SyntheticStructureOptions":
+        return cls(
+            b_factor=args.b_factor,
+            strip_ligands=args.strip_ligands,
+            strip_waters=args.strip_waters,
+            strip_hydrogens=args.strip_hydrogens,
+        )
+
+
 def load_structure_for_synthetic_loss(
     structure_path: Path,
     occupancy_mode: str,
     occupancy_values: list[float],
-    strip_hydrogens: bool = False,
-    strip_waters: bool = False,
-    strip_ligands: bool = False,
+    structure_options: SyntheticStructureOptions = SyntheticStructureOptions(),
     selection: str | None = None,
-    b_factor: float | None = None,
     model: int = 0,
     drop_zero_occupancy: bool = True,
 ) -> AtomArray | None:
@@ -281,8 +354,8 @@ def load_structure_for_synthetic_loss(
 
     Handles loading, optional atom selection, stripping of unwanted atom classes,
     occupancy assignment, and removal of zero-occupancy atoms. Returns None on load
-    or selection errors (logged); raises ValueError on an invalid b_factor, an invalid
-    occupancy_mode, or occupancy assignment errors (the latter two logged before raising).
+    or selection errors (logged); raises ValueError on an invalid occupancy_mode or
+    occupancy assignment errors (both logged before raising).
 
     Parameters
     ----------
@@ -294,17 +367,10 @@ def load_structure_for_synthetic_loss(
     occupancy_values
         Occupancy values for custom mode. If non-empty and occupancy_mode is not
         'custom', occupancy_mode is overridden with a warning.
-    strip_hydrogens
-        If True, remove hydrogen atoms
-    strip_waters
-        If True, remove water molecules
-    strip_ligands
-        If True, keep only polymer amino-acid atoms
+    structure_options
+        Atom filters, applied after ``selection``, and the B-factor override.
     selection
         Optional atom selection string. If None, the full structure is used.
-    b_factor
-        Optional isotropic B-factor assigned to every retained atom. If None,
-        preserve the values from the input structure.
     model
         0-based index of the one model to load from a multi-model file. Callers that
         need every model (e.g. ``generate_synthetic_sf_sfc``) call this once per
@@ -317,8 +383,6 @@ def load_structure_for_synthetic_loss(
     AtomArray | None
         Prepared structure, or None if loading or selection failed
     """
-    if b_factor is not None and (not np.isfinite(b_factor) or b_factor < 0.0):
-        raise ValueError(f"B-factor must be finite and non-negative, got {b_factor}")
     if not structure_path.exists():
         logger.error(f"Structure not found: {structure_path}")
         return None
@@ -338,11 +402,7 @@ def load_structure_for_synthetic_loss(
         logger.error(f"Selection error for {structure_path}: {e}")
         return None
 
-    # This is currently a sort of hacky way to remove ligands by keeping only polymer atoms
-    # TODO: there's probably a more robust way to do this
-    atom_array = remove_hydrogens(atom_array) if strip_hydrogens else atom_array
-    atom_array = remove_waters(atom_array) if strip_waters else atom_array
-    atom_array = keep_polymer(keep_amino_acids(atom_array)) if strip_ligands else atom_array
+    atom_array = structure_options.strip(atom_array)
     assert isinstance(atom_array, AtomArray)
     altloc_info = detect_altlocs(atom_array)
     if occupancy_values:
@@ -375,10 +435,7 @@ def load_structure_for_synthetic_loss(
             logger.info(f"Removed {zero_occupancy.sum()} zero-occupancy atoms")
             atom_array = atom_array[~zero_occupancy]
 
-    if b_factor is not None:
-        atom_array.b_factor = np.full(len(atom_array), b_factor, dtype=np.float32)
-        logger.info(f"Assigned B-factor {b_factor:g} to {len(atom_array)} atoms")
-
+    structure_options.apply_b_factor(atom_array)
     return atom_array
 
 
