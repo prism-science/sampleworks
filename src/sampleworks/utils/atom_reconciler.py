@@ -25,7 +25,7 @@ from sampleworks.utils.frame_transforms import (
     apply_forward_transform,
     weighted_rigid_align_differentiable,
 )
-from sampleworks.utils.sequence import align_to_sequence
+from sampleworks.utils.sequence import align_sequences, align_to_sequence
 
 
 def _normalize_methionine_chalcogen_names(atom_array: AtomArray) -> AtomArray:
@@ -51,13 +51,28 @@ def _normalize_methionine_chalcogen_names(atom_array: AtomArray) -> AtomArray:
     return normalized
 
 
-def _pair_input_chains(predicted_array: AtomArray, input_array: AtomArray) -> AtomArray:
-    """Rename structure chains to the model chains they correspond to.
+def _chains_in_order(atom_array: AtomArray) -> list[str]:
+    """List an array's chain IDs in order of first appearance.
 
-    ``make_normalized_atom_id`` pairs atoms by chain name. A structure chain pairs with the
-    model chain of the same name, and remaining structure chains pair with the remaining model
-    chains by position, each in order of first appearance in its atom array (a model naming
-    chains A, B against an input's L, H pairs L with A).
+    Parameters
+    ----------
+    atom_array
+        Atoms to read chain IDs from.
+
+    Returns
+    -------
+    list[str]
+        Each chain ID once.
+    """
+    chains, first_atoms = np.unique(atom_array.chain_id, return_index=True)
+    return chains[np.argsort(first_atoms)].tolist()
+
+
+def _pair_input_chains(predicted_array: AtomArray, input_array: AtomArray) -> AtomArray:
+    """Rename input chains to the predicted chains they correspond to.
+
+    Chains with the same name pair. The rest pair by how many residue names they share, most
+    first; equally good partners (copies in a homo-oligomer) pair in order of appearance.
 
     Parameters
     ----------
@@ -69,17 +84,57 @@ def _pair_input_chains(predicted_array: AtomArray, input_array: AtomArray) -> At
     Returns
     -------
     AtomArray
-        ``input_array`` unchanged when every structure chain has a same-named model chain,
-        otherwise a copy with renamed chains. Structure chains left over once the model's
-        are used up keep their names.
+        A copy of ``input_array`` with paired chains renamed. Chains left without a partner
+        keep their names.
+
+    Raises
+    ------
+    ValueError
+        If an input amino-acid chain shares no residue name with any predicted chain left
+        to pair with.
     """
-    predicted_chains = list(dict.fromkeys(predicted_array.chain_id.tolist()))
-    input_chains = list(dict.fromkeys(input_array.chain_id.tolist()))
+    predicted_chains = _chains_in_order(predicted_array)
+    input_chains = _chains_in_order(input_array)
     unpaired_predicted = [chain for chain in predicted_chains if chain not in input_chains]
     unpaired_input = [chain for chain in input_chains if chain not in predicted_chains]
-    renames = dict(zip(unpaired_input, unpaired_predicted))
-    if not renames:
-        return input_array
+    predicted_residues = {
+        chain: _chain_residues(predicted_array[predicted_array.chain_id == chain])
+        for chain in unpaired_predicted
+    }
+    input_residues = {
+        chain: _chain_residues(input_array[input_array.chain_id == chain])
+        for chain in unpaired_input
+    }
+    candidates = sorted(
+        (
+            -np.count_nonzero(align_sequences(input_res.names, predicted_res.names)[0] >= 0),
+            input_order,
+            predicted_order,
+        )
+        for input_order, (input_chain, input_res) in enumerate(input_residues.items())
+        for predicted_order, predicted_res in enumerate(predicted_residues.values())
+    )
+    renames: dict[str, str] = {}
+    for negative_shared, input_order, predicted_order in candidates:
+        input_chain, predicted_chain = (
+            unpaired_input[input_order],
+            unpaired_predicted[predicted_order],
+        )
+        if (
+            negative_shared < 0
+            and input_chain not in renames
+            and predicted_chain not in renames.values()
+        ):
+            renames[input_chain] = predicted_chain
+
+    left_predicted = [chain for chain in unpaired_predicted if chain not in renames.values()]
+    for chain, residues in input_residues.items():
+        if chain not in renames and left_predicted and any(residues.is_amino_acid):
+            raise ValueError(
+                f"Input chain {chain} shares no residue name with the unpaired predicted "
+                f"chains {left_predicted}, so it cannot be paired with one."
+            )
+
     paired = input_array.copy()
     paired.chain_id = np.array([renames.get(chain, chain) for chain in paired.chain_id])
     return paired
@@ -139,106 +194,183 @@ def _chain_residues(chain_array: AtomArray) -> ChainResidues:
     return ChainResidues(residue_of_atom, first_atoms, names, is_amino_acid, labels)
 
 
+def _warn_mixed_chain(chain: str, residues: ChainResidues) -> None:
+    """Warn when an amino-acid chain also holds other residues, such as waters.
+
+    Parameters
+    ----------
+    chain
+        Chain ID, for the message.
+    residues
+        The chain's residues.
+    """
+    others = [label for label, amino in zip(residues.labels, residues.is_amino_acid) if not amino]
+    if others and any(residues.is_amino_acid):
+        logger.warning(
+            f"Input chain {chain} mixes amino acids with other residues {others[:10]} "
+            "(waters or ligands sharing its chain ID). They count as residues when pairing "
+            "the chain's residues with the predicted ones."
+        )
+
+
+def _place_input_residues(
+    input_residues: ChainResidues,
+    input_chain_array: AtomArray,
+    predicted_names: list[frozenset[str]],
+) -> tuple[np.ndarray, bool]:
+    """Find which predicted residue each input residue corresponds to.
+
+    If the input chain has fewer residues than the predicted chain (e.g. unresolved loops or
+    termini), its residue numbers decide where the missing residues go. Otherwise the input
+    may have residues the prediction lacks (e.g. an expression tag), so residues are matched
+    by name alone and either chain may skip residues.
+
+    Parameters
+    ----------
+    input_residues
+        The input chain's residues.
+    input_chain_array
+        The input chain's atoms, read for their residue numbers.
+    predicted_names
+        Residue names of the predicted chain, in chain order.
+
+    Returns
+    -------
+    positions : np.ndarray
+        For each input residue, the index of the predicted residue it matched, or ``-1`` if
+        it matched none. Shape ``(n_input_residues,)``.
+    ambiguous : bool
+        Whether a different matching is just as good, e.g. when a residue missing from a run
+        of repeated residues could be any one of them.
+    """
+    if len(input_residues.names) >= len(predicted_names):
+        return align_sequences(input_residues.names, predicted_names)
+    first_atoms = input_residues.first_atoms
+    positions, ambiguous_at = align_to_sequence(
+        input_residues.names,
+        predicted_names,
+        input_chain_array.res_id[first_atoms],
+        input_chain_array.ins_code[first_atoms],
+    )
+    return positions, ambiguous_at is not None
+
+
+def _fill_substitutions(positions: np.ndarray) -> np.ndarray:
+    """Match unmatched input residues that exactly fill a gap between matched neighbours.
+
+    For example, ``[0, -1, 2]`` becomes ``[0, 1, 2]``: the middle input residue's name
+    differs from predicted residue 1 (e.g. a point mutation), but it is the only residue that
+    fits there. ``[0, -1, 3]`` is left as is, since one residue cannot fill a gap of two.
+
+    Parameters
+    ----------
+    positions
+        For each input residue, the index of its matching predicted residue, or ``-1`` if
+        unmatched. Shape ``(n_residues,)``.
+
+    Returns
+    -------
+    np.ndarray
+        A copy with those residues matched, shape ``(n_residues,)``.
+    """
+    n_residues = len(positions)
+    index = np.arange(n_residues)
+    matched = positions >= 0
+    before = np.maximum.accumulate(np.where(matched, index, 0))
+    after = np.minimum.accumulate(np.where(matched, index, n_residues - 1)[::-1])[::-1]
+    fits = positions[after] - positions[before] == after - before
+    fill = ~matched & matched[before] & matched[after] & fits
+    filled = positions.copy()
+    filled[fill] = positions[before[fill]] + index[fill] - before[fill]
+    return filled
+
+
+def _input_chain_seq_idx(
+    chain: str, predicted_chain_array: AtomArray, input_chain_array: AtomArray
+) -> np.ndarray:
+    """Give each atom of one input chain the index of its matching predicted residue.
+
+    Input residues with no match get indices past the end of the predicted chain, so their
+    atoms match no predicted atom.
+
+    Parameters
+    ----------
+    chain
+        Chain ID, for messages.
+    predicted_chain_array
+        The predicted chain's atoms.
+    input_chain_array
+        The input chain's atoms.
+
+    Returns
+    -------
+    np.ndarray
+        Index of the matching predicted residue for each input atom, shape
+        ``(n_input_atoms,)``. All ``-1`` when the chains already match residue for residue in
+        order, since no override is needed.
+    """
+    predicted_names = _chain_residues(predicted_chain_array).names
+    input_residues = _chain_residues(input_chain_array)
+    _warn_mixed_chain(chain, input_residues)
+    if len(input_residues.names) == len(predicted_names) and all(
+        input_res & predicted_res
+        for input_res, predicted_res in zip(input_residues.names, predicted_names)
+    ):
+        return np.full(len(input_chain_array), -1, dtype=np.int64)
+
+    positions, ambiguous = _place_input_residues(input_residues, input_chain_array, predicted_names)
+    if ambiguous:
+        logger.warning(
+            f"Input chain {chain} fits the predicted chain in several equally good ways (a gap "
+            "inside a run of repeated residues). Using one of them."
+        )
+    positions = _fill_substitutions(positions)
+    unmatched = positions < 0
+    if np.any(unmatched):
+        labels = [input_residues.labels[index] for index in np.flatnonzero(unmatched)]
+        logger.warning(
+            f"Input chain {chain} residues {labels[:10]} match no predicted residue. "
+            "Their atoms are left out of the common atoms."
+        )
+    # Indices past the predicted chain's end, so these residues match nothing.
+    positions[unmatched] = len(predicted_names) + np.arange(np.count_nonzero(unmatched))
+    return positions[input_residues.residue_of_atom]
+
+
 def _register_input_residues(predicted_array: AtomArray, input_array: AtomArray) -> AtomArray:
-    """Annotate ``seq_idx`` for the structure chains with unmodeled residues.
+    """Line up the input's residues with the predicted residues they correspond to.
 
-    ``make_normalized_atom_id`` numbers residues densely per chain, so a structure chain
-    with unresolved residues (e.g. a disordered terminus the model builds from the full
-    sequence) is shifted against the model and pairs atoms of different residues. For each
-    chain pair (with the same name) where the structure has fewer residues, the structure's
-    residues are placed on the model's by name and numbering (:func:`align_to_sequence`), and
-    ``seq_idx`` is set to the model position. A residue matches on any of its names, so
-    microheterogeneity (two names under one number) matches either. A run of residues whose
-    names match nothing but that exactly fills the space between two placed neighbours is a
-    substitution (e.g. a point mutation) and takes that space, as it would in a full-length
-    chain.
-
-    Warns, without changing the pairing, about input that may pair wrongly or not at all.
+    Input and predicted atoms are matched by chain, residue position, and atom name
+    (``make_normalized_atom_id``). By default a residue's position is its order in the chain,
+    which is wrong when one side has residues the other lacks, e.g. the input is missing an
+    unresolved terminus or has an expression tag the prediction lacks. Setting ``seq_idx``
+    overrides that position with the index of the matching predicted residue.
 
     Parameters
     ----------
     predicted_array
         The generative model's atom array.
     input_array
-        The input structure's atom array, chains named as their model partners.
+        The input structure's atom array, with chains already renamed to their predicted
+        partners.
 
     Returns
     -------
     AtomArray
-        ``input_array`` unchanged when it already has ``seq_idx`` or no chain is shorter
-        than its model chain, otherwise a copy with ``seq_idx``. Structure residues that
-        align to no model residue get positions past the model chain's end, so they match
-        nothing.
+        A copy of ``input_array`` with ``seq_idx`` set. It is not added when every chain
+        already matches in order, and an existing ``seq_idx`` is kept as is.
     """
-    if "seq_idx" in input_array.get_annotation_categories():
-        return input_array
-
-    seq_idx = np.full(len(input_array), -1, dtype=np.int64)
-    for chain in set(predicted_array.chain_id) & set(input_array.chain_id):
-        predicted_names = _chain_residues(predicted_array[predicted_array.chain_id == chain]).names
-        input_mask = input_array.chain_id == chain
-        input_chain_array = input_array[input_mask]
-        residue_of_atom, first_atoms, input_names, is_amino_acid, labels = _chain_residues(
-            input_chain_array
-        )
-        non_amino_acids = [label for label, amino in zip(labels, is_amino_acid) if not amino]
-        if non_amino_acids and any(is_amino_acid):
-            logger.warning(
-                f"Input chain {chain} mixes amino acids with other residues "
-                f"{non_amino_acids[:10]} (waters or ligands sharing its chain ID). "
-                "They count as residues when pairing the chain's residues with the model's."
-            )
-        if len(input_names) >= len(predicted_names):
-            differ = [
-                label
-                for label, names, model in zip(labels, input_names, predicted_names)
-                if not names & model
-            ]
-            if differ or len(input_names) > len(predicted_names):
-                names_differ = f", but residue names differ at {differ[:10]}" if differ else ""
-                logger.warning(
-                    f"Input chain {chain} has {len(input_names)} residues to the model's "
-                    f"{len(predicted_names)} and is paired with it by position{names_differ}. "
-                    "If the input has residues the model lacks (e.g. an expression tag), every pair "
-                    "after them is shifted."
-                )
-            continue
-        residue_seq_idx, ambiguous_at = align_to_sequence(
-            input_names,
-            predicted_names,
-            input_chain_array.res_id[first_atoms],
-            input_chain_array.ins_code[first_atoms],
-        )
-        if ambiguous_at is not None:
-            logger.warning(
-                f"Input chain {chain} fits the model sequence in several equally good ways "
-                f"around model residue index {ambiguous_at} (a gap inside a run of repeated "
-                "residues that the input numbering does not place). Using one of them."
-            )
-        # A run of unmatched residues exactly filling the space between two matched ones is a
-        # substitution: it takes the model positions between them.
-        placed = np.flatnonzero(residue_seq_idx >= 0)
-        for before, after in zip(placed[:-1].tolist(), placed[1:].tolist()):
-            if after - before > 1 and (
-                residue_seq_idx[after] - residue_seq_idx[before] == after - before
-            ):
-                residue_seq_idx[before + 1 : after] = residue_seq_idx[before] + np.arange(
-                    1, after - before
-                )
-        unaligned = residue_seq_idx < 0
-        if np.any(unaligned):
-            unpaired = [labels[index] for index in np.flatnonzero(unaligned)]
-            logger.warning(
-                f"Input chain {chain} residues {unpaired[:10]} match no model residue. "
-                "Their atoms are left out of the common atoms."
-            )
-        residue_seq_idx[unaligned] = len(predicted_names) + np.flatnonzero(unaligned)
-        seq_idx[input_mask] = residue_seq_idx[residue_of_atom]
-
-    if not np.any(seq_idx >= 0):
-        return input_array
     registered = input_array.copy()
-    registered.set_annotation("seq_idx", seq_idx)
+    if "seq_idx" in registered.get_annotation_categories():
+        return registered
+    seq_idx = np.full(len(registered), -1, dtype=np.int64)
+    for chain in sorted(set(predicted_array.chain_id) & set(registered.chain_id)):
+        input_mask = registered.chain_id == chain
+        seq_idx[input_mask] = _input_chain_seq_idx(
+            chain, predicted_array[predicted_array.chain_id == chain], registered[input_mask]
+        )
+    if np.any(seq_idx >= 0):
+        registered.set_annotation("seq_idx", seq_idx)
     return registered
 
 
