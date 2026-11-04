@@ -504,14 +504,14 @@ def test_write_job_metadata_remaps_job_result_paths_to_host(
 
 
 def _guidance_config(model_name: str, guidance_type: str) -> GuidanceConfig:
-    """Return a configuration holding the defaults ``model_name`` and ``guidance_type`` register.
+    """Return a configuration with the specified values for ``model_name`` and ``guidance_type``.
 
     Parameters
     ----------
     model_name : str
-        Structure predictor whose model-specific arguments the configuration carries.
+        The name of a structure predictor to use with guidance.
     guidance_type : str
-        Guidance type whose arguments the configuration carries.
+        The name of the guidance type being configured.
 
     Returns
     -------
@@ -560,7 +560,7 @@ def test_get_job_result_records_boltz2_method_and_fk_steering_settings():
     result = _job_result_for(args)
 
     assert result.method == "MD"
-    assert result.gradient_weight == pytest.approx(0.05)
+    assert result.gradient_weight == 0.05
     assert result.gd_steps == 3
 
 
@@ -584,7 +584,7 @@ def test_get_job_result_marks_settings_the_run_does_not_have():
 def test_get_job_result_raises_for_a_missing_argument(
     model_name: str, guidance_type: str, attribute: str
 ):
-    """An argument the run should carry but does not raises rather than being defaulted."""
+    """If the run does not have a required argument, it should raise rather than use defaults."""
     args = _guidance_config(model_name, guidance_type)
     delattr(args, attribute)
 
@@ -608,7 +608,7 @@ def test_build_step_scaler_takes_pure_guidance_step_size_and_type(
     scaler = _build_step_scaler(args, GuidanceType.PURE_GUIDANCE)
 
     assert isinstance(scaler, expected_type)
-    assert scaler.step_size == pytest.approx(0.25)
+    assert scaler.step_size == 0.25
     assert scaler.gradient_normalization is True
 
 
@@ -617,6 +617,8 @@ def test_build_step_scaler_none_type_applies_no_guidance():
     args = _guidance_config("boltz2", "pure_guidance")
     args.step_scaler_type = "none"
 
+    # TODO https://github.com/prism-science/sampleworks/issues/590 guidance type
+    #  should already be included in args
     assert type(_build_step_scaler(args, GuidanceType.PURE_GUIDANCE)) is NoScalingScaler
 
 
@@ -637,7 +639,7 @@ def test_build_step_scaler_steers_fk_steering_in_noise_space_by_its_guidance_wei
     scaler = _build_step_scaler(args, GuidanceType.FK_STEERING)
 
     assert type(scaler) is NoiseSpaceDPSScaler
-    assert scaler.step_size == pytest.approx(0.05)
+    assert scaler.step_size == 0.05
 
 
 def test_build_step_scaler_gives_latent_optimization_no_guidance():

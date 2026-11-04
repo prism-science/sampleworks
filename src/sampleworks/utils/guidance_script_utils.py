@@ -6,7 +6,6 @@ import pickle
 import traceback
 from collections import Counter
 from datetime import datetime
-from importlib.resources import files
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any

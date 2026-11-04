@@ -7,10 +7,10 @@ import os
 import sys
 import typing
 from dataclasses import dataclass, field
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
-from importlib.resources import files
 from sampleworks.core.losses.config import LOSS_OPTIONS_KEY, LossConfig
 from sampleworks.core.losses.options import option_type
 from sampleworks.core.losses.registry import get_loss_spec, loss_type_names
@@ -973,7 +973,7 @@ def add_protpardelle_specific_args(parser: argparse.ArgumentParser | GuidanceCon
         type=str,
         default=default_ppdl_config,
         help=f"Path to the Protpardelle model config YAML "
-             f"(default: bundled cc89 config at {default_ppdl_config})",
+        f"(default: bundled cc89 config at {default_ppdl_config})",
     )
 
 
