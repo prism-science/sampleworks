@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -16,7 +17,11 @@ from biotite.structure import AtomArray
 from jaxtyping import Float
 from loguru import logger
 
-from sampleworks.utils.atom_array_utils import closest_canonical_amino_acid, filter_to_common_atoms
+from sampleworks.utils.atom_array_utils import (
+    closest_canonical_amino_acid,
+    filter_to_common_atoms,
+    residue_index,
+)
 from sampleworks.utils.frame_transforms import (
     apply_forward_transform,
     weighted_rigid_align_differentiable,
@@ -81,21 +86,11 @@ def _pair_struct_chains(model_array: AtomArray, struct_array: AtomArray) -> Atom
     return paired
 
 
-def _chain_residues(
-    chain_array: AtomArray,
-) -> tuple[np.ndarray, np.ndarray, list[frozenset[str]], list[bool], list[str]]:
-    """Group a chain's atoms into residues, keyed by ``(res_id, ins_code)``.
+class ChainResidues(NamedTuple):
+    """A chain's atoms grouped into residues by :func:`_chain_residues`.
 
-    A residue is a ``(res_id, ins_code)`` pair, as in ``make_normalized_atom_id``, so
-    microheterogeneity (two residue names under one number) is one residue with two names.
-
-    Parameters
+    Attributes
     ----------
-    chain_array
-        Atoms of one chain.
-
-    Returns
-    -------
     residue_of_atom : np.ndarray
         Residue index of each atom, shape ``(n_atoms,)``.
     first_atoms : np.ndarray
@@ -105,15 +100,36 @@ def _chain_residues(
     is_amino_acid : list[bool]
         Whether any of each residue's names is an amino acid.
     labels : list[str]
-        Each residue's raw names, number and insertion code for messages, e.g. ``"GLY/ALA6"``.
+        Each residue's names, number and insertion code for messages, e.g. ``"GLY/ALA6"``.
     """
-    keys = list(zip(chain_array.res_id.tolist(), chain_array.ins_code.tolist()))
-    key_to_residue = {key: index for index, key in enumerate(dict.fromkeys(keys))}
-    residue_of_atom = np.array([key_to_residue[key] for key in keys])  # (n_atoms,)
-    first_atoms = np.unique(residue_of_atom, return_index=True)[1]  # (n_residues,)
+
+    residue_of_atom: np.ndarray
+    first_atoms: np.ndarray
+    names: list[frozenset[str]]
+    is_amino_acid: list[bool]
+    labels: list[str]
+
+
+def _chain_residues(chain_array: AtomArray) -> ChainResidues:
+    """Group a chain's atoms into residues, keyed by ``(res_id, ins_code)``.
+
+    A residue under microheterogeneity (two residue names at one position) has both names.
+
+    Parameters
+    ----------
+    chain_array
+        Atoms of one chain.
+
+    Returns
+    -------
+    ChainResidues
+    """
+    residue_of_atom = residue_index(chain_array.res_id, chain_array.ins_code)
+    first_atoms = np.unique(residue_of_atom, return_index=True)[1]
     raw_names: list[set[str]] = [set() for _ in first_atoms]
-    for residue, name in zip(residue_of_atom.tolist(), chain_array.res_name.tolist()):
-        raw_names[residue].add(name)
+    for residue, name in np.unique(np.rec.fromarrays([residue_of_atom, chain_array.res_name])):
+        raw_names[residue].add(str(name))
+    # None for anything that is not an amino acid. Nucleic acids could get parents later.
     parents = {name: closest_canonical_amino_acid(name) for name in set().union(*raw_names)}
     names = [frozenset(parents[name] or name for name in group) for group in raw_names]
     is_amino_acid = [any(parents[name] for name in group) for group in raw_names]
@@ -121,7 +137,7 @@ def _chain_residues(
         f"{'/'.join(sorted(group))}{chain_array.res_id[atom]}{chain_array.ins_code[atom]}"
         for group, atom in zip(raw_names, first_atoms)
     ]
-    return residue_of_atom, first_atoms, names, is_amino_acid, labels
+    return ChainResidues(residue_of_atom, first_atoms, names, is_amino_acid, labels)
 
 
 def _register_struct_residues(model_array: AtomArray, struct_array: AtomArray) -> AtomArray:
@@ -160,7 +176,7 @@ def _register_struct_residues(model_array: AtomArray, struct_array: AtomArray) -
 
     seq_idx = np.full(len(struct_array), -1, dtype=np.int64)
     for chain in set(model_array.chain_id) & set(struct_array.chain_id):
-        model_names = _chain_residues(model_array[model_array.chain_id == chain])[2]
+        model_names = _chain_residues(model_array[model_array.chain_id == chain]).names
         struct_mask = struct_array.chain_id == chain
         struct_chain_array = struct_array[struct_mask]
         residue_of_atom, first_atoms, struct_names, is_amino_acid, labels = _chain_residues(
