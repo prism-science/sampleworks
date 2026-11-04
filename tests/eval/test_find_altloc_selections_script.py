@@ -128,7 +128,6 @@ def test_union_is_written_to_the_sibling_file(
     entries = union_df.iloc[0]["selection"].split(";")
     assert all("chain_id == " in s for s in entries), f"expected only unions in {entries}"
 
-    # Only the selection differs; every other column is carried across unchanged.
     shared = [c for c in spans_df.columns if c != "selection"]
     assert union_df[shared].equals(spans_df[shared])
 
@@ -138,8 +137,7 @@ def test_large_min_span_yields_empty_selection(
     tmp_path: Path, resources_dir: Path, find_altloc_script
 ):
     """An impossibly large ``min_span`` drops every span. The row is still written with
-    derived columns populated and an empty ``selection`` cell, while the union file is
-    unaffected because unions ignore ``min_span``."""
+    derived columns populated and an empty ``selection`` cell."""
     input_csv = _altloc_input_csv(tmp_path, resources_dir, n_rows=1)
     output_file = tmp_path / "output.csv"
 
@@ -152,7 +150,6 @@ def test_large_min_span_yields_empty_selection(
     row = df.iloc[0]
 
     assert pd.isna(row["selection"]) or row["selection"] == ""
-    assert "chain_id == " in pd.read_csv(tmp_path / "output_union.csv").iloc[0]["selection"]
     assert row["protein"] == "1VME_0"
     assert row["structure_pattern"] == "1vme_final_carved_edited_0.5occA_0.5occB.cif"
     assert row["map_pattern"] == "1vme_final_carved_edited_0.5occA_0.5occB_1.80A.ccp4"

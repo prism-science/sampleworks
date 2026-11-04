@@ -59,9 +59,8 @@ def _make_args(*, input_csv: Path, output_file: Path) -> argparse.Namespace:
 def test_union_selection_is_not_classified(tmp_path: Path, resources_dir: Path, classify_script):
     """Every span of 1VME is classified once and the union appended after them is skipped.
 
-    The selection is find_altloc_selections's own output for the 1VME resource with the union
-    switched on, and the expected rows are its output with the union switched off. The
-    classified rows must be exactly the spans.
+    The selection is find_altloc_selections's own spans and unions for the 1VME resource,
+    joined. The classified rows must be exactly the spans.
     """
     cif_path = resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
     if not cif_path.exists():
