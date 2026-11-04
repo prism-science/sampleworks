@@ -66,11 +66,10 @@ def test_union_selection_is_not_classified(tmp_path: Path, resources_dir: Path, 
     cif_path = resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
     if not cif_path.exists():
         pytest.skip(f"Test resource not found: {cif_path}")
-    spans = list(find_altloc_selections(cif_path, "label_alt_id", 1, False))
-    entries = list(find_altloc_selections(cif_path, "label_alt_id", 1, True))
-    assert len(entries) > len(spans), "the resource row should carry a union after its spans"
+    spans, unions = find_altloc_selections(cif_path, "label_alt_id", 1)
+    assert unions, "the resource should produce a union to append after its spans"
 
-    input_csv = _classify_input_csv(tmp_path, resources_dir, ";".join(entries))
+    input_csv = _classify_input_csv(tmp_path, resources_dir, ";".join(spans + unions))
     output_file = tmp_path / "output.csv"
 
     classify_script.main(_make_args(input_csv=input_csv, output_file=output_file))
@@ -103,7 +102,8 @@ def test_ensemble_classification_matches_single_model(
     # one conformer pair: A-B and model_0-model_1.
     assert detect_altlocs(load_structure_with_altlocs(cif_path)).altloc_ids == ["A", "B"]
     assert load_any(ensemble_path).stack_depth() == 2
-    selection = ";".join(find_altloc_selections(cif_path, min_span=1))
+    spans, _ = find_altloc_selections(cif_path, min_span=1)
+    selection = ";".join(spans)
 
     def classify(path: Path) -> list[dict]:
         """Classify every altloc selection of the single-model structure on ``path``.

@@ -475,9 +475,19 @@ def _process_structure(
     if classified_res_ids != all_altloc_res_ids:
         missing = all_altloc_res_ids - classified_res_ids
         extra = classified_res_ids - all_altloc_res_ids
+        # find_consecutive_residues builds no span for a single-conformer altloc residue.
+        reasons = []
+        for chain, res_id in sorted(missing):
+            in_residue = (atom_array.chain_id == chain) & (atom_array.res_id == res_id)
+            letters = sorted(set(atom_array.altloc_id[in_residue & structure_altloc_mask]))
+            if len(letters) == 1 and letters[0] in conformer_ids:
+                reasons.append(f"{chain}:{res_id} not covered: single altloc {letters[0]}")
+            else:
+                reasons.append(f"{chain}:{res_id} not covered: in no classified span")
         logger.warning(
             f"[{protein}] residue coverage invariant not satisfied: "
-            f"{len(missing)} altloc residues missing from classification, "
+            f"{len(missing)} altloc residues missing from classification "
+            f"({'; '.join(reasons)}), "
             f"{len(extra)} classified residues not in full altloc set. "
             "This typically means --min-span > 1 was used upstream."
         )
