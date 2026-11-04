@@ -450,8 +450,8 @@ class TestReconcilerWithSequenceOverride:
 
         reconciler = AtomReconciler.from_arrays(model_arr, struct_bb)
 
-        m_idx = reconciler.model_indices.numpy()  # (n_common,)
-        s_idx = reconciler.struct_indices.numpy()  # (n_common,)
+        m_idx = reconciler.predicted_indices.numpy()  # (n_common,)
+        s_idx = reconciler.input_indices.numpy()  # (n_common,)
 
         # Every observed backbone atom has a model counterpart.
         assert len(s_idx) == struct_bb.array_length()
