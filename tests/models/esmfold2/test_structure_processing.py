@@ -1,18 +1,79 @@
 """Atomworks structures translate faithfully into ESMFold2 inputs."""
 
+import copy
+from typing import Any
+
 import pytest
 
 
 pytest.importorskip(modname="esm.models.esmfold2.types", reason="ESMFold2 not installed")
 
 import numpy as np
-from sampleworks.models.esmfold2.structure_processing import structure_to_esmfold2_input
+import torch
+from biotite.structure import get_residue_starts
+from esm.models.esmfold2.types import ProteinInput, StructurePredictionInput
+from sampleworks.models.esmfold2.structure_processing import (
+    ESMFold2InputBuilderBlockLogs,
+    structure_to_esmfold2_input,
+)
 
 
+# Loads the various structure dictionary fixtures into the namespace.
 pytest_plugins = ["tests.models.esmfold2.structure_fixtures"]
 
 
-def test_malformed_asym_unit_raises_error(single_chain_structure):
+@pytest.mark.parametrize("use_stack", [False, True], ids=["atom-array", "atom-array-stack"])
+def test_single_chain_preserves_sequence_and_identity(
+    single_chain_structure: dict[str, Any], use_stack: bool
+):
+    """Translate either atom-array form without modifying the source structure."""
+    structure = single_chain_structure
+    if not use_stack:
+        structure["asym_unit"] = structure["asym_unit"][0]
+
+    original = copy.deepcopy(structure)
+    sequence = structure["chain_info"]["A"]["processed_entity_canonical_sequence"]
+
+    result = structure_to_esmfold2_input(structure)
+
+    assert isinstance(result, StructurePredictionInput)
+    assert result.sequences == [ProteinInput(id="A", sequence=sequence)]
+    assert result.pocket is None
+    assert result.distogram_conditioning is None
+    assert result.covalent_bonds is None
+    assert structure["asym_unit"] == original["asym_unit"]
+    assert structure["chain_info"] == original["chain_info"]
+
+
+def test_prepared_input_builds_valid_features(
+    single_chain_structure: dict[str, Any],
+):
+    """Build CPU features using ESMFold2's external CCD cache, without model weights."""
+    model_input = structure_to_esmfold2_input(single_chain_structure)
+
+    builder = ESMFold2InputBuilderBlockLogs()
+
+    with pytest.warns(UserWarning, match="No MSA provided"):
+        features, chains = builder.prepare_input(model_input, seed=0, device="cpu")
+
+    atoms = single_chain_structure["asym_unit"][0]
+    residue_names = atoms.res_name[get_residue_starts(atoms)].tolist()
+    n_residues = len(residue_names)
+    assert len(chains) == 1
+    assert chains[0].chain_id == "A"
+    assert [token.residue_name for token in chains[0].tokens] == residue_names
+    assert features["token_attention_mask"].sum().item() == n_residues
+    assert features["input_ids"].shape == (1, n_residues)
+    assert features["msa"].shape == (1, 1, n_residues)
+    assert not features["has_deletion"].any()
+    assert features["atom_attention_mask"].sum().item() > n_residues
+    assert features["ref_pos"].shape[:2] == features["atom_attention_mask"].shape
+    assert features["ref_pos"].shape[-1] == 3
+    assert features["ref_pos"].device.type == "cpu"
+    assert torch.isfinite(features["ref_pos"]).all()
+
+
+def test_malformed_asym_unit_raises_error(single_chain_structure: dict[str, Any]):
     single_chain_structure["asym_unit"] = np.arange(10)
     with pytest.raises(TypeError, match="asym_unit"):
         structure_to_esmfold2_input(single_chain_structure)
@@ -22,7 +83,7 @@ def test_malformed_asym_unit_raises_error(single_chain_structure):
         structure_to_esmfold2_input(single_chain_structure)
 
 
-def test_sequence_mismatch_raises_error(single_chain_structure):
+def test_sequence_mismatch_raises_error(single_chain_structure: dict[str, Any]):
     """Reject a declared sequence that differs from the observed residues."""
     chain_info = single_chain_structure["chain_info"]["A"]
     sequence = chain_info["processed_entity_canonical_sequence"]
@@ -33,21 +94,21 @@ def test_sequence_mismatch_raises_error(single_chain_structure):
         structure_to_esmfold2_input(single_chain_structure)
 
 
-def test_multichain_raises_not_implemented(multichain_structure):
+def test_multichain_raises_not_implemented(multichain_structure: dict[str, Any]):
     with pytest.raises(NotImplementedError, match="Multichain"):
         structure_to_esmfold2_input(multichain_structure)
 
 
-def test_nonprotein_chain_raises_not_implemented(ligand_structure):
+def test_nonprotein_chain_raises_not_implemented(ligand_structure: dict[str, Any]):
     with pytest.raises(NotImplementedError, match="Non L-protein"):
         structure_to_esmfold2_input(ligand_structure)
 
 
-def test_modified_residue_raises_not_implemented(modified_residue_structure):
+def test_modified_residue_raises_not_implemented(modified_residue_structure: dict[str, Any]):
     with pytest.raises(NotImplementedError, match="MSE.*modified/nonstandard"):
         structure_to_esmfold2_input(modified_residue_structure)
 
 
-def test_crosslinks_raise_not_implemented(crosslinked_structure):
+def test_crosslinks_raise_not_implemented(crosslinked_structure: dict[str, Any]):
     with pytest.raises(NotImplementedError, match="crosslinks"):
         structure_to_esmfold2_input(crosslinked_structure)

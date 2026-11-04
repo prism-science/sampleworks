@@ -16,10 +16,17 @@ class ESMFold2InputBuilderBlockLogs(ESMFold2InputBuilder):
 
     Notes
     -----
-    Our installed RDKit repeatedly warns when reading ESMFold2's CCD::
+    Our installed RDKit endlessly warns when reading ESMFold2's CCD::
 
         Depickling from a version number (16.3)that is higher than our version (16.2).
         This probably won't work.
+        Depickling from a version number (16.3)that is higher than our version (16.2).
+        This probably won't work.
+        Depickling from a version number (16.3)that is higher than our version (16.2).
+        This probably won't work.
+        Depickling from a version number (16.3)that is higher than our version (16.2).
+        This probably won't work.
+        ...
 
     Format 16.3 requires RDKit >=2026.03.1. Our shared Atomworks 2.1.1 requires
     RDKit <2025.9, so we need Atomworks >=2.2.1 before we can upgrade RDKit
