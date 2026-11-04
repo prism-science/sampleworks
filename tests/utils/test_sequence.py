@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 from sampleworks.utils.atom_array_utils import make_normalized_atom_id
 from sampleworks.utils.sequence import (
+    align_sequences,
     align_to_sequence,
     apply_sequence_override,
     validate_seq_with_error,
@@ -638,3 +639,19 @@ def test_ligand_in_protein_chain_raises_malformed(structure_1vme_density_input: 
         apply_sequence_override(structure_1vme_density_input, sequence.replace("X", ""))
 
     assert "FEO" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "first,second,expected",
+    [
+        (["SER", "GLY", "HIS"], ["GLY", "HIS", "TRP"], ([-1, 0, 1], False)),
+        (["GLY", "ALA", "HIS"], ["GLY", "SER", "HIS"], ([0, -1, 2], False)),
+        (["GLY", {"ALA", "SER"}], ["GLY", "SER"], ([0, 1], False)),
+        (["GLY", "HIS", "SER"], ["GLY", "HIS", "HIS", "SER"], ([0, 1, 3], True)),
+    ],
+    ids=["extra_residue_on_each_side", "substitution", "either_name", "gap_in_a_repeat"],
+)
+def test_align_sequences_skips_residues_on_either_side(first, second, expected):
+    positions, ambiguous = align_sequences(first, second)
+
+    assert (positions.tolist(), ambiguous) == expected

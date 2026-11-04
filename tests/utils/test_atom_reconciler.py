@@ -3,10 +3,19 @@
 import logging
 from collections.abc import Sequence
 
+import numpy as np
 import pytest
 import torch
 from biotite.structure import AtomArray
-from sampleworks.utils.atom_reconciler import AtomReconciler
+from sampleworks.utils.atom_reconciler import (
+    _chain_residues,
+    _fill_substitutions,
+    _input_chain_seq_idx,
+    _pair_input_chains,
+    _place_input_residues,
+    _sequence_identity,
+    AtomReconciler,
+)
 from sampleworks.utils.frame_transforms import random_rotation_matrix
 
 from tests.utils.atom_array_builders import build_test_atom_array
@@ -41,6 +50,30 @@ def _chain_a(
     )
     chain.res_name[:] = [name for name in res_names for _ in atom_names]
     return chain
+
+
+def _named_chains(chain_ids: list[str], names: dict[str, list[str]]) -> AtomArray:
+    """Build two-residue chains with N and CA atoms, residues numbered 1 and 2.
+
+    Parameters
+    ----------
+    chain_ids
+        Chains in order.
+    names
+        Residue names of each chain.
+
+    Returns
+    -------
+    AtomArray
+        Four atoms per chain.
+    """
+    atoms = build_test_atom_array(
+        chain_ids=[chain for chain in chain_ids for _ in range(4)],
+        res_ids=[res_id for _ in chain_ids for res_id in (1, 1, 2, 2)],
+        atom_names=["N", "CA"] * 2 * len(chain_ids),
+    )
+    atoms.res_name[:] = [name for chain in chain_ids for name in names[chain] for _ in "NC"]
+    return atoms
 
 
 def _pairs(rec: AtomReconciler) -> dict[int, int]:
@@ -201,20 +234,10 @@ class TestFromArrays:
         offset = 2 * first_resolved
         assert _pairs(rec) == {index: index + offset for index in range(len(input_array))}
 
-    def test_differently_named_chains_pair_in_order_of_appearance(self):
-        # The model names chains A, B; the input names the same chains L, H (sorted: H, L).
-        names = {"L": ["GLY", "SER"], "H": ["TRP", "TYR"], "A": ["GLY", "SER"], "B": ["TRP", "TYR"]}
-
-        def chains(chain_ids: list[str]):
-            atoms = build_test_atom_array(
-                chain_ids=[c for c in chain_ids for _ in range(4)],
-                res_ids=[r for _ in chain_ids for r in (1, 1, 2, 2)],
-                atom_names=["N", "CA"] * 2 * len(chain_ids),
-            )
-            atoms.res_name[:] = [n for c in chain_ids for n in names[c] for _ in "NC"]
-            return atoms
-
-        predicted_array, input_array = chains(["A", "B"]), chains(["L", "H"])
+    def test_differently_named_chains_pair_by_sequence(self):
+        # The model lists B before A, so pairing L, H by order would put GLY-SER on TRP-TYR.
+        predicted_array = _named_chains(["B", "A"], {"A": ["GLY", "SER"], "B": ["TRP", "TYR"]})
+        input_array = _named_chains(["L", "H"], {"L": ["GLY", "SER"], "H": ["TRP", "TYR"]})
 
         rec = AtomReconciler.from_arrays(predicted_array, input_array)
 
@@ -223,6 +246,21 @@ class TestFromArrays:
             predicted_array.res_name[rec.predicted_indices.numpy()].tolist()
             == input_array.res_name[rec.input_indices.numpy()].tolist()
         )
+
+    def test_identical_chains_pair_in_order_of_appearance(self):
+        predicted_array = _named_chains(["A", "B"], {"A": ["GLY", "SER"], "B": ["GLY", "SER"]})
+        input_array = _named_chains(["L", "H"], {"L": ["GLY", "SER"], "H": ["GLY", "SER"]})
+
+        rec = AtomReconciler.from_arrays(predicted_array, input_array)
+
+        assert _pairs(rec) == {index: index for index in range(len(input_array))}
+
+    def test_chain_unlike_every_unpaired_chain_raises(self):
+        predicted_array = _named_chains(["A", "B"], {"A": ["GLY", "SER"], "B": ["TRP", "TYR"]})
+        input_array = _named_chains(["A", "X"], {"A": ["GLY", "SER"], "X": ["CYS", "CYS"]})
+
+        with pytest.raises(ValueError, match="Input chain X is under 50% sequence identity"):
+            AtomReconciler.from_arrays(predicted_array, input_array)
 
     def test_gap_in_repeated_residues_follows_input_numbering(self):
         # His-tag HHHH with the input missing residue 3: by name alone the gap could be anywhere.
@@ -256,7 +294,9 @@ class TestFromArrays:
     def test_point_mutation_pairs_as_in_a_full_length_chain(self, caplog):
         # ARG4ALA in an input missing residue 1: the backbone still belongs to model residue 4.
         predicted_array = _chain_a(range(1, 7), PREDICTED_NAMES)
-        input_array = _chain_a(range(2, 7), ["THR", "GLU", "ALA", "LYS", "GLY"])
+        input_names = PREDICTED_NAMES[1:]
+        input_names[2] = "ALA"
+        input_array = _chain_a(range(2, 7), input_names)
 
         with caplog.at_level(logging.WARNING):
             rec = AtomReconciler.from_arrays(predicted_array, input_array)
@@ -267,7 +307,9 @@ class TestFromArrays:
     def test_unmatched_terminal_residue_is_excluded_with_warning(self, caplog):
         # A terminal mismatch cannot be told from a residue the model lacks, so it pairs nothing.
         predicted_array = _chain_a(range(1, 7), PREDICTED_NAMES)
-        input_array = _chain_a(range(2, 7), ["THR", "GLU", "ARG", "LYS", "TRP"])
+        input_names = PREDICTED_NAMES[1:]
+        input_names[-1] = "TRP"
+        input_array = _chain_a(range(2, 7), input_names)
 
         with caplog.at_level(logging.WARNING):
             rec = AtomReconciler.from_arrays(predicted_array, input_array)
@@ -294,28 +336,29 @@ class TestFromArrays:
 
         assert caplog.text == ""
 
-    def test_equal_length_chain_with_shifted_residues_warns(self, caplog):
-        # A tag residue before MET and GLY6 unresolved: as many residues as the model, so the
-        # chain is paired by position, one residue off.
+    def test_equal_length_chain_with_tag_and_missing_terminus_pairs_same_residues(self, caplog):
+        # A SER tag before MET and GLY6 unresolved: as many residues as the model, one off.
         predicted_array = _chain_a(range(1, 7), PREDICTED_NAMES)
         input_array = _chain_a(range(0, 6), ["SER", *PREDICTED_NAMES[:5]])
 
         with caplog.at_level(logging.WARNING):
-            AtomReconciler.from_arrays(predicted_array, input_array)
+            rec = AtomReconciler.from_arrays(predicted_array, input_array)
 
-        assert "paired with it by position" in caplog.text
+        assert _pairs(rec) == {index: index - 2 for index in range(2, len(input_array))}
         assert "SER0" in caplog.text
 
-    def test_longer_chain_with_matching_names_warns_without_differing_names(self, caplog):
-        # One extra C-terminal residue: the names that overlap all match.
+    @pytest.mark.parametrize("tag_first", [True, False], ids=["n_terminal_tag", "c_terminal_tag"])
+    def test_longer_chain_skips_residues_the_prediction_lacks(self, tag_first, caplog):
         predicted_array = _chain_a(range(1, 7), PREDICTED_NAMES)
-        input_array = _chain_a(range(1, 8), [*PREDICTED_NAMES, "SER"])
+        names = ["SER", *PREDICTED_NAMES] if tag_first else [*PREDICTED_NAMES, "SER"]
+        input_array = _chain_a(range(0, 7), names)
 
         with caplog.at_level(logging.WARNING):
-            AtomReconciler.from_arrays(predicted_array, input_array)
+            rec = AtomReconciler.from_arrays(predicted_array, input_array)
 
-        assert "has 7 residues to the model's 6 and is paired with it by position." in caplog.text
-        assert "differ at" not in caplog.text
+        offset = 2 if tag_first else 0
+        assert _pairs(rec) == {index + offset: index for index in range(len(predicted_array))}
+        assert "SER" in caplog.text
 
     def test_waters_in_a_protein_chain_warn(self, caplog):
         predicted_array = _chain_a(range(1, 7), PREDICTED_NAMES)
@@ -337,6 +380,180 @@ class TestFromArrays:
             AtomReconciler.from_arrays(predicted_array, input_array)
 
         assert "several equally good ways" in caplog.text
+
+
+def test_fill_substitutions_fills_only_runs_that_fit():
+    positions = np.array([-1, 0, -1, -1, 3, -1, 7, -1])
+
+    np.testing.assert_array_equal(_fill_substitutions(positions), [-1, 0, 1, 2, 3, -1, 7, -1])
+
+
+@pytest.mark.parametrize(
+    ("input_names", "predicted_names", "identity"),
+    [
+        (["GLY", "SER", "TRP"], ["GLY", "SER", "TRP"], 1.0),
+        (["SER", "TRP"], ["MET", "GLY", "SER", "TRP", "TYR"], 1.0),
+        (["GLY", "SER", "TRP"], ["GLY", "ALA", "SER", "TRP"], 0.75),
+        (["CYS", "CYS"], ["GLY", "SER"], 0.0),
+    ],
+    ids=["identical", "fragment", "one_gap", "unrelated"],
+)
+def test_sequence_identity_counts_only_the_matched_span(input_names, predicted_names, identity):
+    input_sets = [frozenset([name]) for name in input_names]
+    predicted_sets = [frozenset([name]) for name in predicted_names]
+
+    assert _sequence_identity(input_sets, predicted_sets) == pytest.approx(identity)
+
+
+class TestPairInputChains:
+    """Input chains are renamed to the predicted chains whose sequences they match."""
+
+    SEQUENCES = {"X": ["GLY", "SER"], "Y": ["TRP", "TYR"], "Z": ["CYS", "HIS"]}
+
+    def _chains(self, sequence_of_chain: dict[str, str]) -> AtomArray:
+        """Build two-residue chains from keys of ``SEQUENCES``.
+
+        Parameters
+        ----------
+        sequence_of_chain
+            Chain ID to its ``SEQUENCES`` key, in chain order.
+
+        Returns
+        -------
+        AtomArray
+        """
+        names = {chain: self.SEQUENCES[seq] for chain, seq in sequence_of_chain.items()}
+        return _named_chains(list(sequence_of_chain), names)
+
+    def _renamed(self, atoms: AtomArray, chain_id: str) -> AtomArray:
+        """Copy ``atoms`` into chain ``chain_id``.
+
+        Parameters
+        ----------
+        atoms
+            Atoms of one chain.
+        chain_id
+            New chain ID.
+
+        Returns
+        -------
+        AtomArray
+        """
+        renamed = atoms.copy()
+        renamed.chain_id[:] = chain_id
+        return renamed
+
+    def test_shifted_chain_ids_pair_by_sequence(self):
+        predicted_array = self._chains({"A": "X", "B": "Y", "C": "Z"})
+        input_array = self._chains({"B": "X", "C": "Y", "D": "Z"})
+
+        paired = _pair_input_chains(predicted_array, input_array)
+
+        np.testing.assert_array_equal(paired.chain_id, predicted_array.chain_id)
+
+    def test_identical_copies_keep_their_ids(self):
+        predicted_array = self._chains({"A": "X", "B": "X"})
+        input_array = self._chains({"B": "X", "A": "X"})
+
+        paired = _pair_input_chains(predicted_array, input_array)
+
+        np.testing.assert_array_equal(paired.chain_id, input_array.chain_id)
+
+    def test_peptide_pairs_with_the_chain_closest_to_its_length(self):
+        # The peptide also matches a stretch of the protein exactly, and no chain IDs are
+        # shared, so only residue count tells the two partners apart.
+        protein = _chain_a(range(1, 7), PREDICTED_NAMES)
+        peptide = _chain_a([1, 2], PREDICTED_NAMES[2:4])
+        predicted_array = self._renamed(protein, "A") + self._renamed(peptide, "B")
+        input_array = self._renamed(peptide, "Y") + self._renamed(protein, "X")
+
+        paired = _pair_input_chains(predicted_array, input_array)
+
+        np.testing.assert_array_equal(paired.chain_id, np.repeat(["B", "A"], [4, 12]))
+
+    def test_unpaired_chain_cannot_take_a_paired_chain_id(self):
+        # Input B holds waters, so predicted B goes to input C, whose sequence it shares.
+        predicted_array = self._chains({"A": "X", "B": "Y"})
+        input_array = _named_chains(
+            ["A", "B", "C"], {"A": ["GLY", "SER"], "B": ["HOH", "HOH"], "C": ["TRP", "TYR"]}
+        )
+
+        paired = _pair_input_chains(predicted_array, input_array)
+
+        np.testing.assert_array_equal(paired.chain_id, np.repeat(["A", "", "B"], 4))
+
+
+class TestPlaceInputResidues:
+    """Each input residue is matched to the index of a predicted residue, or -1."""
+
+    def _place(self, res_ids, input_names, predicted_names=PREDICTED_NAMES):
+        """Place a chain-A input against ``predicted_names``.
+
+        Parameters
+        ----------
+        res_ids
+            Residue number of each input residue.
+        input_names
+            Residue name of each input residue.
+        predicted_names
+            Residue names of the predicted chain.
+
+        Returns
+        -------
+        tuple[np.ndarray, bool]
+            The result of ``_place_input_residues``.
+        """
+        input_chain_array = _chain_a(res_ids, input_names)
+        return _place_input_residues(
+            _chain_residues(input_chain_array),
+            input_chain_array,
+            [frozenset([name]) for name in predicted_names],
+        )
+
+    def test_shorter_chain_is_placed_by_its_residue_numbers(self):
+        # Residue 4 (ARG) is unresolved, so numbering puts LYS5 at index 4, not 3.
+        input_names = [PREDICTED_NAMES[index] for index in (1, 2, 4, 5)]
+
+        positions, ambiguous = self._place([2, 3, 5, 6], input_names)
+
+        np.testing.assert_array_equal(positions, [1, 2, 4, 5])
+        assert not ambiguous
+
+    def test_longer_chain_skips_a_tag_the_prediction_lacks(self):
+        positions, ambiguous = self._place(range(0, 7), ["SER", *PREDICTED_NAMES])
+
+        np.testing.assert_array_equal(positions, [-1, 0, 1, 2, 3, 4, 5])
+        assert not ambiguous
+
+    def test_gap_in_a_repeat_is_ambiguous(self):
+        his_tag = ["MET", "HIS", "HIS", "HIS", "HIS", "GLY"]
+
+        _, ambiguous = self._place(range(1, 6), [*his_tag[:4], "GLY"], his_tag)
+
+        assert ambiguous
+
+
+class TestInputChainSeqIdx:
+    """Each input atom gets the index of its predicted residue."""
+
+    def test_chain_matching_in_order_needs_no_indices(self):
+        indices = _input_chain_seq_idx(
+            "A", _chain_a(range(1, 7), PREDICTED_NAMES), _chain_a(range(11, 17), PREDICTED_NAMES)
+        )
+
+        np.testing.assert_array_equal(indices, -1)
+
+    def test_unmatched_residue_gets_an_index_past_the_predicted_chain(self):
+        input_names = PREDICTED_NAMES[1:]
+        input_names[-1] = "TRP"
+
+        indices = _input_chain_seq_idx(
+            "A", _chain_a(range(1, 7), PREDICTED_NAMES), _chain_a(range(2, 7), input_names)
+        )
+
+        # Two atoms per residue. TRP6 matches no predicted residue, so it gets index 6, one
+        # past the last predicted residue, which no predicted atom has.
+        np.testing.assert_array_equal(indices, np.repeat([1, 2, 3, 4, 6], 2))
 
 
 class TestCoordinateTranslation:
