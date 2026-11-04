@@ -6,7 +6,38 @@ import numpy as np
 from atomworks.constants import STANDARD_AA, STANDARD_AA_ONE_LETTER
 from atomworks.enums import ChainType
 from biotite.structure import AtomArray, AtomArrayStack, get_residue_positions, get_residue_starts
+from esm.models.esmfold2.processor import ESMFold2InputBuilder
 from esm.models.esmfold2.types import ProteinInput, StructurePredictionInput
+from rdkit import rdBase
+
+
+class ESMFold2InputBuilderBlockLogs(ESMFold2InputBuilder):
+    """Load ESMFold2's CCD with RDKit logging temporarily silenced.
+
+    Notes
+    -----
+    Our installed RDKit repeatedly warns when reading ESMFold2's CCD::
+
+        Depickling from a version number (16.3)that is higher than our version (16.2).
+        This probably won't work.
+
+    Format 16.3 requires RDKit >=2026.03.1. Our shared Atomworks 2.1.1 requires
+    RDKit <2025.9, so we need Atomworks >=2.2.1 before we can upgrade RDKit
+    without overriding its dependency constraint.
+
+    Despite the warning, RDKit 2025.03.6 and 2026.03.1 loaded identical data for
+    all 50,256 molecules in the current CCD and produced identical ESMFold2
+    input features for a sequence containing all 20 standard amino acids.
+    This wrapper suppresses RDKit logs only during initialization.
+
+    FIXME: Remove this wrapper once Atomworks and RDKit are upgraded and replace all
+    instances with ESMFold2InputBuilder.
+    """
+
+    def __init__(self, *args, **kwargs):
+        """Forward builder options with RDKit logging temporarily disabled."""
+        with rdBase.BlockLogs():
+            super().__init__(*args, **kwargs)
 
 
 def structure_to_esmfold2_input(structure: dict[str, Any]) -> StructurePredictionInput:
