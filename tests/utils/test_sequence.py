@@ -367,11 +367,11 @@ class TestReconcilerWithSequenceOverride:
     def test_normalized_ids_use_seq_idx_over_dense_rank(
         self, structure_5i09_density: dict, seq_5i09_deposited: str
     ):
-        """make_normalized_atom_id should use seq_idx when present, not dense rank.
+        """make_normalized_atom_id numbers residues by seq_idx when it is set.
 
-        This is the core fix for B1: without seq_idx, make_normalized_atom_id
-        assigns dense ranks that diverge between a gapped structure and a
-        full-length model array.
+        Counting observed residues 0, 1, 2, ... ignores unresolved residues, so the numbers
+        drift from a full-length predicted chain; seq_idx gives each residue its position in
+        the deposited sequence instead.
         """
         # Without override: 0-based sequential.
         ids_without = make_normalized_atom_id(structure_5i09_density["asym_unit"])
