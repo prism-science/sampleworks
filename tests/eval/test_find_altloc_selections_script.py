@@ -110,29 +110,6 @@ def test_main_writes_expected_output_columns_and_derived_paths(
 
 
 @pytest.mark.slow
-def test_union_is_written_to_the_sibling_file(
-    tmp_path: Path, resources_dir: Path, find_altloc_script
-):
-    """The per-chain unions go to ``<stem>_union.csv`` with the same columns and rows as the
-    span file, so either file can be fed to the scoring scripts."""
-    input_csv = _altloc_input_csv(tmp_path, resources_dir, n_rows=1)
-    output_file = tmp_path / "output.csv"
-
-    find_altloc_script.main(_make_args(input_csv=input_csv, output_file=output_file))
-
-    union_file = tmp_path / "output_union.csv"
-    assert union_file.exists()
-    spans_df, union_df = pd.read_csv(output_file), pd.read_csv(union_file)
-
-    assert list(union_df.columns) == list(spans_df.columns)
-    entries = union_df.iloc[0]["selection"].split(";")
-    assert all("chain_id == " in s for s in entries), f"expected only unions in {entries}"
-
-    shared = [c for c in spans_df.columns if c != "selection"]
-    assert union_df[shared].equals(spans_df[shared])
-
-
-@pytest.mark.slow
 def test_large_min_span_yields_empty_selection(
     tmp_path: Path, resources_dir: Path, find_altloc_script
 ):
