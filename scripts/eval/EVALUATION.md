@@ -94,6 +94,15 @@ pixi run -e analysis python scripts/eval/<script> \
 --occupancies 0.0 0.25 0.5 0.75 1.0 \
 --n-jobs 16
 ```
+Run directly, the scripts log only to the terminal (`run_analysis` already saves each job's output
+to `<results dir>/<job>_run.log`). To keep a log file, redirect the output. The scripts log to
+stderr, so redirect both streams:
+
+```shell
+pixi run -e analysis python scripts/eval/<script> ... &> <script>.log            # file only
+pixi run -e analysis python scripts/eval/<script> ... 2>&1 | tee <script>.log    # file and terminal
+```
+
 The `--occupancies` argument is a list of occupancy values to evaluate, which should correspond to
 what you used in the grid search.
 

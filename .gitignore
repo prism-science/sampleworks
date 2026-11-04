@@ -218,6 +218,7 @@ CLAUDE.local.md
 .pi/
 IDEA.md
 _tasks/
+.reviewer/
 
 # Model checkpoints
 release_data/
