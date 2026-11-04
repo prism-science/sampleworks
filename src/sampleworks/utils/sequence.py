@@ -482,7 +482,7 @@ def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> 
 
     residue_ids = chain_array.res_id[starts[:-1]]
     insertion_codes = chain_array.ins_code[starts[:-1]]
-    # A repeated (res_id, ins_code), e.g. microheterogeneity, would take two override positions.
+    # Microheterogeneity would put one residue at two override positions.
     residue_keys = set(zip(residue_ids.tolist(), insertion_codes.tolist()))
     if np.any(np.diff(residue_ids) < 0) or len(residue_keys) < len(residue_ids):
         raise ValueError(
@@ -490,7 +490,6 @@ def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> 
             f"restarts or repeats. The CIF may be malformed."
         )
 
-    # Map each observed residue to its position in the full (potentially longer) override.
     residue_seq_idx, ambiguous_at = align_to_sequence(
         observed_seq, sequence, residue_ids, insertion_codes
     )
