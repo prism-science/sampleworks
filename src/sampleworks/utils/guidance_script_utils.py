@@ -438,9 +438,8 @@ def get_model_and_device(
         if ProtpardelleWrapper is None:
             raise ImportError("Protpardelle dependencies not installed")
         logger.debug(f"Loading Protpardelle model from {validated_checkpoint_path}")
-        protpardelle_config_path = getattr(config, "protpardelle_config_path")
         model_wrapper = ProtpardelleWrapper(
-            config_path=str(Path(protpardelle_config_path).expanduser().resolve()),
+            config_path=str(Path(config.protpardelle_config_path).expanduser().resolve()),
             checkpoint_path=validated_checkpoint_path,
             device=device,
             model=model,
