@@ -56,7 +56,7 @@ def _pairs(rec: AtomReconciler) -> dict[int, int]:
     dict[int, int]
         Structure atom index to model atom index.
     """
-    return dict(zip(rec.struct_indices.tolist(), rec.model_indices.tolist()))
+    return dict(zip(rec.input_indices.tolist(), rec.predicted_indices.tolist()))
 
 
 class TestIdentity:
@@ -65,8 +65,8 @@ class TestIdentity:
     def test_identity_no_mismatch(self):
         rec = AtomReconciler.identity(5)
         assert not rec.has_mismatch
-        assert rec.n_model == 5
-        assert rec.n_struct == 5
+        assert rec.n_predicted == 5
+        assert rec.n_input == 5
         assert rec.n_common == 5
 
     def test_identity_align_is_full_alignment(self):
@@ -77,11 +77,11 @@ class TestIdentity:
         assert aligned.shape == model.shape
         assert "rotation" in transform
 
-    def test_identity_struct_to_model_is_copy(self):
+    def test_identity_input_to_predicted_is_copy(self):
         rec = AtomReconciler.identity(3)
         coords = torch.randn(2, 3, 3)
         template = torch.zeros(2, 3, 3)
-        result = rec.struct_to_model(coords, template)
+        result = rec.input_to_predicted(coords, template)
         torch.testing.assert_close(result, coords)
 
 
@@ -151,8 +151,8 @@ class TestFromArrays:
         struct = build_test_atom_array(chain_ids=["A", "A"], res_ids=[5, 6], atom_names=["N", "N"])
         rec = AtomReconciler.from_arrays(model, struct)
         assert rec.has_mismatch
-        assert rec.n_model == 3
-        assert rec.n_struct == 2
+        assert rec.n_predicted == 3
+        assert rec.n_input == 2
         assert rec.n_common == 2
 
     def test_no_common_atoms_raises(self):
@@ -178,7 +178,7 @@ class TestFromArrays:
 
         assert rec.n_common == len(model) == len(struct)
         # Indices come back id-sorted, so compare them to each other rather than to a range.
-        assert rec.model_indices.tolist() == rec.struct_indices.tolist()
+        assert rec.predicted_indices.tolist() == rec.input_indices.tolist()
         assert rec.has_mismatch
 
     @pytest.mark.parametrize(
@@ -216,8 +216,8 @@ class TestFromArrays:
 
         assert rec.n_common == 8
         assert (
-            model.res_name[rec.model_indices.numpy()].tolist()
-            == struct.res_name[rec.struct_indices.numpy()].tolist()
+            model.res_name[rec.predicted_indices.numpy()].tolist()
+            == struct.res_name[rec.input_indices.numpy()].tolist()
         )
 
     def test_gap_in_repeated_residues_follows_input_numbering(self):
@@ -244,8 +244,8 @@ class TestFromArrays:
 
         assert rec.has_mismatch
         assert rec.n_common == len(model) == len(struct)
-        assert rec.model_indices.tolist() == [0, 1]
-        assert rec.struct_indices.tolist() == [0, 1]
+        assert rec.predicted_indices.tolist() == [0, 1]
+        assert rec.input_indices.tolist() == [0, 1]
 
     def test_point_mutation_pairs_as_in_a_full_length_chain(self, caplog):
         # ARG4ALA in an input missing residue 1: the backbone still belongs to model residue 4.
@@ -353,13 +353,13 @@ class TestCoordinateTranslation:
         )
         return AtomReconciler.from_arrays(model, struct)
 
-    def test_struct_to_model_copies_common_atoms(self, mismatch_rec):
+    def test_input_to_predicted_copies_common_atoms(self, mismatch_rec):
         """Each struct atom lands on the model atom with the same residue and atom name."""
         rec = mismatch_rec
         # struct order: CA(res 5) -> [0,1,2], N(res 5) -> [3,4,5], N(res 6) -> [6,7,8]
         struct_coords = torch.arange(9, dtype=torch.float32).reshape(1, 3, 3)
         template = torch.full((1, 5, 3), -1.0)
-        result = rec.struct_to_model(struct_coords, template)
+        result = rec.input_to_predicted(struct_coords, template)
         # model order: N(res 0), CA(res 0), CB(res 0), N(res 1), CA(res 1)
         expected = torch.tensor(
             [
@@ -374,12 +374,12 @@ class TestCoordinateTranslation:
         )
         torch.testing.assert_close(result, expected)
 
-    def test_struct_to_model_rejects_wrong_shapes(self, mismatch_rec):
+    def test_input_to_predicted_rejects_wrong_shapes(self, mismatch_rec):
         rec = mismatch_rec
-        with pytest.raises(ValueError, match="Expected struct_coords"):
-            rec.struct_to_model(torch.randn(1, 4, 3), torch.randn(1, 5, 3))
-        with pytest.raises(ValueError, match="Expected model_template"):
-            rec.struct_to_model(torch.randn(1, 3, 3), torch.randn(1, 4, 3))
+        with pytest.raises(ValueError, match="Expected input_coords"):
+            rec.input_to_predicted(torch.randn(1, 4, 3), torch.randn(1, 5, 3))
+        with pytest.raises(ValueError, match="Expected predicted_template"):
+            rec.input_to_predicted(torch.randn(1, 3, 3), torch.randn(1, 4, 3))
 
     def test_align_shape(self, mismatch_rec):
         rec = mismatch_rec
@@ -414,22 +414,22 @@ class TestCoordinateTranslation:
         model = torch.randn(1, 5, 3)
         model_ref = torch.randn(1, 5, 3)
         bad_weights = torch.ones(1, rec.n_common)  # n_common != n_model
-        with pytest.raises(ValueError, match="align_weights last dimension must match n_model"):
+        with pytest.raises(ValueError, match="align_weights last dimension must match n_predicted"):
             rec.align(model, model_ref, align_weights=bad_weights)
 
     def test_align_rejects_wrong_coord_shapes(self, mismatch_rec):
         rec = mismatch_rec
-        with pytest.raises(ValueError, match="Expected model_coords"):
+        with pytest.raises(ValueError, match="Expected predicted_coords"):
             rec.align(torch.randn(1, 3, 3), torch.randn(1, 5, 3))
-        with pytest.raises(ValueError, match="Expected model_reference"):
+        with pytest.raises(ValueError, match="Expected predicted_reference"):
             rec.align(torch.randn(1, 5, 3), torch.randn(1, 3, 3))
 
     def test_arbitrary_batch_dims(self, mismatch_rec):
-        """struct_to_model handles extra leading batch dimensions."""
+        """input_to_predicted handles extra leading batch dimensions."""
         rec = mismatch_rec
         struct = torch.randn(3, 4, 3, 3)
         template = torch.zeros(3, 4, 5, 3)
-        result = rec.struct_to_model(struct, template)
+        result = rec.input_to_predicted(struct, template)
         assert result.shape == (3, 4, 5, 3)
 
 
@@ -444,8 +444,8 @@ class TestDeviceHandling:
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_to_cuda(self):
         rec = AtomReconciler.identity(3).to("cuda")
-        assert rec.model_indices.device.type == "cuda"
-        assert rec.struct_indices.device.type == "cuda"
+        assert rec.predicted_indices.device.type == "cuda"
+        assert rec.input_indices.device.type == "cuda"
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_align_on_cuda(self):
