@@ -12,7 +12,7 @@ from sampleworks.utils.frame_transforms import random_rotation_matrix
 from tests.utils.atom_array_builders import build_test_atom_array
 
 
-MODEL_NAMES = ["MET", "THR", "GLU", "ARG", "LYS", "GLY"]
+PREDICTED_NAMES = ["MET", "THR", "GLU", "ARG", "LYS", "GLY"]
 
 
 def _chain_a(
@@ -44,7 +44,7 @@ def _chain_a(
 
 
 def _pairs(rec: AtomReconciler) -> dict[int, int]:
-    """Map each paired structure atom index to its model atom index.
+    """Map each paired input atom index to its predicted atom index.
 
     Parameters
     ----------
@@ -54,9 +54,9 @@ def _pairs(rec: AtomReconciler) -> dict[int, int]:
     Returns
     -------
     dict[int, int]
-        Structure atom index to model atom index.
+        Input atom index to predicted atom index.
     """
-    return dict(zip(rec.struct_indices.tolist(), rec.model_indices.tolist()))
+    return dict(zip(rec.input_indices.tolist(), rec.predicted_indices.tolist()))
 
 
 class TestIdentity:
@@ -65,23 +65,23 @@ class TestIdentity:
     def test_identity_no_mismatch(self):
         rec = AtomReconciler.identity(5)
         assert not rec.has_mismatch
-        assert rec.n_model == 5
-        assert rec.n_struct == 5
+        assert rec.n_predicted == 5
+        assert rec.n_input == 5
         assert rec.n_common == 5
 
     def test_identity_align_is_full_alignment(self):
         rec = AtomReconciler.identity(4)
-        model = torch.randn(2, 4, 3)
+        predicted_coords = torch.randn(2, 4, 3)
         ref = torch.randn(2, 4, 3)
-        aligned, transform = rec.align(model, ref)
-        assert aligned.shape == model.shape
+        aligned, transform = rec.align(predicted_coords, ref)
+        assert aligned.shape == predicted_coords.shape
         assert "rotation" in transform
 
-    def test_identity_struct_to_model_is_copy(self):
+    def test_identity_input_to_predicted_is_copy(self):
         rec = AtomReconciler.identity(3)
         coords = torch.randn(2, 3, 3)
         template = torch.zeros(2, 3, 3)
-        result = rec.struct_to_model(coords, template)
+        result = rec.input_to_predicted(coords, template)
         torch.testing.assert_close(result, coords)
 
 
@@ -101,23 +101,23 @@ class TestAlignmentGradients:
         rotation = random_rotation_matrix(reference)
         noise = 0.3 * torch.randn(reference.shape, dtype=reference.dtype)
         # (1, n_atoms, 3)
-        model_coords = (
+        predicted_coords = (
             (reference @ rotation.transpose(-1, -2) + noise).detach().requires_grad_(True)
         )
         # (1, n_atoms, 3), fixed per-coordinate weights so the objective is not symmetric
         objective_weights = torch.randn(reference.shape, dtype=reference.dtype)
 
-        aligned, _ = reconciler.align(model_coords, reference, allow_gradients=True)
+        aligned, _ = reconciler.align(predicted_coords, reference, allow_gradients=True)
         assert aligned.requires_grad
 
         # (1, n_atoms, 3)
-        grad = torch.autograd.grad((aligned * objective_weights).sum(), model_coords)[0]
+        grad = torch.autograd.grad((aligned * objective_weights).sum(), predicted_coords)[0]
         assert torch.isfinite(grad).all()
         grad_magnitude = grad.norm(dim=-1).sum()
         assert grad_magnitude > 0
 
         net_force = grad.sum(dim=-2)
-        lever = model_coords.detach() - model_coords.detach().mean(dim=-2, keepdim=True)
+        lever = predicted_coords.detach() - predicted_coords.detach().mean(dim=-2, keepdim=True)
         net_torque = torch.linalg.cross(lever, grad, dim=-1).sum(dim=-2)
         torque_magnitude = (lever.norm(dim=-1) * grad.norm(dim=-1)).sum()
 
@@ -130,8 +130,8 @@ class TestAlignmentGradients:
         reference = torch.randn(1, 20, 3)
         # The uniform +1.0 translation means alignment must undo a real transform rather than
         # return its input unchanged, so the no-grad check is meaningful.
-        model_coords = (reference + 1.0).detach().requires_grad_(True)
-        aligned, _ = reconciler.align(model_coords, reference, allow_gradients=False)
+        predicted_coords = (reference + 1.0).detach().requires_grad_(True)
+        aligned, _ = reconciler.align(predicted_coords, reference, allow_gradients=False)
 
         assert not aligned.requires_grad
 
@@ -145,21 +145,25 @@ class TestFromArrays:
         assert not rec.has_mismatch
 
     def test_mismatched_arrays(self):
-        model = build_test_atom_array(
+        predicted_array = build_test_atom_array(
             chain_ids=["A", "A", "A"], res_ids=[0, 0, 1], atom_names=["N", "CA", "N"]
         )
-        struct = build_test_atom_array(chain_ids=["A", "A"], res_ids=[5, 6], atom_names=["N", "N"])
-        rec = AtomReconciler.from_arrays(model, struct)
+        input_array = build_test_atom_array(
+            chain_ids=["A", "A"], res_ids=[5, 6], atom_names=["N", "N"]
+        )
+        rec = AtomReconciler.from_arrays(predicted_array, input_array)
         assert rec.has_mismatch
-        assert rec.n_model == 3
-        assert rec.n_struct == 2
+        assert rec.n_predicted == 3
+        assert rec.n_input == 2
         assert rec.n_common == 2
 
     def test_no_common_atoms_raises(self):
-        model = build_test_atom_array(chain_ids=["A", "A"], res_ids=[0, 1], atom_names=["N", "N"])
-        struct = build_test_atom_array(chain_ids=["B"], res_ids=[0], atom_names=["CA"])
+        predicted_array = build_test_atom_array(
+            chain_ids=["A", "A"], res_ids=[0, 1], atom_names=["N", "N"]
+        )
+        input_array = build_test_atom_array(chain_ids=["B"], res_ids=[0], atom_names=["CA"])
         with pytest.raises(RuntimeError, match="No common atoms"):
-            AtomReconciler.from_arrays(model, struct)
+            AtomReconciler.from_arrays(predicted_array, input_array)
 
     @pytest.mark.parametrize(
         "chain_ids,res_ids",
@@ -167,18 +171,18 @@ class TestFromArrays:
         ids=["chain_only", "res_id_only"],
     )
     def test_label_only_difference_requires_reconciliation(self, chain_ids, res_ids):
-        model = build_test_atom_array(
+        predicted_array = build_test_atom_array(
             chain_ids=["A"] * 4, res_ids=[0, 0, 1, 1], atom_names=["N", "CA"] * 2
         )
-        struct = build_test_atom_array(
+        input_array = build_test_atom_array(
             chain_ids=chain_ids, res_ids=res_ids, atom_names=["N", "CA"] * 2
         )
 
-        rec = AtomReconciler.from_arrays(model, struct)
+        rec = AtomReconciler.from_arrays(predicted_array, input_array)
 
-        assert rec.n_common == len(model) == len(struct)
+        assert rec.n_common == len(predicted_array) == len(input_array)
         # Indices come back id-sorted, so compare them to each other rather than to a range.
-        assert rec.model_indices.tolist() == rec.struct_indices.tolist()
+        assert rec.predicted_indices.tolist() == rec.input_indices.tolist()
         assert rec.has_mismatch
 
     @pytest.mark.parametrize(
@@ -187,15 +191,15 @@ class TestFromArrays:
     def test_unresolved_terminus_pairs_same_residues(self, first_resolved):
         # Model built from the full sequence, but the structure lacks 3 terminal residues
         # and numbers the rest by sequence position
-        model = _chain_a(range(6), MODEL_NAMES)
+        predicted_array = _chain_a(range(6), PREDICTED_NAMES)
         resolved = range(first_resolved, first_resolved + 3)
-        struct = _chain_a([i + 1 for i in resolved], [MODEL_NAMES[i] for i in resolved])
+        input_array = _chain_a([i + 1 for i in resolved], [PREDICTED_NAMES[i] for i in resolved])
 
-        rec = AtomReconciler.from_arrays(model, struct)
+        rec = AtomReconciler.from_arrays(predicted_array, input_array)
 
         # Two atoms per residue
         offset = 2 * first_resolved
-        assert _pairs(rec) == {index: index + offset for index in range(len(struct))}
+        assert _pairs(rec) == {index: index + offset for index in range(len(input_array))}
 
     def test_differently_named_chains_pair_in_order_of_appearance(self):
         # The model names chains A, B; the input names the same chains L, H (sorted: H, L).
@@ -210,113 +214,115 @@ class TestFromArrays:
             atoms.res_name[:] = [n for c in chain_ids for n in names[c] for _ in "NC"]
             return atoms
 
-        model, struct = chains(["A", "B"]), chains(["L", "H"])
+        predicted_array, input_array = chains(["A", "B"]), chains(["L", "H"])
 
-        rec = AtomReconciler.from_arrays(model, struct)
+        rec = AtomReconciler.from_arrays(predicted_array, input_array)
 
         assert rec.n_common == 8
         assert (
-            model.res_name[rec.model_indices.numpy()].tolist()
-            == struct.res_name[rec.struct_indices.numpy()].tolist()
+            predicted_array.res_name[rec.predicted_indices.numpy()].tolist()
+            == input_array.res_name[rec.input_indices.numpy()].tolist()
         )
 
     def test_gap_in_repeated_residues_follows_input_numbering(self):
         # His-tag HHHH with the input missing residue 3: by name alone the gap could be anywhere.
         names = ["MET", "HIS", "HIS", "HIS", "HIS", "GLY"]
-        model = _chain_a(range(1, 7), names, ["CA"])
-        struct = _chain_a([11, 12, 14, 15, 16], [names[i] for i in (0, 1, 3, 4, 5)], ["CA"])
+        predicted_array = _chain_a(range(1, 7), names, ["CA"])
+        input_array = _chain_a([11, 12, 14, 15, 16], [names[i] for i in (0, 1, 3, 4, 5)], ["CA"])
 
-        rec = AtomReconciler.from_arrays(model, struct)
+        rec = AtomReconciler.from_arrays(predicted_array, input_array)
 
         assert _pairs(rec) == {0: 0, 1: 1, 2: 3, 3: 4, 4: 5}
 
     def test_mse_se_maps_to_met_sd(self):
-        model = build_test_atom_array(chain_ids=["A", "A"], res_ids=[0, 0], atom_names=["N", "SD"])
-        model.res_name[:] = "MET"
-        model.element[:] = ["N", "S"]
-        struct = build_test_atom_array(
+        predicted_array = build_test_atom_array(
+            chain_ids=["A", "A"], res_ids=[0, 0], atom_names=["N", "SD"]
+        )
+        predicted_array.res_name[:] = "MET"
+        predicted_array.element[:] = ["N", "S"]
+        input_array = build_test_atom_array(
             chain_ids=["A", "A"], res_ids=[13, 13], atom_names=["N", "SE"]
         )
-        struct.res_name[:] = "MSE"
-        struct.element[:] = ["N", "Se"]
+        input_array.res_name[:] = "MSE"
+        input_array.element[:] = ["N", "Se"]
 
-        rec = AtomReconciler.from_arrays(model, struct)
+        rec = AtomReconciler.from_arrays(predicted_array, input_array)
 
         assert rec.has_mismatch
-        assert rec.n_common == len(model) == len(struct)
-        assert rec.model_indices.tolist() == [0, 1]
-        assert rec.struct_indices.tolist() == [0, 1]
+        assert rec.n_common == len(predicted_array) == len(input_array)
+        assert rec.predicted_indices.tolist() == [0, 1]
+        assert rec.input_indices.tolist() == [0, 1]
 
     def test_point_mutation_pairs_as_in_a_full_length_chain(self, caplog):
         # ARG4ALA in an input missing residue 1: the backbone still belongs to model residue 4.
-        model = _chain_a(range(1, 7), MODEL_NAMES)
-        struct = _chain_a(range(2, 7), ["THR", "GLU", "ALA", "LYS", "GLY"])
+        predicted_array = _chain_a(range(1, 7), PREDICTED_NAMES)
+        input_array = _chain_a(range(2, 7), ["THR", "GLU", "ALA", "LYS", "GLY"])
 
         with caplog.at_level(logging.WARNING):
-            rec = AtomReconciler.from_arrays(model, struct)
+            rec = AtomReconciler.from_arrays(predicted_array, input_array)
 
-        assert _pairs(rec) == {index: index + 2 for index in range(len(struct))}
+        assert _pairs(rec) == {index: index + 2 for index in range(len(input_array))}
         assert caplog.text == ""
 
     def test_unmatched_terminal_residue_is_excluded_with_warning(self, caplog):
         # A terminal mismatch cannot be told from a residue the model lacks, so it pairs nothing.
-        model = _chain_a(range(1, 7), MODEL_NAMES)
-        struct = _chain_a(range(2, 7), ["THR", "GLU", "ARG", "LYS", "TRP"])
+        predicted_array = _chain_a(range(1, 7), PREDICTED_NAMES)
+        input_array = _chain_a(range(2, 7), ["THR", "GLU", "ARG", "LYS", "TRP"])
 
         with caplog.at_level(logging.WARNING):
-            rec = AtomReconciler.from_arrays(model, struct)
+            rec = AtomReconciler.from_arrays(predicted_array, input_array)
 
-        assert _pairs(rec) == {index: index + 2 for index in range(len(struct) - 2)}
+        assert _pairs(rec) == {index: index + 2 for index in range(len(input_array) - 2)}
         assert "TRP6" in caplog.text
 
     @pytest.mark.parametrize("conformers", [("GLY", "ALA"), ("ALA", "GLY")])
     def test_microheterogeneity_matches_on_either_name(self, conformers):
         # Terminal residue 6 is GLY/ALA in the input, GLY in the model; residue 1 is unresolved.
         # Its first conformer pairs with the model residue whichever name comes first.
-        model = _chain_a(range(1, 7), MODEL_NAMES)
-        struct = _chain_a([2, 3, 4, 5, 6, 6], [*MODEL_NAMES[1:5], *conformers])
+        predicted_array = _chain_a(range(1, 7), PREDICTED_NAMES)
+        input_array = _chain_a([2, 3, 4, 5, 6, 6], [*PREDICTED_NAMES[1:5], *conformers])
 
-        rec = AtomReconciler.from_arrays(model, struct)
+        rec = AtomReconciler.from_arrays(predicted_array, input_array)
 
-        assert _pairs(rec) == {index: index + 2 for index in range(len(struct) - 2)}
+        assert _pairs(rec) == {index: index + 2 for index in range(len(input_array) - 2)}
 
     def test_matching_chain_logs_no_warning(self, caplog):
-        model = _chain_a(range(1, 7), MODEL_NAMES)
+        predicted_array = _chain_a(range(1, 7), PREDICTED_NAMES)
 
         with caplog.at_level(logging.WARNING):
-            AtomReconciler.from_arrays(model, _chain_a(range(11, 17), MODEL_NAMES))
+            AtomReconciler.from_arrays(predicted_array, _chain_a(range(11, 17), PREDICTED_NAMES))
 
         assert caplog.text == ""
 
     def test_equal_length_chain_with_shifted_residues_warns(self, caplog):
         # A tag residue before MET and GLY6 unresolved: as many residues as the model, so the
         # chain is paired by position, one residue off.
-        model = _chain_a(range(1, 7), MODEL_NAMES)
-        struct = _chain_a(range(0, 6), ["SER", *MODEL_NAMES[:5]])
+        predicted_array = _chain_a(range(1, 7), PREDICTED_NAMES)
+        input_array = _chain_a(range(0, 6), ["SER", *PREDICTED_NAMES[:5]])
 
         with caplog.at_level(logging.WARNING):
-            AtomReconciler.from_arrays(model, struct)
+            AtomReconciler.from_arrays(predicted_array, input_array)
 
         assert "paired with it by position" in caplog.text
         assert "SER0" in caplog.text
 
     def test_longer_chain_with_matching_names_warns_without_differing_names(self, caplog):
         # One extra C-terminal residue: the names that overlap all match.
-        model = _chain_a(range(1, 7), MODEL_NAMES)
-        struct = _chain_a(range(1, 8), [*MODEL_NAMES, "SER"])
+        predicted_array = _chain_a(range(1, 7), PREDICTED_NAMES)
+        input_array = _chain_a(range(1, 8), [*PREDICTED_NAMES, "SER"])
 
         with caplog.at_level(logging.WARNING):
-            AtomReconciler.from_arrays(model, struct)
+            AtomReconciler.from_arrays(predicted_array, input_array)
 
         assert "has 7 residues to the model's 6 and is paired with it by position." in caplog.text
         assert "differ at" not in caplog.text
 
     def test_waters_in_a_protein_chain_warn(self, caplog):
-        model = _chain_a(range(1, 7), MODEL_NAMES)
-        struct = _chain_a(range(2, 7), MODEL_NAMES[1:]) + _chain_a([101], ["HOH"], ["O"])
+        predicted_array = _chain_a(range(1, 7), PREDICTED_NAMES)
+        input_array = _chain_a(range(2, 7), PREDICTED_NAMES[1:]) + _chain_a([101], ["HOH"], ["O"])
 
         with caplog.at_level(logging.WARNING):
-            AtomReconciler.from_arrays(model, struct)
+            AtomReconciler.from_arrays(predicted_array, input_array)
 
         assert "mixes amino acids with other residues ['HOH101']" in caplog.text
 
@@ -324,11 +330,11 @@ class TestFromArrays:
         # His-tag with one HIS unresolved and the input renumbered contiguously: the gap could
         # follow any HIS.
         his_tag = ["MET", "HIS", "HIS", "HIS", "HIS", "GLY"]
-        model = _chain_a(range(1, 7), his_tag, ["CA"])
-        struct = _chain_a(range(1, 6), [*his_tag[:4], "GLY"], ["CA"])
+        predicted_array = _chain_a(range(1, 7), his_tag, ["CA"])
+        input_array = _chain_a(range(1, 6), [*his_tag[:4], "GLY"], ["CA"])
 
         with caplog.at_level(logging.WARNING):
-            AtomReconciler.from_arrays(model, struct)
+            AtomReconciler.from_arrays(predicted_array, input_array)
 
         assert "several equally good ways" in caplog.text
 
@@ -343,23 +349,23 @@ class TestCoordinateTranslation:
         The struct lists residue 5 as CA then N, so pairing by atom position
         alone would cross N and CA.
         """
-        model = build_test_atom_array(
+        predicted_array = build_test_atom_array(
             chain_ids=["A", "A", "A", "A", "A"],
             res_ids=[0, 0, 0, 1, 1],
             atom_names=["N", "CA", "CB", "N", "CA"],
         )
-        struct = build_test_atom_array(
+        input_array = build_test_atom_array(
             chain_ids=["A", "A", "A"], res_ids=[5, 5, 6], atom_names=["CA", "N", "N"]
         )
-        return AtomReconciler.from_arrays(model, struct)
+        return AtomReconciler.from_arrays(predicted_array, input_array)
 
-    def test_struct_to_model_copies_common_atoms(self, mismatch_rec):
+    def test_input_to_predicted_copies_common_atoms(self, mismatch_rec):
         """Each struct atom lands on the model atom with the same residue and atom name."""
         rec = mismatch_rec
         # struct order: CA(res 5) -> [0,1,2], N(res 5) -> [3,4,5], N(res 6) -> [6,7,8]
-        struct_coords = torch.arange(9, dtype=torch.float32).reshape(1, 3, 3)
+        input_coords = torch.arange(9, dtype=torch.float32).reshape(1, 3, 3)
         template = torch.full((1, 5, 3), -1.0)
-        result = rec.struct_to_model(struct_coords, template)
+        result = rec.input_to_predicted(input_coords, template)
         # model order: N(res 0), CA(res 0), CB(res 0), N(res 1), CA(res 1)
         expected = torch.tensor(
             [
@@ -374,62 +380,62 @@ class TestCoordinateTranslation:
         )
         torch.testing.assert_close(result, expected)
 
-    def test_struct_to_model_rejects_wrong_shapes(self, mismatch_rec):
+    def test_input_to_predicted_rejects_wrong_shapes(self, mismatch_rec):
         rec = mismatch_rec
-        with pytest.raises(ValueError, match="Expected struct_coords"):
-            rec.struct_to_model(torch.randn(1, 4, 3), torch.randn(1, 5, 3))
-        with pytest.raises(ValueError, match="Expected model_template"):
-            rec.struct_to_model(torch.randn(1, 3, 3), torch.randn(1, 4, 3))
+        with pytest.raises(ValueError, match="Expected input_coords"):
+            rec.input_to_predicted(torch.randn(1, 4, 3), torch.randn(1, 5, 3))
+        with pytest.raises(ValueError, match="Expected predicted_template"):
+            rec.input_to_predicted(torch.randn(1, 3, 3), torch.randn(1, 4, 3))
 
     def test_align_shape(self, mismatch_rec):
         rec = mismatch_rec
-        model = torch.randn(2, 5, 3)
-        model_ref = torch.randn(2, 5, 3)
-        aligned, transform = rec.align(model, model_ref)
+        predicted_coords = torch.randn(2, 5, 3)
+        predicted_reference = torch.randn(2, 5, 3)
+        aligned, transform = rec.align(predicted_coords, predicted_reference)
         assert aligned.shape == (2, 5, 3)
         assert "rotation" in transform
 
     def test_align_weights_accepted(self, mismatch_rec):
         rec = mismatch_rec
-        model = torch.randn(1, 5, 3)
-        model_ref = torch.randn(1, 5, 3)
+        predicted_coords = torch.randn(1, 5, 3)
+        predicted_reference = torch.randn(1, 5, 3)
         weights = torch.tensor([[1.0, 0.0, 1.0, 1.0, 0.0]])  # (1, n_model=5)
-        aligned, _ = rec.align(model, model_ref, align_weights=weights)
+        aligned, _ = rec.align(predicted_coords, predicted_reference, align_weights=weights)
         assert aligned.shape == (1, 5, 3)
 
     def test_align_weights_influence_transform(self, mismatch_rec):
         """Different weights should produce different alignment transforms."""
         rec = mismatch_rec
         torch.manual_seed(42)
-        model = torch.randn(1, 5, 3)
-        model_ref = torch.randn(1, 5, 3)
+        predicted_coords = torch.randn(1, 5, 3)
+        predicted_reference = torch.randn(1, 5, 3)
         uniform = torch.ones(1, 5)
         sparse = torch.tensor([[10.0, 0.0, 0.0, 0.0, 0.0]])
-        aligned_uniform, _ = rec.align(model, model_ref, align_weights=uniform)
-        aligned_sparse, _ = rec.align(model, model_ref, align_weights=sparse)
+        aligned_uniform, _ = rec.align(predicted_coords, predicted_reference, align_weights=uniform)
+        aligned_sparse, _ = rec.align(predicted_coords, predicted_reference, align_weights=sparse)
         assert not torch.allclose(aligned_uniform, aligned_sparse)
 
     def test_align_weights_rejects_wrong_size(self, mismatch_rec):
         rec = mismatch_rec
-        model = torch.randn(1, 5, 3)
-        model_ref = torch.randn(1, 5, 3)
+        predicted_coords = torch.randn(1, 5, 3)
+        predicted_reference = torch.randn(1, 5, 3)
         bad_weights = torch.ones(1, rec.n_common)  # n_common != n_model
-        with pytest.raises(ValueError, match="align_weights last dimension must match n_model"):
-            rec.align(model, model_ref, align_weights=bad_weights)
+        with pytest.raises(ValueError, match="align_weights last dimension must match n_predicted"):
+            rec.align(predicted_coords, predicted_reference, align_weights=bad_weights)
 
     def test_align_rejects_wrong_coord_shapes(self, mismatch_rec):
         rec = mismatch_rec
-        with pytest.raises(ValueError, match="Expected model_coords"):
+        with pytest.raises(ValueError, match="Expected predicted_coords"):
             rec.align(torch.randn(1, 3, 3), torch.randn(1, 5, 3))
-        with pytest.raises(ValueError, match="Expected model_reference"):
+        with pytest.raises(ValueError, match="Expected predicted_reference"):
             rec.align(torch.randn(1, 5, 3), torch.randn(1, 3, 3))
 
     def test_arbitrary_batch_dims(self, mismatch_rec):
-        """struct_to_model handles extra leading batch dimensions."""
+        """input_to_predicted handles extra leading batch dimensions."""
         rec = mismatch_rec
-        struct = torch.randn(3, 4, 3, 3)
+        input_coords = torch.randn(3, 4, 3, 3)
         template = torch.zeros(3, 4, 5, 3)
-        result = rec.struct_to_model(struct, template)
+        result = rec.input_to_predicted(input_coords, template)
         assert result.shape == (3, 4, 5, 3)
 
 
@@ -444,8 +450,8 @@ class TestDeviceHandling:
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_to_cuda(self):
         rec = AtomReconciler.identity(3).to("cuda")
-        assert rec.model_indices.device.type == "cuda"
-        assert rec.struct_indices.device.type == "cuda"
+        assert rec.predicted_indices.device.type == "cuda"
+        assert rec.input_indices.device.type == "cuda"
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_align_on_cuda(self):

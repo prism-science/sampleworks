@@ -43,9 +43,9 @@ class MismatchCase:
         Stable identifier used in pytest parametrization IDs.
     description
         Human-readable scenario description.
-    model_atom_array
+    predicted_atom_array
         Atom array in model space.
-    struct_atom_array
+    input_atom_array
         Atom array in structure/input space.
     expected_n_common
         Expected common-atom count after reconciliation.
@@ -55,28 +55,28 @@ class MismatchCase:
 
     id: str
     description: str
-    model_atom_array: AtomArray
-    struct_atom_array: AtomArray
+    predicted_atom_array: AtomArray
+    input_atom_array: AtomArray
     expected_n_common: int
     expected_has_mismatch: bool
 
     @property
     def n_model(self) -> int:
         """int: Number of model-space atoms."""
-        return len(self.model_atom_array)
+        return len(self.predicted_atom_array)
 
     @property
     def n_struct(self) -> int:
         """int: Number of structure-space atoms."""
-        return len(self.struct_atom_array)
+        return len(self.input_atom_array)
 
     def clone(self) -> MismatchCase:
         """Return a copy with independent atom arrays."""
         return MismatchCase(
             id=self.id,
             description=self.description,
-            model_atom_array=self.model_atom_array.copy(),
-            struct_atom_array=self.struct_atom_array.copy(),
+            predicted_atom_array=self.predicted_atom_array.copy(),
+            input_atom_array=self.input_atom_array.copy(),
             expected_n_common=self.expected_n_common,
             expected_has_mismatch=self.expected_has_mismatch,
         )
@@ -175,14 +175,14 @@ class MismatchCaseWrapper:
     ):
         self.case = case
         self.device = device or torch.device("cpu")
-        self.n_model = len(case.model_atom_array)
+        self.n_model = len(case.predicted_atom_array)
 
     def featurize(self, structure: dict, **kwargs: Any) -> GenerativeModelInput[MockConditioning]:
         """Return conditioning with case model atom array for reconciliation."""
         conditioning = MockConditioning(
             sequence_length=10,
             num_atoms=self.n_model,
-            model_atom_array=self.case.model_atom_array,
+            model_atom_array=self.case.predicted_atom_array,
         )
         return GenerativeModelInput(conditioning=conditioning)
 

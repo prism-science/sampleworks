@@ -608,7 +608,7 @@ class TestTrajectoryScalerMatrixMock:
         handed to ``prepare`` carry the model atom array as their topology.
         """
 
-        struct_atom_array = build_test_atom_array(
+        input_atom_array = build_test_atom_array(
             chain_ids=["A"] * 5,
             res_ids=[1, 2, 3, 4, 5],
             atom_names=["N", "CA", "C", "O", "CB"],
@@ -616,13 +616,13 @@ class TestTrajectoryScalerMatrixMock:
         case = MismatchCase(
             id="model_drops_one_atom",
             description="Model represents four of the structure's five atoms.",
-            model_atom_array=struct_atom_array[:4].copy(),
-            struct_atom_array=struct_atom_array,
+            predicted_atom_array=input_atom_array[:4].copy(),
+            input_atom_array=input_atom_array,
             expected_n_common=4,
             expected_has_mismatch=True,
         )
         wrapper = MismatchCaseWrapper(case, device=device)
-        structure = {"asym_unit": struct_atom_array, "metadata": {"id": "mismatch"}}
+        structure = {"asym_unit": input_atom_array, "metadata": {"id": "mismatch"}}
 
         loss_function = MockPreparableLossFunction()
         sampler = AF3EDMSampler(
@@ -649,7 +649,7 @@ class TestTrajectoryScalerMatrixMock:
         (prepared,) = loss_function.prepared_inputs
         assert prepared.atom_array is not None
         assert prepared.atom_array.array_length() == case.n_model
-        assert list(prepared.atom_array.atom_name) == list(case.model_atom_array.atom_name)
+        assert list(prepared.atom_array.atom_name) == list(case.predicted_atom_array.atom_name)
         assert loss_function.calls > 0
         assert loss_function.calls_before_prepare == 0
 
