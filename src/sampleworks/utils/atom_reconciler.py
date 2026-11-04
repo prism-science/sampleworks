@@ -307,7 +307,7 @@ def _input_chain_seq_idx(
     np.ndarray
         Index of the matching predicted residue for each input atom, shape
         ``(n_input_atoms,)``. All ``-1`` when the chains already match residue for residue in
-        order, since no override is needed.
+        order, so residue order alone lines them up.
     """
     predicted_names = _chain_residues(predicted_chain_array).names
     input_residues = _chain_residues(input_chain_array)
@@ -332,7 +332,6 @@ def _input_chain_seq_idx(
             f"Input chain {chain} residues {labels[:10]} match no predicted residue. "
             "Their atoms are left out of the common atoms."
         )
-    # Indices past the predicted chain's end, so these residues match nothing.
     positions[unmatched] = len(predicted_names) + np.arange(np.count_nonzero(unmatched))
     return positions[input_residues.residue_of_atom]
 
