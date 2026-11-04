@@ -394,13 +394,10 @@ class TestReconcilerWithSequenceOverride:
         # 5I09 author numbering is deposited position + 1, so each protein atom's
         # normalized position must be its res_id - 1.
         protein = arr.seq_idx >= 0
-        expected_ids = [
-            f"{chain}_{res_id - 1}_{atom_name}"
-            for chain, res_id, atom_name in zip(
-                arr.chain_id[protein], arr.res_id[protein], arr.atom_name[protein]
-            )
-        ]
-        np.testing.assert_array_equal(ids_with[protein], expected_ids)
+        protein_ids = ids_with[protein]
+        np.testing.assert_array_equal(protein_ids["chain_id"], arr.chain_id[protein])
+        np.testing.assert_array_equal(protein_ids["seq_pos"], arr.res_id[protein] - 1)
+        np.testing.assert_array_equal(protein_ids["atom_name"], arr.atom_name[protein])
 
     def test_reconciler_pairs_same_residues_after_override(
         self, structure_5i09_density: dict, seq_5i09_deposited: str
