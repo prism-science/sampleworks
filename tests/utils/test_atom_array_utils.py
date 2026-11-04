@@ -619,13 +619,13 @@ class TestNormalizedAtomId:
         chain_b = arr[arr.chain_id == "B"]
         chain_b.chain_id[:] = "A"  # ids carry the chain name
 
-        ids_a = sorted(make_normalized_atom_id(chain_a))
-        ids_b = sorted(make_normalized_atom_id(chain_b))
+        ids_a = np.sort(make_normalized_atom_id(chain_a))
+        ids_b = np.sort(make_normalized_atom_id(chain_b))
 
         np.testing.assert_array_equal(ids_a, ids_b)
 
-    def test_insertion_codes_are_positions_and_repeats_are_suffixed(self):
-        """Residues 1, 1A, 2 take three positions; a repeated atom (altloc) gets ``#1``."""
+    def test_insertion_codes_are_positions_and_repeats_are_counted(self):
+        """Residues 1, 1A, 2 take three positions; a repeated atom (altloc) is occurrence 1."""
         arr = AtomArray(4)
         arr.chain_id[:] = "A"
         arr.res_id[:] = [1, 1, 2, 2]
@@ -633,7 +633,12 @@ class TestNormalizedAtomId:
         arr.res_name[:] = "ALA"
         arr.atom_name[:] = "CA"
 
-        assert make_normalized_atom_id(arr).tolist() == ["A_0_CA", "A_1_CA", "A_2_CA", "A_2_CA#1"]
+        assert make_normalized_atom_id(arr).tolist() == [
+            ("A", 0, "CA", 0),
+            ("A", 1, "CA", 0),
+            ("A", 2, "CA", 0),
+            ("A", 2, "CA", 1),
+        ]
 
     def test_6b8x_unique_ids_per_atom(self, structure_6b8x):
         """Every atom in 6b8x gets a unique normalized ID (single-chain, no duplication)."""
@@ -643,7 +648,7 @@ class TestNormalizedAtomId:
 
         ids = make_normalized_atom_id(arr)
 
-        assert len(ids) == len(set(ids))
+        assert len(np.unique(ids)) == len(ids)
 
 
 class TestFilterToCommonAtomsNormalized:
