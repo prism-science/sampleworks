@@ -13,7 +13,8 @@ import numpy as np
 from atomworks.constants import STANDARD_AA
 from atomworks.io.utils.ccd import ChainType
 from atomworks.io.utils.sequence import get_1_from_3_letter_code
-from biotite.sequence import ProteinSequence
+from biotite.sequence import Alphabet, GeneralSequence, ProteinSequence
+from biotite.sequence.align import align_optimal, SubstitutionMatrix
 from biotite.sequence.io.fasta import FastaFile
 from biotite.structure import get_residue_starts
 from biotite.structure.info import residue as ccd_residue
@@ -344,6 +345,58 @@ def align_to_sequence(
     matched = matches[np.arange(n_observed), lowest]
     positions[matched] = lowest[matched]
     return positions, ambiguous_at
+
+
+def align_sequences(
+    first: Sequence[str | Collection[str]], second: Sequence[str | Collection[str]]
+) -> tuple[np.ndarray, bool]:
+    """Match up the residues of two sequences by residue name, allowing gaps in either.
+
+    For example, ``["SER", "GLY", "HIS"]`` and ``["GLY", "HIS", "TRP"]`` match GLY to GLY
+    and HIS to HIS, leaving SER and TRP unmatched. The result matches as many residues as
+    possible, and among equally good results uses the fewest gaps. Unmatched residues at the
+    start or end of a sequence do not count as gaps.
+
+    Parameters
+    ----------
+    first : Sequence[str | Collection[str]]
+        Residue names in chain order, e.g. ``["GLY", "ALA"]``. A position can list several
+        names, e.g. ``{"ALA", "SER"}`` for a residue modeled as two residue types, and then
+        matches a residue with any of those names.
+    second : Sequence[str | Collection[str]]
+        Residue names in chain order, given the same way as ``first``.
+
+    Returns
+    -------
+    positions : np.ndarray
+        For each residue of ``first``, the index of the ``second`` residue it matched, or
+        ``-1`` if it matched none. Shape ``(len(first),)``.
+    ambiguous : bool
+        Whether a different matching is just as good, e.g. when ``second`` repeats a residue
+        and either copy could be the match.
+    """
+    first_sets = [frozenset(_name_set(names)) for names in first]
+    second_sets = [frozenset(_name_set(names)) for names in second]
+    positions = np.full(len(first_sets), -1, dtype=np.int64)
+    if not first_sets or not second_sets:
+        return positions, False
+    symbols = list(set(first_sets) | set(second_sets))
+    alphabet = Alphabet(symbols)
+    # one match is worth more than all possible gaps combined
+    match = len(first_sets) + len(second_sets) + 1
+    scores = np.array([[match if a & b else 0 for b in symbols] for a in symbols])
+    alignments = align_optimal(
+        GeneralSequence(alphabet, first_sets),
+        GeneralSequence(alphabet, second_sets),
+        SubstitutionMatrix(alphabet, alphabet, scores),
+        gap_penalty=-1,
+        terminal_penalty=False,
+        max_number=2,
+    )
+    first_index, second_index = alignments[0].trace[(alignments[0].trace >= 0).all(axis=1)].T
+    same_name = [bool(first_sets[i] & second_sets[j]) for i, j in zip(first_index, second_index)]
+    positions[first_index[same_name]] = second_index[same_name]
+    return positions, len(alignments) > 1
 
 
 def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> dict[str, Any]:
