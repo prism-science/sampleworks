@@ -14,6 +14,7 @@ from sampleworks.utils.atom_array_utils import (
     make_normalized_atom_id,
     remove_atoms_with_any_nan_coords,
     remove_hydrogens,
+    residue_index,
     select_altloc,
 )
 
@@ -568,6 +569,14 @@ class TestFilterFunctionsIntegration:
         # altloc positions → 2447 common atoms (empirically verified)
         assert f_a.array_length() == 2447
         assert f_b.array_length() == 2447
+
+
+def test_residue_index_follows_first_appearance_not_numbering():
+    """Descending insertion codes and a lower number later keep the order atoms appear in."""
+    res_id = np.array([1, 1, 1, 1, 0, 0])
+    ins_code = np.array(["B", "B", "A", "", "", ""])
+
+    np.testing.assert_array_equal(residue_index(res_id, ins_code), [0, 0, 1, 2, 3, 3])
 
 
 class TestNormalizedAtomId:

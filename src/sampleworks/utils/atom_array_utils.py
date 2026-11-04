@@ -729,6 +729,29 @@ def select_backbone(atom_array: AtomArray | AtomArrayStack) -> AtomArray | AtomA
         return atom_array[mask]
 
 
+def residue_index(res_id: np.ndarray, ins_code: np.ndarray) -> np.ndarray:
+    """Number residues ``0, 1, ...`` in order of first appearance.
+
+    A residue is a ``(res_id, ins_code)`` pair, so two residue names under one number share
+    an index.
+
+    Parameters
+    ----------
+    res_id : np.ndarray
+        Residue number of each atom, shape ``(n_atoms,)``.
+    ins_code : np.ndarray
+        Insertion code of each atom, shape ``(n_atoms,)``.
+
+    Returns
+    -------
+    np.ndarray
+        Residue index of each atom, shape ``(n_atoms,)``.
+    """
+    keys = np.rec.fromarrays([res_id, ins_code])
+    _, first_atoms, residue_of_key = np.unique(keys, return_index=True, return_inverse=True)
+    return np.argsort(np.argsort(first_atoms))[residue_of_key.ravel()]
+
+
 def make_atom_id(arr: AtomArray | AtomArrayStack) -> np.ndarray:
     """Create a unique identifier for each atom."""
     chain_id = cast(np.ndarray, arr.chain_id)
@@ -765,13 +788,10 @@ def make_normalized_atom_id(arr: AtomArray | AtomArrayStack) -> np.ndarray:
     ins_code = cast(np.ndarray, arr.ins_code)
     atom_name = cast(np.ndarray, arr.atom_name)
 
-    # Assign sequential 0-based seq_pos per chain, in order of first appearance.
     seq_pos = np.empty(len(res_id), dtype=np.int64)
-    for chain in set(chain_id):
+    for chain in sorted(set(chain_id)):
         chain_mask = chain_id == chain
-        residue_keys = list(zip(res_id[chain_mask].tolist(), ins_code[chain_mask].tolist()))
-        key_to_pos = {key: pos for pos, key in enumerate(dict.fromkeys(residue_keys))}
-        seq_pos[chain_mask] = [key_to_pos[key] for key in residue_keys]
+        seq_pos[chain_mask] = residue_index(res_id[chain_mask], ins_code[chain_mask])
 
     # Override with alignment-derived seq_idx when present (set by
     # apply_sequence_override or AtomReconciler to handle gaps / missing residues).
