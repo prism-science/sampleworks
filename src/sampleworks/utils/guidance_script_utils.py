@@ -203,8 +203,8 @@ def relabel_model_residues(
     AtomArray
         Relabeled copy of ``model_atom_array``.
     """
-    model_idx = reconciler.model_indices.cpu().numpy()  # (n_common,)
-    struct_idx = reconciler.struct_indices.cpu().numpy()  # (n_common,)
+    model_idx = reconciler.predicted_indices.cpu().numpy()  # (n_common,)
+    struct_idx = reconciler.input_indices.cpu().numpy()  # (n_common,)
     starts = get_residue_starts(model_atom_array)  # (n_residues,)
     residue_of_atom = get_residue_positions(  # (n_model,)
         model_atom_array, np.arange(len(model_atom_array))
