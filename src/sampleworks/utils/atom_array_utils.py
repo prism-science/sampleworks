@@ -803,8 +803,8 @@ def make_normalized_atom_id(arr: AtomArray | AtomArrayStack) -> np.ndarray:
     """Like ``make_atom_id`` but with residues numbered ``0, 1, ...`` per chain.
 
     Lets arrays with different residue numbering (Boltz 0-based, PDB author numbering) pair.
-    Repeated ids (altlocs, or the second name of a microheterogeneous residue) are told apart
-    by ``occurrence``, so a repeat pairs only with the same repeat in another array.
+    Repeated ids (altlocs, or microheterogeneity: two residue names at one position) are told
+    apart by ``occurrence``, so a repeat pairs only with the same repeat in another array.
 
     Parameters
     ----------
