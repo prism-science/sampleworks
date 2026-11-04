@@ -128,31 +128,187 @@ def resolve_sequence_arg(
     return validate_seq_with_error(sequence)
 
 
+_GAP_COST = 1
+_UNREACHABLE = np.iinfo(np.int64).max // 4
+
+
+def _name_set(names: str | Collection[str]) -> set[str]:
+    """Return a residue's names as a set.
+
+    Parameters
+    ----------
+    names : str | Collection[str]
+        One name, or the names observed at one position.
+
+    Returns
+    -------
+    set[str]
+        The names.
+    """
+    return {names} if isinstance(names, str) else set(names)
+
+
+def _match_matrix(
+    observed: Sequence[str | Collection[str]], sequence: Sequence[str | Collection[str]]
+) -> np.ndarray:
+    """Mark the sequence positions whose names match each observed residue.
+
+    Parameters
+    ----------
+    observed : Sequence[str | Collection[str]]
+        Observed residues.
+    sequence : Sequence[str | Collection[str]]
+        Sequence positions, in the same alphabet as ``observed``.
+
+    Returns
+    -------
+    np.ndarray
+        Boolean matrix, shape ``(n_observed, n_sequence)``.
+    """
+    columns: dict[str, list[int]] = {}
+    for position, names in enumerate(sequence):
+        for name in _name_set(names):
+            columns.setdefault(name, []).append(position)
+    matches = np.zeros((len(observed), len(sequence)), dtype=bool)
+    for index, names in enumerate(observed):
+        for name in _name_set(names):
+            matches[index, columns.get(name, [])] = True
+    return matches
+
+
+def _numbering_jumps(
+    residue_ids: np.ndarray | None, insertion_codes: np.ndarray | None, n_observed: int
+) -> np.ndarray:
+    """Count the residues the numbering skips before each observed residue.
+
+    Parameters
+    ----------
+    residue_ids : np.ndarray | None
+        ``res_id`` of each observed residue, shape ``(n_observed,)``.
+    insertion_codes : np.ndarray | None
+        ``ins_code`` of each observed residue, shape ``(n_observed,)``.
+    n_observed : int
+        Number of observed residues.
+
+    Returns
+    -------
+    np.ndarray
+        Skipped residue count, ``-1`` where the numbering gives no distance (first residue,
+        insertion codes, or numbers that do not increase), shape ``(n_observed,)``.
+    """
+    jumps = np.full(n_observed, -1, dtype=np.int64)
+    if residue_ids is not None and insertion_codes is not None:
+        steps = np.diff(residue_ids.astype(np.int64))
+        numbered = (insertion_codes[1:] == "") & (insertion_codes[:-1] == "") & (steps > 0)
+        jumps[1:] = np.where(numbered, steps - 1, -1)
+    return jumps
+
+
+def _placement_costs(
+    matches: np.ndarray, jumps: np.ndarray, mismatch: int, leading: np.ndarray
+) -> np.ndarray:
+    """Compute a cost matrix: for each ``i`` and ``p``, the cheapest cost of placing residues
+    ``[0, i]`` given that residue ``i`` is placed at position ``p``.
+
+    Parameters
+    ----------
+    matches : np.ndarray
+        Name matches, shape ``(n_observed, n_sequence)``.
+    jumps : np.ndarray
+        Skipped residue counts from :func:`_numbering_jumps`, shape ``(n_observed,)``.
+    mismatch : int
+        Cost of placing a residue on a position whose names differ.
+    leading : np.ndarray
+        Cost of the gap before the first residue, by its position, shape ``(n_sequence,)``.
+
+    Returns
+    -------
+    np.ndarray
+        ``costs[i, p]``: cheapest placement of residues ``0..i`` with ``i`` at ``p``,
+        shape ``(n_observed, n_sequence)``.
+    """
+    n_observed, n_sequence = matches.shape
+    costs = np.empty((n_observed, n_sequence), dtype=np.int64)
+    costs[0] = np.where(matches[0], 0, mismatch) + leading
+    for index in range(1, n_observed):
+        previous, jump = costs[index - 1], jumps[index]
+        candidates = np.full((3, n_sequence), _UNREACHABLE, dtype=np.int64)
+        candidates[0, 1:] = previous[:-1] + (_GAP_COST if jump > 0 else 0)  # adjacent
+        if 0 < jump < n_sequence - 1:
+            candidates[1, jump + 1 :] = previous[: n_sequence - jump - 1]  # gap = jump
+        candidates[2, 2:] = np.minimum.accumulate(previous)[:-2] + _GAP_COST  # any other gap
+        best = candidates.min(axis=0)
+        costs[index] = np.where(
+            best >= _UNREACHABLE, _UNREACHABLE, best + np.where(matches[index], 0, mismatch)
+        )
+    return costs
+
+
+def _trace_placement(
+    costs: np.ndarray,
+    totals: np.ndarray,
+    matches: np.ndarray,
+    jumps: np.ndarray,
+    mismatch: int,
+    pick: Callable[[np.ndarray], int],
+) -> np.ndarray:
+    """Trace one optimal placement back from the last observed residue.
+
+    Parameters
+    ----------
+    costs : np.ndarray
+        From :func:`_placement_costs`, shape ``(n_observed, n_sequence)``.
+    totals : np.ndarray
+        Cost of each full placement by its last position, shape ``(n_sequence,)``.
+    matches : np.ndarray
+        Name matches, shape ``(n_observed, n_sequence)``.
+    jumps : np.ndarray
+        Skipped residue counts, shape ``(n_observed,)``.
+    mismatch : int
+        Cost of placing a residue on a position whose names differ.
+    pick : Callable[[np.ndarray], int]
+        Chooses one position among tied candidates (e.g. ``np.min``).
+
+    Returns
+    -------
+    np.ndarray
+        Sequence position of each observed residue, shape ``(n_observed,)``.
+    """
+    n_observed = len(costs)
+    path = np.empty(n_observed, dtype=np.int64)
+    path[-1] = pick(np.flatnonzero(totals == totals.min()))
+    for index in range(n_observed - 1, 0, -1):
+        here, previous, jump = path[index], costs[index - 1], jumps[index]
+        target = costs[index, here] - (0 if matches[index, here] else mismatch)
+        tied = list(np.flatnonzero(previous[: max(here - 1, 0)] + _GAP_COST == target))
+        if here >= 1 and previous[here - 1] + (_GAP_COST if jump > 0 else 0) == target:
+            tied.append(here - 1)
+        if jump > 0 and here - jump - 1 >= 0 and previous[here - jump - 1] == target:
+            tied.append(here - jump - 1)
+        path[index - 1] = pick(np.array(tied))
+    return path
+
+
 def align_to_sequence(
     observed: Sequence[str | Collection[str]],
     sequence: Sequence[str | Collection[str]],
     residue_ids: np.ndarray | None,
     insertion_codes: np.ndarray | None,
 ) -> tuple[np.ndarray, int | None]:
-    """Place observed residues on a full sequence by name and numbering, optimally.
+    """Place observed residues on a full sequence by name and residue numbering.
 
-    Observed residues keep their order and each takes one sequence position. The placement
-    matches the most names first, then has the fewest gaps that disagree with the numbering: a
-    gap between two observed residues is free when its length is their residue-number jump
-    (both without insertion codes, numbers increasing), and costs one otherwise, as does an
-    adjacent pair the numbering says is apart. With numbering, gaps before the first and after
-    the last residue are free (unresolved termini). Without it, every run of skipped positions
-    costs one, terminal or not, so a gap inside a run of identical residues has several optimal
-    places, reported as ambiguous.
+    Each observed residue keeps its order and takes one sequence position. The optimal
+    placement matches the most names, then has the fewest gaps that disagree with the
+    numbering. Without numbering, a gap inside a run of identical residues has several
+    optimal places, which is reported as ambiguous.
 
     Parameters
     ----------
     observed : Sequence[str | Collection[str]]
-        Observed residues in residue order: one-letter codes, or residue names. A collection
-        lists the monomers observed at one residue (microheterogeneity), any of which matches.
+        Observed residues in order, as one-letter codes or residue names. A collection holds
+        the names observed at one residue, any of which matches.
     sequence : Sequence[str | Collection[str]]
-        Full sequence, in the same alphabet as ``observed``. A collection lists the monomers
-        of a microheterogeneity position, any of which matches.
+        Full sequence, in the same alphabet as ``observed``.
     residue_ids : np.ndarray | None
         ``res_id`` of each observed residue, shape ``(n_observed,)``, or ``None`` when the
         numbering says nothing about sequence distance.
@@ -163,82 +319,28 @@ def align_to_sequence(
     Returns
     -------
     tuple[np.ndarray, int | None]
-        Position in ``sequence`` of each observed residue, ``-1`` where its name matches no
-        position it can take, shape ``(n_observed,)``; and a sequence position at which two
-        optimal placements disagree (not necessarily the first), ``None`` when the optimum is
-        unique. When it is not unique, the positions follow one of the optimal placements.
+        Sequence position of each observed residue, ``-1`` where no name matches, shape
+        ``(n_observed,)``; and a sequence position where two optimal placements disagree,
+        or ``None`` when the optimum is unique.
     """
     n_observed, n_sequence = len(observed), len(sequence)
     positions = np.full(n_observed, -1, dtype=np.int64)
     if n_observed == 0 or n_observed > n_sequence:
         return positions, None
-    columns: dict[str, list[int]] = {}
-    for position, names in enumerate(sequence):
-        for name in {names} if isinstance(names, str) else set(names):
-            columns.setdefault(name, []).append(position)
-    matches = np.zeros((n_observed, n_sequence), dtype=bool)
-    for index, names in enumerate(observed):
-        for name in {names} if isinstance(names, str) else set(names):
-            matches[index, columns.get(name, [])] = True
-
-    gap = 1
-    mismatch = n_observed + 2  # dearer than every gap together: names are matched first
-    unreachable = np.iinfo(np.int64).max // 4
-    # With numbering, unresolved termini are expected; without it, every skipped run counts.
-    terminal = 0 if residue_ids is not None else gap
+    matches = _match_matrix(observed, sequence)
+    jumps = _numbering_jumps(residue_ids, insertion_codes, n_observed)
+    mismatch = n_observed + 2  # dearer than every gap together, so names are matched first
+    terminal = 0 if residue_ids is not None else _GAP_COST  # numbered termini may be unresolved
     leading = np.where(np.arange(n_sequence) > 0, terminal, 0)  # (n_sequence,)
-    trailing = leading[::-1]  # (n_sequence,)
-    # Residue-number jump to each observed residue from the one before, -1 where unknown.
-    jumps = np.full(n_observed, -1, dtype=np.int64)
-    if residue_ids is not None and insertion_codes is not None:
-        steps = np.diff(residue_ids.astype(np.int64))
-        numbered = (insertion_codes[1:] == "") & (insertion_codes[:-1] == "") & (steps > 0)
-        jumps[1:] = np.where(numbered, steps - 1, -1)
+    costs = _placement_costs(matches, jumps, mismatch, leading)
+    totals = np.minimum(costs[-1] + leading[::-1], _UNREACHABLE)  # (n_sequence,)
 
-    costs = np.empty((n_observed, n_sequence), dtype=np.int64)  # best placement ending here
-    costs[0] = np.where(matches[0], 0, mismatch) + leading
-    for index in range(1, n_observed):
-        previous, jump = costs[index - 1], jumps[index]
-        candidates = np.full((3, n_sequence), unreachable, dtype=np.int64)
-        candidates[0, 1:] = previous[:-1] + (gap if jump > 0 else 0)  # adjacent
-        if 0 < jump < n_sequence - 1:
-            candidates[1, jump + 1 :] = previous[: n_sequence - jump - 1]  # gap = jump
-        candidates[2, 2:] = np.minimum.accumulate(previous)[:-2] + gap  # any other gap
-        best = candidates.min(axis=0)
-        costs[index] = np.where(
-            best >= unreachable, unreachable, best + np.where(matches[index], 0, mismatch)
-        )
-    totals = np.minimum(costs[-1] + trailing, unreachable)  # (n_sequence,)
-
-    def trace(pick: Callable[[np.ndarray], int]) -> np.ndarray:
-        """Trace one optimal placement back from the end.
-
-        Parameters
-        ----------
-        pick : Callable[[np.ndarray], int]
-            Chooses one sequence position among tied candidates (e.g. ``np.min``).
-
-        Returns
-        -------
-        np.ndarray
-            Sequence position of each observed residue, shape ``(n_observed,)``.
-        """
-        path = np.empty(n_observed, dtype=np.int64)
-        path[-1] = pick(np.flatnonzero(totals == totals.min()))
-        for index in range(n_observed - 1, 0, -1):
-            here, previous, jump = path[index], costs[index - 1], jumps[index]
-            target = costs[index, here] - (0 if matches[index, here] else mismatch)
-            tied = list(np.flatnonzero(previous[: max(here - 1, 0)] + gap == target))
-            if here >= 1 and previous[here - 1] + (gap if jump > 0 else 0) == target:
-                tied.append(here - 1)
-            if jump > 0 and here - jump - 1 >= 0 and previous[here - jump - 1] == target:
-                tied.append(here - jump - 1)
-            path[index - 1] = pick(np.array(tied))
-        return path
-
-    lowest, highest = trace(np.min), trace(np.max)
-    differ = np.flatnonzero(lowest != highest)
-    ambiguous_at = int(min(lowest[differ[0]], highest[differ[0]])) if differ.size else None
+    lowest = _trace_placement(costs, totals, matches, jumps, mismatch, np.min)
+    highest = _trace_placement(costs, totals, matches, jumps, mismatch, np.max)
+    disagreeing = np.flatnonzero(lowest != highest)
+    ambiguous_at = (
+        int(min(lowest[disagreeing[0]], highest[disagreeing[0]])) if disagreeing.size else None
+    )
     matched = matches[np.arange(n_observed), lowest]
     positions[matched] = lowest[matched]
     return positions, ambiguous_at
