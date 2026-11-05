@@ -1,9 +1,56 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, Self
 
 import torch
+import torch.nn.functional as F
+from biotite.structure import AtomArray, AtomArrayStack
+from esm.models.esmfold2.layers import (
+    CHAR_VOCAB_SIZE,
+    MAX_ATOMIC_NUMBER,
+    maybe_apply_msa_column_masking,
+    NUM_RES_TYPES,
+)
 from esm.models.esmfold2.model import EsmFold2Model
+from esm.models.esmfold2.processor import _seed_context
+
+from sampleworks.models.esmfold2.structure_processing import (
+    esmfold2_features_to_atom_array,
+    ESMFold2InputBuilderBlockLogs,
+    structure_to_esmfold2_input,
+)
+from sampleworks.models.protocol import GenerativeModelInput
+
+
+@dataclass
+class ESMFold2Conditioning:
+    """Reusable inputs to the native ESMFold2 diffusion module.
+
+    Attributes
+    ----------
+    s_inputs
+        Input embeddings, shape (batch, tokens, input_channels).
+    z_trunk
+        Trunk pair embeddings, shape (batch, tokens, tokens, pair_channels).
+    relative_position_encoding
+        Relative positions, shape (batch, tokens, tokens, pair_channels).
+    features
+        Batched, padded features with one-hot element and atom-name encodings.
+    num_atoms
+        Number of unpadded model atoms.
+    model_atom_array
+        Atom identities in unpadded model order, with CCD reference coordinates.
+    true_atom_array
+        Copy of the input structure's first frame, for reconciliation and alignment.
+    """
+
+    s_inputs: torch.Tensor
+    z_trunk: torch.Tensor
+    relative_position_encoding: torch.Tensor
+    features: dict[str, torch.Tensor]
+    num_atoms: int
+    model_atom_array: AtomArray
+    true_atom_array: AtomArray
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,38 +80,216 @@ class ESMFold2WrapperConfig:
     revision: str | None = None
 
 
+@dataclass
 class ESMFold2Wrapper:
-    """Adapt ESMFold2 using its native checkpoint loader.
+    """A wrapper for ESMFold2.
 
-    Parameters
+    Attributes
     ----------
-    config
-        Checkpoint location and runtime settings.
-
-    Notes
-    -----
-    Construction loads model weights and may download the folding checkpoint
-    and ESMC backbone. Parameters are frozen and the model is set to evaluation
-    mode. Freezing weights does not disable autograd globally; coordinate and
-    latent gradients depend on the denoising entry point used by ``step()``.
+    model
+        ESMFold2 model. Direct construction preserves its training mode and
+        parameter gradient settings. Callers prepare the model for their use.
+        ``from_config()`` creates an evaluation-mode model with frozen parameters.
     """
 
-    def __init__(self, config: ESMFold2WrapperConfig):
-        """Load the native model with the requested runtime settings.
+    model: EsmFold2Model
+
+    @classmethod
+    def from_config(cls, config: ESMFold2WrapperConfig) -> Self:
+        """Load and freeze a model for inference and guidance.
 
         Parameters
         ----------
         config
-            Checkpoint location, device, and precision settings.
+            Various settings needed to instantiate/modify ``ESMFold2Model``
+
+        Returns
+        -------
+        Self
+            Wrapper containing an evaluation-mode model with frozen parameters.
         """
-        self.config = config
-        self.device = torch.device(config.device)
-        self.model = EsmFold2Model.from_pretrained(
+        model = EsmFold2Model.from_pretrained(
             config.checkpoint_path,
-            device=self.device,
+            device=torch.device(config.device),
             dtype=config.dtype,
             esmc_precision=config.esmc_precision,
             revision=config.revision,
         )
-        self.model.eval()
-        self.model.requires_grad_(False)
+        model.eval()
+        model.requires_grad_(False)
+
+        return cls(model)
+
+    @torch.no_grad()
+    def featurize(
+        self,
+        structure: dict[str, Any],
+        *,
+        seed: int = 0,
+        num_loops: int | None = None,
+    ) -> GenerativeModelInput[ESMFold2Conditioning]:
+        """Prepare model atoms and cache conditioning before diffusion sampling.
+
+        Parameters
+        ----------
+        structure
+            Atomworks-parsed structure dictionary.
+        seed
+            Seed for input preparation and trunk randomness. The caller's random
+            state is restored afterward.
+        num_loops
+            Native trunk recycling setting; None uses the checkpoint default.
+
+        Returns
+        -------
+        GenerativeModelInput[ESMFold2Conditioning]
+            Detached conditioning and atom identities for subsequent denoising.
+
+        Notes
+        -----
+        Uses no_grad rather than inference_mode so cached tensors can participate
+        in later gradient calculations. Does not sample or align coordinates.
+        """
+        model_input = structure_to_esmfold2_input(structure)
+        atoms = structure["asym_unit"]
+        if isinstance(atoms, AtomArrayStack):
+            atoms = atoms[0]
+
+        builder = ESMFold2InputBuilderBlockLogs()
+        with _seed_context(seed):
+            features, chains = builder.prepare_input(
+                model_input,
+                seed=seed,
+                device=self.model.device,
+            )
+
+            model_atoms = esmfold2_features_to_atom_array(features, chains)
+            atom_mask = features["atom_attention_mask"].float()
+
+            # Atom encodings: (batch, atoms, elements) and (batch, atoms, 4, characters).
+            features["ref_element"] = F.one_hot(
+                features["ref_element"].long(), num_classes=MAX_ATOMIC_NUMBER
+            ).float() * atom_mask.unsqueeze(-1)
+
+            features["ref_atom_name_chars"] = F.one_hot(
+                features["ref_atom_name_chars"].long(), num_classes=CHAR_VOCAB_SIZE
+            ).float() * atom_mask.unsqueeze(-1).unsqueeze(-1)
+
+            features["atom_to_token"] = features["atom_to_token"] * atom_mask.long()
+            s_inputs, z_trunk, relative_position_encoding = self._compute_trunk(features, num_loops)
+
+        return GenerativeModelInput(
+            conditioning=ESMFold2Conditioning(
+                s_inputs=s_inputs.detach(),
+                z_trunk=z_trunk.detach(),
+                relative_position_encoding=relative_position_encoding.detach(),
+                features=features,
+                num_atoms=len(model_atoms),
+                model_atom_array=model_atoms,
+                true_atom_array=atoms.copy(),
+            )
+        )
+
+    def _compute_trunk(
+        self, features: dict[str, torch.Tensor], num_loops: int | None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run the conditioning portion of the native standard model's forward pass.
+
+        Parameters
+        ----------
+        features
+            Prepared features with padded, one-hot atom encodings.
+        num_loops
+            Native recycling setting, or None for the checkpoint default.
+
+        Returns
+        -------
+        tuple[Tensor, Tensor, Tensor]
+            Input embeddings, trunk pair embeddings, and relative position encoding.
+
+        Notes
+        -----
+        Mirrors esm 3.4.2 EsmFold2Model.forward up to structure_head.sample,
+        reusing its embedding, recycling, and final trunk modules.
+        """
+        model = self.model
+        token_mask = features["token_attention_mask"]
+        residue_types = F.one_hot(features["res_type"].long(), NUM_RES_TYPES).float()
+        residue_types = residue_types * token_mask.unsqueeze(-1)
+
+        # Even MSA-free input contains the query row; retain its native processing.
+        msa_profile = F.one_hot(features["msa"].long(), NUM_RES_TYPES).float()
+        msa_mask = features["msa_attention_mask"].float()
+        profile = (msa_profile * msa_mask.unsqueeze(-1)).sum(dim=1)
+        profile = profile / msa_mask.sum(dim=1).clamp(min=1).unsqueeze(-1)
+
+        with torch.autocast("cuda", enabled=self.model.device.type == "cuda", dtype=torch.bfloat16):
+            s_inputs = model.inputs_embedder(
+                aatype=residue_types,
+                profile=profile,
+                deletion_mean=features["deletion_mean"].float(),
+                ref_pos=features["ref_pos"],
+                atom_attention_mask=features["atom_attention_mask"],
+                ref_space_uid=features["ref_space_uid"],
+                ref_charge=features["ref_charge"],
+                ref_element=features["ref_element"],
+                ref_atom_name_chars=features["ref_atom_name_chars"],
+                atom_to_token=features["atom_to_token"],
+            )
+            z_init = model.z_init_1(s_inputs).unsqueeze(2) + model.z_init_2(s_inputs).unsqueeze(1)
+            relative_position_encoding = model.rel_pos(
+                residue_index=features["residue_index"],
+                asym_id=features["asym_id"],
+                sym_id=features["sym_id"],
+                entity_id=features["entity_id"],
+                token_index=features["token_index"],
+            )
+            z_init = (
+                z_init
+                + relative_position_encoding
+                + model.token_bonds(features["token_bonds"].float())
+            )
+            lm_hidden_states = model._compute_lm_hidden_states(
+                features["input_ids"],
+                features["asym_id"],
+                features["residue_index"],
+                features["mol_type"],
+                token_mask,
+                lm_mask_pct=model.config.lm_mask_pct,
+            )
+            lm_z = model.language_model(lm_hidden_states.detach())
+            del lm_hidden_states
+            # Pair mask: (batch, tokens, tokens).
+            pair_mask = token_mask[:, :, None].float() * token_mask[:, None, :].float()
+            z = model._init_pair_state(z_init)
+            a, b = model._discretized_dynamics()
+            msa_inputs = None
+            if model.msa_encoder is not None:
+                msa_config = model.config.msa_encoder
+                msa_inputs = {
+                    "msa": features["msa"],
+                    "msa_attention_mask": maybe_apply_msa_column_masking(
+                        features["msa_attention_mask"], rate=msa_config.column_mask_rate
+                    ),
+                    "has_deletion": features["has_deletion"],
+                    "deletion_value": features["deletion_value"],
+                    "x_inputs": s_inputs,
+                    "max_depth": msa_config.max_depth,
+                    "subsample_enabled": msa_config.max_depth is not None,
+                }
+            loops = model.config.num_loops if num_loops is None else num_loops
+            z = model._run_one_loop(
+                z=z,
+                z_init=z_init,
+                lm_z=lm_z,
+                _msa_inputs=msa_inputs,
+                pair_mask=pair_mask,
+                a=a.view(1, 1, 1, -1).to(z),
+                b_mat=b.to(z),
+                tok_mask=token_mask,
+                total_steps=max(1, loops + 1),
+            )
+            z = model.parcae_readout(z)
+            z = model.parcae_coda(z, pair_attention_mask=pair_mask)
+
+        return s_inputs, z.float(), relative_position_encoding
