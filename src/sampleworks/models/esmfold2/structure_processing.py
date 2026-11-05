@@ -3,9 +3,12 @@
 from typing import Any, cast
 
 import numpy as np
+import torch
 from atomworks.constants import STANDARD_AA, STANDARD_AA_ONE_LETTER
 from atomworks.enums import ChainType
 from biotite.structure import AtomArray, AtomArrayStack, get_residue_positions, get_residue_starts
+from esm.models.esmfold2.output import build_molecular_complex_from_features
+from esm.models.esmfold2.prepare_input import ChainInfo
 from esm.models.esmfold2.processor import ESMFold2InputBuilder
 from esm.models.esmfold2.types import ProteinInput, StructurePredictionInput
 from rdkit import rdBase
@@ -45,6 +48,55 @@ class ESMFold2InputBuilderBlockLogs(ESMFold2InputBuilder):
         """Forward builder options with RDKit logging temporarily disabled."""
         with rdBase.BlockLogs():
             super().__init__(*args, **kwargs)
+
+
+def esmfold2_features_to_atom_array(
+    features: dict[str, torch.Tensor], chain_infos: list[ChainInfo]
+) -> AtomArray:
+    """Describe the model's atoms in the order used by ESMFold2 coordinates.
+
+    Parameters
+    ----------
+    features
+        Batched tensors from ``ESMFold2InputBuilder.prepare_input()`` for one input.
+    chain_infos
+        Chain and token metadata returned alongside the features.
+
+    Returns
+    -------
+    AtomArray
+        Unpadded model atoms with sequential, one-based residue IDs per chain.
+        Coordinates are local CCD reference positions, not an assembled structure
+        or the experimental reference. Use atom identities for reconciliation.
+    """
+    if features["ref_pos"].shape[0] != 1:
+        raise ValueError("Expected ESMFold2 features for exactly one input structure.")
+
+    # Native decoding uses unbatched coordinates (atoms, 3) and confidence (tokens,).
+    molecular_complex = build_molecular_complex_from_features(
+        coords=features["ref_pos"][0].detach(),
+        plddt=torch.zeros_like(features["token_attention_mask"][0], dtype=torch.float32),
+        atom_mask=features["atom_attention_mask"][0],
+        ref_element=features["ref_element"][0],
+        ref_atom_name_chars=features["ref_atom_name_chars"][0],
+        chain_infos=chain_infos,
+        complex_id="model",
+    )
+    atoms = AtomArray(len(molecular_complex.atom_positions))
+    atoms.coord = molecular_complex.atom_positions
+    atoms.atom_name = np.asarray(molecular_complex.atom_names, dtype=str)
+    atoms.element = np.asarray(molecular_complex.atom_elements, dtype=str)
+    atoms.hetero = np.asarray(molecular_complex.atom_hetero, dtype=bool)
+
+    residue_counts: dict[int, int] = {}
+    for i, (start, stop) in enumerate(molecular_complex.token_to_atoms):
+        chain_id = int(molecular_complex.chain_id[i])
+        residue_counts[chain_id] = residue_counts.get(chain_id, 0) + 1
+        atoms.chain_id[start:stop] = molecular_complex.metadata.chain_lookup[chain_id]
+        atoms.res_id[start:stop] = residue_counts[chain_id]
+        atoms.res_name[start:stop] = molecular_complex.sequence[i]
+
+    return atoms
 
 
 def structure_to_esmfold2_input(structure: dict[str, Any]) -> StructurePredictionInput:
