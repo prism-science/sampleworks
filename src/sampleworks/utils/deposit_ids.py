@@ -1,9 +1,10 @@
 """Place structures in their deposited mmCIF's numbering and carry its polymer categories."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import NamedTuple, Self, TypeVar
 
 import numpy as np
+from atomworks.io.transforms.categories import category_to_dict
 from biotite.structure import (
     AtomArray,
     AtomArrayStack,
@@ -37,10 +38,13 @@ _HETERO = "hetero"
 _HETERO_YES = "y"
 _HETERO_NO = "n"
 
-_POLYMER_ENTITY_CATEGORIES = (_ENTITY, _ENTITY_POLY, _ENTITY_POLY_SEQ)
-# The author-number lookup additionally needs these; without them the carry falls back to
-# sequence alignment.
-_SCHEME_CATEGORIES = (_STRUCT_ASYM, _PDBX_POLY_SEQ_SCHEME)
+_POLYMER_ENTITY_CATEGORIES = (
+    _ENTITY,
+    _ENTITY_POLY,
+    _ENTITY_POLY_SEQ,
+    _STRUCT_ASYM,
+    _PDBX_POLY_SEQ_SCHEME,
+)
 
 
 def _single_block(cif_file: CIFFile) -> CIFBlock:
@@ -209,6 +213,106 @@ def _concatenate_category_rows(rows: list[dict[str, list[str]]]) -> dict[str, li
     return columns
 
 
+_Label = tuple[str, str, str]  # deposited (label_asym_id, label_seq_id, label_entity_id)
+
+# Deposited label ids, written over the label columns set_structure fills from chain_id and
+# res_id. Named apart from the label_* fields readers can load as annotations.
+DEPOSIT_LABEL_ANNOTATIONS = (
+    "deposit_label_asym_id",
+    "deposit_label_seq_id",
+    "deposit_label_entity_id",
+)
+
+
+@dataclass(frozen=True)
+class PolySeqSchemePosition:
+    """One deposited polymer position: the ``pdbx_poly_seq_scheme`` row(s) of one residue.
+
+    Fields are named after the scheme's columns. A residue at this position takes ``asym_id``,
+    ``seq_id`` and ``entity_id`` as its ``label_asym_id``, ``label_seq_id`` and
+    ``label_entity_id``, and ``pdb_strand_id``, ``pdb_seq_num`` and ``pdb_ins_code`` as its
+    ``auth_asym_id``, ``auth_seq_id`` and ``pdbx_PDB_ins_code``.
+
+    Attributes
+    ----------
+    asym_id, entity_id : str
+        Label chain and entity.
+    seq_id : str
+        Position in the entity's ``entity_poly_seq`` (its ``num``), counting from 1. It has
+        no insertion code; only author numbering does.
+    pdb_strand_id, pdb_seq_num, pdb_ins_code : str
+        Author chain, residue number and insertion code (``""`` when absent).
+    monomers : frozenset[str]
+        Canonical names of the monomers allowed here. A microheterogeneity site (e.g.
+        CYS/CSO) has one scheme row per monomer, all merged into this position.
+    """
+
+    asym_id: str
+    seq_id: str
+    entity_id: str
+    pdb_strand_id: str
+    pdb_seq_num: str
+    pdb_ins_code: str
+    monomers: frozenset[str]
+
+    @property
+    def label(self) -> _Label:
+        """``(label_asym_id, label_seq_id, label_entity_id)`` of the position."""
+        return (self.asym_id, self.seq_id, self.entity_id)
+
+    @property
+    def author_key(self) -> tuple[str, str, str]:
+        """``(auth_asym_id, auth_seq_id, pdbx_PDB_ins_code)`` of the position."""
+        return (self.pdb_strand_id, self.pdb_seq_num, self.pdb_ins_code)
+
+    def with_monomer(self, name: str) -> Self:
+        """Return a copy that also allows monomer ``name``.
+
+        Parameters
+        ----------
+        name : str
+            Monomer name; it is stored canonicalized (``MSE -> MET``).
+
+        Returns
+        -------
+        Self
+            The position with ``name`` added to ``monomers``.
+        """
+        return replace(self, monomers=self.monomers | {_canonical_monomer(name)})
+
+
+def _scheme_positions(block: CIFBlock) -> tuple[PolySeqSchemePosition, ...]:
+    """List every deposited polymer position, resolved or not, in scheme order.
+
+    Parameters
+    ----------
+    block : CIFBlock
+        Deposited block with ``pdbx_poly_seq_scheme``.
+
+    Returns
+    -------
+    tuple[PolySeqSchemePosition, ...]
+        One entry per ``(asym_id, seq_id)``; microheterogeneity rows merge into ``monomers``.
+    """
+    scheme = category_to_dict(block, _PDBX_POLY_SEQ_SCHEME)
+    positions: dict[tuple[str, str], PolySeqSchemePosition] = {}
+    for asym, seq, entity, strand, number, ins_code, monomer in zip(
+        scheme["asym_id"],
+        scheme["seq_id"],
+        scheme["entity_id"],
+        scheme["pdb_strand_id"],
+        scheme["pdb_seq_num"],
+        _blank_to_empty(scheme["pdb_ins_code"]),
+        scheme["mon_id"],
+        strict=True,
+    ):
+        position = positions.get((asym, seq)) or PolySeqSchemePosition(
+            asym, seq, entity, strand, number, ins_code, frozenset()
+        )
+        positions[(asym, seq)] = position.with_monomer(monomer)
+    return tuple(positions.values())
+
+
 @dataclass(frozen=True)
 class Deposit:
     """A deposited mmCIF, parsed once to place structures in it.
@@ -219,10 +323,13 @@ class Deposit:
         The deposit's data block, whose categories are carried.
     monomers : frozenset[str]
         Canonical names of the monomers its ``entity_poly_seq`` lists.
+    scheme : tuple[PolySeqSchemePosition, ...]
+        Its polymer positions in ``pdbx_poly_seq_scheme`` order (``_scheme_positions``).
     """
 
     block: CIFBlock
     monomers: frozenset[str]
+    scheme: tuple[PolySeqSchemePosition, ...]
 
     @classmethod
     def from_cif(cls, reference: CIFFile) -> Self:
@@ -252,18 +359,7 @@ class Deposit:
             _canonical_monomer(str(name))
             for name in block[_ENTITY_POLY_SEQ]["mon_id"].as_array(str)
         )
-        return cls(block, monomers)
-
-
-_Label = tuple[str, str, str]  # deposited (label_asym_id, label_seq_id, label_entity_id)
-
-# Deposited label ids, written over the label columns set_structure fills from chain_id and
-# res_id. Named apart from the label_* fields readers can load as annotations.
-DEPOSIT_LABEL_ANNOTATIONS = (
-    "deposit_label_asym_id",
-    "deposit_label_seq_id",
-    "deposit_label_entity_id",
-)
+        return cls(block, monomers, _scheme_positions(block))
 
 
 _Structure = TypeVar("_Structure", AtomArray, AtomArrayStack)
@@ -343,49 +439,34 @@ def _residues(atom_array: AtomArray | AtomArrayStack, deposit: Deposit) -> _Resi
     )
 
 
-def _labels_by_author_ids(residues: _Residues, reference_block: CIFBlock) -> list[_Label | None]:
-    """Label residues by looking their ids up as author ids in the deposit's scheme.
+def _positions_by_lookup(
+    keys: list[tuple[str, ...]],
+    lookup: dict[tuple[str, ...], PolySeqSchemePosition],
+    residues: _Residues,
+) -> list[PolySeqSchemePosition | None]:
+    """Place residues by looking their keys up among the deposited positions.
 
     Parameters
     ----------
+    keys : list[tuple[str, ...]]
+        Lookup key per residue.
+    lookup : dict[tuple[str, ...], PolySeqSchemePosition]
+        Deposited positions by key.
     residues : _Residues
-        Residues whose ``chain_id``, ``res_id`` and ``ins_code`` are the deposit's
-        ``pdb_strand_id``, ``pdb_seq_num`` and ``pdb_ins_code``.
-    reference_block : CIFBlock
-        Deposited block with ``pdbx_poly_seq_scheme`` and ``struct_asym``.
+        The residues ``keys`` describe.
 
     Returns
     -------
-    list[_Label | None]
-        Deposited label per residue, ``None`` for residues outside the scheme (e.g. ligands).
+    list[PolySeqSchemePosition | None]
+        Deposited position per residue, ``None`` for residues outside the scheme (e.g.
+        ligands).
 
     Raises
     ------
     ValueError
-        If scheme categories are absent, a non-``HETATM`` residue has no scheme row, a
-        residue's name disagrees with its scheme row, or no residue is labeled.
+        If a non-``HETATM`` residue has no position, a residue's name is not one of its
+        position's monomers, or no residue is placed.
     """
-    missing = [name for name in _SCHEME_CATEGORIES if name not in reference_block]
-    if missing:
-        raise ValueError(f"Reference CIF lacks {missing}")
-    scheme = reference_block[_PDBX_POLY_SEQ_SCHEME]
-    scheme_keys = zip(
-        scheme["pdb_strand_id"].as_array(str),
-        scheme["pdb_seq_num"].as_array(str),
-        _blank_to_empty(scheme["pdb_ins_code"].as_array(str)),
-    )
-    scheme_labels = zip(
-        scheme["asym_id"].as_array(str),
-        scheme["seq_id"].as_array(str),
-        scheme["entity_id"].as_array(str),
-    )
-    lookup: dict[tuple[str, str, str], _Label] = {}
-    monomers: dict[tuple[str, str, str], set[str]] = {}
-    for key, label, monomer in zip(scheme_keys, scheme_labels, scheme["mon_id"].as_array(str)):
-        lookup.setdefault(key, label)  # microheterogeneity rows (e.g. CYS/CSO) share a seq_id
-        monomers.setdefault(key, set()).add(_canonical_monomer(monomer))
-
-    keys = list(zip(residues.chain_id, residues.res_id, residues.ins_code, strict=True))
     unmatched = {
         key for key, hetero in zip(keys, residues.hetero) if not hetero and key not in lookup
     }
@@ -397,76 +478,162 @@ def _labels_by_author_ids(residues: _Residues, reference_block: CIFBlock) -> lis
     renamed = {
         (key, name)
         for key, name, polymer in zip(keys, residues.res_name, residues.polymer)
-        if polymer and key in lookup and _canonical_monomer(name) not in monomers[key]
+        if polymer and key in lookup and _canonical_monomer(name) not in lookup[key].monomers
     }
     if renamed:
         raise ValueError(f"Residue names disagree with the deposit, e.g. {sorted(renamed)[:3]}")
-    labels = [lookup.get(key) if polymer else None for key, polymer in zip(keys, residues.polymer)]
-    if not any(labels):
+    positions = [
+        lookup.get(key) if polymer else None for key, polymer in zip(keys, residues.polymer)
+    ]
+    if not any(positions):
         raise ValueError("Output has no polymer residues")
-    return labels
+    return positions
 
 
-def _labels_by_alignment(residues: _Residues, reference_block: CIFBlock) -> list[_Label | None]:
-    """Label residues by aligning each entity's sequence to the deposit's.
-
-    Used when the residues do not carry the deposit's author numbering (a model that
-    renumbers residues). Each residue gets the deposited ``entity_poly_seq.num`` it aligns to
-    as its ``label_seq_id`` and the deposited entity id; its ``label_asym_id`` stays its chain.
+def _positions_by_author_ids(
+    residues: _Residues, scheme: tuple[PolySeqSchemePosition, ...]
+) -> list[PolySeqSchemePosition | None]:
+    """Place residues whose ``(chain_id, res_id, ins_code)`` are the deposit's author ids.
 
     Parameters
     ----------
     residues : _Residues
-        Residues to label.
-    reference_block : CIFBlock
-        Deposited block with ``entity``, ``entity_poly`` and ``entity_poly_seq``.
+        Residues to place.
+    scheme : tuple[PolySeqSchemePosition, ...]
+        Deposited positions (``Deposit.scheme``).
 
     Returns
     -------
-    list[_Label | None]
-        Deposited label per residue, ``None`` for non-polymer residues.
+    list[PolySeqSchemePosition | None]
+        Deposited position per residue, ``None`` for non-polymer residues.
 
     Raises
     ------
     ValueError
-        If no entity has polymer residues, an entity has conflicting names for one number,
-        or an entity has no unique match among the deposited entities.
+        As ``_positions_by_lookup``.
     """
-    remap: dict[tuple[str, str], tuple[str, str]] = {}  # (entity, number) -> (entity, num)
-    for entity_id in dict.fromkeys(residues.entity_id):
-        names: dict[int, str] = {}
-        for entity, number, name, polymer in zip(
-            residues.entity_id, residues.res_id, residues.res_name, residues.polymer, strict=True
-        ):
-            if entity != entity_id or not polymer:
-                continue
-            if int(number) in names and names[int(number)] != name:
-                raise ValueError(f"Output entity {entity_id} has conflicting names for {number}")
-            names[int(number)] = str(name)
-        numbers = sorted(names)
-        if not numbers:
+    keys = list(zip(residues.chain_id, residues.res_id, residues.ins_code, strict=True))
+    return _positions_by_lookup(keys, {p.author_key: p for p in scheme}, residues)
+
+
+def _positions_by_label_ids(
+    residues: _Residues, scheme: tuple[PolySeqSchemePosition, ...]
+) -> list[PolySeqSchemePosition | None]:
+    """Place residues whose ``(chain_id, res_id)`` are the deposit's label chain and position.
+
+    Parameters
+    ----------
+    residues : _Residues
+        Residues to place.
+    scheme : tuple[PolySeqSchemePosition, ...]
+        Deposited positions (``Deposit.scheme``).
+
+    Returns
+    -------
+    list[PolySeqSchemePosition | None]
+        Deposited position per residue, ``None`` for non-polymer residues.
+
+    Raises
+    ------
+    ValueError
+        As ``_positions_by_lookup``.
+    """
+    keys = list(zip(residues.chain_id, residues.res_id, strict=True))
+    return _positions_by_lookup(keys, {(p.asym_id, p.seq_id): p for p in scheme}, residues)
+
+
+def _positions_by_alignment(
+    residues: _Residues, scheme: tuple[PolySeqSchemePosition, ...], reference_block: CIFBlock
+) -> list[PolySeqSchemePosition | None]:
+    """Place residues by aligning each chain's sequence to the deposit's.
+
+    The fallback when the residues keep neither the deposit's author nor its label numbering,
+    e.g. a model that numbers from 1. For each chain:
+
+    1. Align its residue names to each deposited entity's ``entity_poly_seq`` and take the
+       single entity that matches (``_matching_entity``).
+    2. Pick the deposited chain of that entity whose ``pdbx_poly_seq_scheme.asym_id`` or
+       ``pdb_strand_id`` equals the chain's name. Either can appear: an input read from an
+       RCSB CIF brings label chain ids, a density input author ones.
+    3. Give each residue that chain's position at the ``entity_poly_seq.num`` it aligned to.
+
+    Chains are taken one by one, not merged per entity: a model numbers each chain from 1, so
+    two copies of one entity resolved over different ranges share numbers but not residues.
+
+    Parameters
+    ----------
+    residues : _Residues
+        Residues to place.
+    scheme : tuple[PolySeqSchemePosition, ...]
+        Deposited positions (``Deposit.scheme``).
+    reference_block : CIFBlock
+        Deposited block with ``entity_poly`` and ``entity_poly_seq``.
+
+    Returns
+    -------
+    list[PolySeqSchemePosition | None]
+        Deposited position per residue, ``None`` for non-polymer residues.
+
+    Raises
+    ------
+    ValueError
+        If no chain has polymer residues, a chain has conflicting names for one residue, a
+        chain has no unique match among the deposited entities, does not name exactly one
+        deposited chain of its entity, or two chains name the same one.
+    """
+    position_at = {(p.asym_id, p.seq_id): p for p in scheme}
+    deposited_chains = {(p.asym_id, p.pdb_strand_id, p.entity_id) for p in scheme}
+    positions: list[PolySeqSchemePosition | None] = [None] * len(residues.chain_id)
+    output_chain_by_asym_id: dict[str, str] = {}
+    for chain in dict.fromkeys(residues.chain_id):
+        rows = np.flatnonzero((residues.chain_id == chain) & residues.polymer)
+        if rows.size == 0:
             continue  # ligands and waters
-        deposited_id, nums = _matching_entity(reference_block, [names[n] for n in numbers])
-        for number, num in zip(numbers, nums, strict=True):
-            remap[(str(entity_id), str(number))] = (deposited_id, num)
-    if not remap:
-        raise ValueError("Output has no polymer entities")
-    labels: list[_Label | None] = []
-    for chain, entity, number, polymer in zip(
-        residues.chain_id, residues.entity_id, residues.res_id, residues.polymer, strict=True
-    ):
-        match = remap.get((str(entity), str(number))) if polymer else None
-        labels.append(None if match is None else (str(chain), match[1], match[0]))
-    return labels
+        names: dict[tuple[int, str], str] = {}  # (number, insertion code) -> name
+        for row in rows:
+            key = (int(residues.res_id[row]), str(residues.ins_code[row]))
+            if key in names and names[key] != residues.res_name[row]:
+                raise ValueError(f"Output chain {chain} has conflicting names for residue {key}")
+            names[key] = str(residues.res_name[row])
+        # Stable: residues sharing a number keep their order (14, 14A, 14B; thrombin's 1H ... 1).
+        sequence_keys = sorted(names, key=lambda key: key[0])
+        entity_id, seq_ids = _matching_entity(reference_block, [names[k] for k in sequence_keys])
+        # Copies of one entity are told apart by chain name. The name is ambiguous when it is
+        # one copy's label id and another's author id.
+        asym_ids = {
+            asym_id
+            for asym_id, strand_id, entity in deposited_chains
+            if entity == entity_id and chain in (asym_id, strand_id)
+        }
+        if len(asym_ids) != 1:
+            raise ValueError(
+                f"Output chain {chain} names deposited chains {sorted(asym_ids)} of entity "
+                f"{entity_id}, not exactly one"
+            )
+        asym_id = asym_ids.pop()
+        if asym_id in output_chain_by_asym_id:
+            raise ValueError(
+                f"Output chains {output_chain_by_asym_id[asym_id]} and {chain} both name "
+                f"chain {asym_id}"
+            )
+        output_chain_by_asym_id[asym_id] = str(chain)
+        seq_id_of = dict(zip(sequence_keys, seq_ids, strict=True))
+        for row in rows:
+            key = (int(residues.res_id[row]), str(residues.ins_code[row]))
+            positions[row] = position_at[(asym_id, seq_id_of[key])]
+    if not output_chain_by_asym_id:
+        raise ValueError("Output has no polymer chains")
+    return positions
 
 
-def resolve_deposit_labels(
+def resolve_deposit_positions(
     atom_array: AtomArray | AtomArrayStack, deposit: Deposit
-) -> list[_Label | None]:
-    """Find each residue's deposited label.
+) -> list[PolySeqSchemePosition | None]:
+    """Find each residue's deposited ``pdbx_poly_seq_scheme`` position.
 
-    Residues are looked up by their ids as the deposit's author ids, or, failing that, each
-    entity's sequence is aligned to the deposit's (``_labels_by_alignment``).
+    Three matches are tried in turn: author ids (``_positions_by_author_ids``), label ids
+    (``_positions_by_label_ids``), then sequence alignment (``_positions_by_alignment``). The
+    first that places every polymer residue wins.
 
     Parameters
     ----------
@@ -477,45 +644,59 @@ def resolve_deposit_labels(
 
     Returns
     -------
-    list[_Label | None]
-        Deposited label per residue, ``None`` for non-polymer residues.
+    list[PolySeqSchemePosition | None]
+        Deposited position per residue, ``None`` for non-polymer residues.
 
     Raises
     ------
     ValueError
-        If neither match places every polymer residue.
+        If no match places every residue; the message gives each one's reason.
+
+    Notes
+    -----
+    Which ids the residues carry is inferred, not recorded: inputs are loaded without saying
+    whether they were read by label or author ids. Author ids are tried first, so residues
+    whose label ids also read as valid author ids, with matching names, are placed by author
+    ids.
     """
     reference_block = deposit.block
     residues = _residues(atom_array, deposit)
+    scheme = deposit.scheme
+    errors: list[str] = []
     try:
-        return _labels_by_author_ids(residues, reference_block)
-    except ValueError as lookup_error:
-        try:
-            return _labels_by_alignment(residues, reference_block)
-        except ValueError as alignment_error:
-            raise ValueError(
-                f"author lookup: {lookup_error}; sequence alignment: {alignment_error}"
-            ) from alignment_error
+        return _positions_by_author_ids(residues, scheme)
+    except ValueError as error:
+        errors.append(f"author lookup: {error}")
+    try:
+        return _positions_by_label_ids(residues, scheme)
+    except ValueError as error:
+        errors.append(f"label lookup: {error}")
+    try:
+        return _positions_by_alignment(residues, scheme, reference_block)
+    except ValueError as error:
+        errors.append(f"sequence alignment: {error}")
+    raise ValueError("; ".join(errors))
 
 
 def annotate_deposit_ids(
     atom_array: _Structure,
     deposit: Deposit,
-    labels: list[_Label | None] | None = None,
+    positions: list[PolySeqSchemePosition | None] | None = None,
 ) -> _Structure:
-    """Return a copy of ``atom_array`` annotated with each residue's deposited label ids.
+    """Return a copy of ``atom_array`` carrying each residue's deposited ids.
 
-    Sets the ``DEPOSIT_LABEL_ANNOTATIONS``. A residue without a deposited label (a ligand or
-    water) keeps its chain and entity and has no sequence position (``.``).
+    A polymer residue takes its position's author ids as ``chain_id``, ``res_id`` and
+    ``ins_code``, and its label ids as the ``DEPOSIT_LABEL_ANNOTATIONS``. A residue without a
+    position (a ligand or water) keeps its ids and entity and has no sequence position (``.``).
 
     Parameters
     ----------
     atom_array : AtomArray | AtomArrayStack
         Structure to annotate.
     deposit : Deposit
-        The deposit to place it in.
-    labels : list[_Label | None] | None
-        Deposited label per residue; found with ``resolve_deposit_labels`` when omitted.
+        The deposit to place them in.
+    positions : list[PolySeqSchemePosition | None] | None
+        Deposited position per residue; found with ``resolve_deposit_positions`` when omitted.
 
     Returns
     -------
@@ -525,33 +706,45 @@ def annotate_deposit_ids(
     Raises
     ------
     ValueError
-        If ``labels`` is omitted and the residues cannot be placed.
+        If ``positions`` is omitted and the residues cannot be placed.
     """
-    if labels is None:
-        labels = resolve_deposit_labels(atom_array, deposit)
+    if positions is None:
+        positions = resolve_deposit_positions(atom_array, deposit)
     residues = _residues(atom_array, deposit)
-    residue_ids = [
-        label if label is not None else (str(chain), _INAPPLICABLE, str(entity))
-        for label, chain, entity in zip(labels, residues.chain_id, residues.entity_id, strict=True)
-    ]
+    starts = get_residue_starts(atom_array)
     residue_of_atom = get_residue_positions(atom_array, np.arange(atom_array.array_length()))
     annotated = atom_array.copy()
+    placed = np.flatnonzero([position is not None for position in positions])
+    placed_positions = [position for position in positions if position is not None]
+    for name, values in (
+        ("chain_id", [p.pdb_strand_id for p in placed_positions]),
+        ("res_id", [int(p.pdb_seq_num) for p in placed_positions]),
+        ("ins_code", [p.pdb_ins_code for p in placed_positions]),
+    ):
+        residue_values = atom_array.get_annotation(name)[starts].copy()  # (n_residues,)
+        residue_values[placed] = values
+        annotated.set_annotation(name, residue_values[residue_of_atom])
+    labels = [
+        position.label if position is not None else (str(chain), _INAPPLICABLE, str(entity))
+        for position, chain, entity in zip(
+            positions, residues.chain_id, residues.entity_id, strict=True
+        )
+    ]
     for index, name in enumerate(DEPOSIT_LABEL_ANNOTATIONS):
-        values = np.array([ids[index] for ids in residue_ids], dtype=object)
+        values = np.array([label[index] for label in labels], dtype=object)
         annotated.set_annotation(name, values[residue_of_atom].astype(str))
     return annotated
 
 
 def _carried_categories(
-    reference_block: CIFBlock, polymer_labels: set[_Label], with_scheme: bool
+    reference_block: CIFBlock, polymer_labels: set[_Label]
 ) -> dict[str, dict[str, list[str]]]:
     """Select the deposit's category rows for the polymer chains and entities present.
 
     ``entity``, ``entity_poly`` and ``entity_poly_seq`` rows are kept for the entities in
-    ``polymer_labels``. With ``with_scheme``, the chains' ``struct_asym`` and
-    ``pdbx_poly_seq_scheme`` rows are kept too, the scheme's ``auth_seq_num`` and
-    ``auth_mon_id`` filled at modeled positions and ``?`` elsewhere; otherwise ``struct_asym``
-    lists the chains present with their entities.
+    ``polymer_labels``, and ``struct_asym`` and ``pdbx_poly_seq_scheme`` rows for its chains.
+    The scheme's ``auth_seq_num`` and ``auth_mon_id`` are filled at modeled positions and
+    ``?`` elsewhere.
 
     Parameters
     ----------
@@ -559,8 +752,6 @@ def _carried_categories(
         Deposited block with the polymer entity categories.
     polymer_labels : set[_Label]
         Deposited labels of the output's polymer residues.
-    with_scheme : bool
-        Whether the output's chains are the deposit's and keep its author ids.
 
     Returns
     -------
@@ -580,22 +771,10 @@ def _carried_categories(
             (_ENTITY, "id", entity_ids),
             (_ENTITY_POLY, "entity_id", entity_ids),
             (_ENTITY_POLY_SEQ, "entity_id", entity_ids),
+            (_STRUCT_ASYM, "id", asym_ids),
+            (_PDBX_POLY_SEQ_SCHEME, "asym_id", asym_ids),
         )
     }
-    if not with_scheme:
-        chain_entities = {asym_id: entity_id for asym_id, _, entity_id in polymer_labels}
-        categories[_STRUCT_ASYM] = {
-            "id": sorted(chain_entities),
-            "entity_id": [chain_entities[chain] for chain in sorted(chain_entities)],
-        }
-        return categories
-    for name, column in ((_STRUCT_ASYM, "id"), (_PDBX_POLY_SEQ_SCHEME, "asym_id")):
-        categories[name] = _concatenate_category_rows(
-            [
-                _select_category_rows(reference_block[name], column, value)
-                for value in sorted(asym_ids)
-            ]
-        )
     carried_scheme = categories[_PDBX_POLY_SEQ_SCHEME]
     modeled = {(asym_id, seq_id) for asym_id, seq_id, _ in polymer_labels}
     has_coords = [
@@ -746,52 +925,6 @@ def _relabeled_struct_conn_partners(
     return partner_labels
 
 
-def _keeps_deposited_author_ids(
-    atom_site: CIFCategory, labels: list[_Label | None], reference_block: CIFBlock
-) -> bool:
-    """Check that every labeled row's author ids are its deposited scheme row's.
-
-    Parameters
-    ----------
-    atom_site : CIFCategory
-        Output ``atom_site``.
-    labels : list[_Label | None]
-        Deposited label per row, ``None`` for non-polymer rows.
-    reference_block : CIFBlock
-        Deposited block.
-
-    Returns
-    -------
-    bool
-        ``False`` also when the deposit lacks ``struct_asym`` or ``pdbx_poly_seq_scheme``.
-    """
-    if not all(name in reference_block for name in _SCHEME_CATEGORIES):
-        return False
-    scheme = reference_block[_PDBX_POLY_SEQ_SCHEME]
-    deposited = dict(
-        zip(
-            zip(scheme["asym_id"].as_array(str), scheme["seq_id"].as_array(str), strict=True),
-            zip(
-                scheme["pdb_strand_id"].as_array(str),
-                scheme["pdb_seq_num"].as_array(str),
-                _blank_to_empty(scheme["pdb_ins_code"].as_array(str)),
-                strict=True,
-            ),
-            strict=True,
-        )
-    )
-    written = zip(
-        atom_site["auth_asym_id"].as_array(str),
-        atom_site["auth_seq_id"].as_array(str),
-        _blank_to_empty(atom_site["pdbx_PDB_ins_code"].as_array(str)),
-        strict=True,
-    )
-    return all(
-        label is None or deposited.get(label[:2]) == author_ids
-        for label, author_ids in zip(labels, written, strict=True)
-    )
-
-
 def set_deposited_structure(
     cif_file: CIFFile, atom_array: AtomArray | AtomArrayStack, deposit: Deposit
 ) -> tuple[str, ...]:
@@ -844,8 +977,7 @@ def set_deposited_structure(
         raise ValueError("Output has no deposited polymer residues")
 
     # Select the deposit's rows for the chains present, plus the monomers the model adds.
-    with_scheme = _keeps_deposited_author_ids(atom_site, labels, reference_block)
-    categories = _carried_categories(reference_block, polymer_labels, with_scheme)
+    categories = _carried_categories(reference_block, polymer_labels)
     _add_modeled_monomers(categories[_ENTITY_POLY_SEQ], atom_site, labels)
     if _CHEM_COMP in reference_block:
         components = set(atom_site["label_comp_id"].as_array(str))
