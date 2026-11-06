@@ -80,6 +80,118 @@ class ESMFold2WrapperConfig:
     revision: str | None = None
 
 
+def compute_esmfold2_trunk(
+    model: EsmFold2Model, features: dict[str, torch.Tensor], num_loops: int | None
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run the conditioning portion of ESMFold2Model's forward pass.
+
+    Parameters
+    ----------
+    features
+        Prepared features with padded, one-hot atom encodings.
+    num_loops
+        Native recycling setting, or None for the checkpoint default.
+
+    Returns
+    -------
+    tuple[Tensor, Tensor, Tensor]
+        Input embeddings, trunk pair embeddings, and relative position encoding.
+
+    Notes
+    -----
+    Mirrors esm 3.4.2 EsmFold2Model.forward up to structure_head.sample,
+    reusing its embedding, recycling, and final trunk modules.
+    """
+    token_mask = features["token_attention_mask"]
+    residue_types = F.one_hot(features["res_type"].long(), NUM_RES_TYPES).float()
+    residue_types = residue_types * token_mask.unsqueeze(-1)
+
+    msa_profile = F.one_hot(features["msa"].long(), NUM_RES_TYPES).float()
+    msa_mask = features["msa_attention_mask"].float()
+    profile = (msa_profile * msa_mask.unsqueeze(-1)).sum(dim=1)
+    profile = profile / msa_mask.sum(dim=1).clamp(min=1).unsqueeze(-1)
+
+    with torch.autocast("cuda", enabled=model.device.type == "cuda", dtype=torch.bfloat16):
+        # Build token inputs from sequence, MSA profile, and reference atom chemistry.
+        s_inputs = model.inputs_embedder(
+            aatype=residue_types,
+            profile=profile,
+            deletion_mean=features["deletion_mean"].float(),
+            ref_pos=features["ref_pos"],
+            atom_attention_mask=features["atom_attention_mask"],
+            ref_space_uid=features["ref_space_uid"],
+            ref_charge=features["ref_charge"],
+            ref_element=features["ref_element"],
+            ref_atom_name_chars=features["ref_atom_name_chars"],
+            atom_to_token=features["atom_to_token"],
+        )
+
+        # Initialize each token pair from both tokens, relative positions, and bonds.
+        z_init = model.z_init_1(s_inputs).unsqueeze(2) + model.z_init_2(s_inputs).unsqueeze(1)
+        relative_position_encoding = model.rel_pos(
+            residue_index=features["residue_index"],
+            asym_id=features["asym_id"],
+            sym_id=features["sym_id"],
+            entity_id=features["entity_id"],
+            token_index=features["token_index"],
+        )
+        z_init = (
+            z_init + relative_position_encoding + model.token_bonds(features["token_bonds"].float())
+        )
+
+        # ESMC supplies sequence representations that are projected into pair features
+        # for the folding trunk. This expensive computation is outside denoising.
+        lm_hidden_states = model._compute_lm_hidden_states(
+            features["input_ids"],
+            features["asym_id"],
+            features["residue_index"],
+            features["mol_type"],
+            token_mask,
+            lm_mask_pct=model.config.lm_mask_pct,
+        )
+        lm_z = model.language_model(lm_hidden_states.detach())
+        del lm_hidden_states
+
+        # Pair mask: (batch, tokens, tokens).
+        pair_mask = token_mask[:, :, None].float() * token_mask[:, None, :].float()
+        z = model._init_pair_state(z_init)
+        a, b = model._discretized_dynamics()
+        msa_inputs = None
+        if model.msa_encoder is not None:
+            msa_config = model.config.msa_encoder
+            msa_inputs = {
+                "msa": features["msa"],
+                "msa_attention_mask": maybe_apply_msa_column_masking(
+                    features["msa_attention_mask"], rate=msa_config.column_mask_rate
+                ),
+                "has_deletion": features["has_deletion"],
+                "deletion_value": features["deletion_value"],
+                "x_inputs": s_inputs,
+                "max_depth": msa_config.max_depth,
+                "subsample_enabled": msa_config.max_depth is not None,
+            }
+
+        # ESMFold2 runs the trunk once, then repeats it num_loops more times. The
+        # readout and coda layers further process the resulting pair embeddings. The
+        # denoiser uses these embeddings to predict clean atom coordinates.
+        loops = model.config.num_loops if num_loops is None else num_loops
+        z = model._run_one_loop(
+            z=z,
+            z_init=z_init,
+            lm_z=lm_z,
+            _msa_inputs=msa_inputs,
+            pair_mask=pair_mask,
+            a=a.view(1, 1, 1, -1).to(z),
+            b_mat=b.to(z),
+            tok_mask=token_mask,
+            total_steps=max(1, loops + 1),
+        )
+        z = model.parcae_readout(z)
+        z = model.parcae_coda(z, pair_attention_mask=pair_mask)
+
+    return s_inputs, z.float(), relative_position_encoding
+
+
 @dataclass
 class ESMFold2Wrapper:
     """A wrapper for ESMFold2.
@@ -87,9 +199,9 @@ class ESMFold2Wrapper:
     Attributes
     ----------
     model
-        ESMFold2 model. Direct construction preserves its training mode and
-        parameter gradient settings. Callers prepare the model for their use.
-        ``from_config()`` creates an evaluation-mode model with frozen parameters.
+        ESMFold2 model. Direct construction preserves its training mode and parameter
+        gradient settings. Callers prepare the model for their use.
+        :meth:`from_config()` creates an evaluation-mode model with frozen parameters.
     """
 
     model: EsmFold2Model
@@ -101,7 +213,8 @@ class ESMFold2Wrapper:
         Parameters
         ----------
         config
-            Various settings needed to instantiate/modify ``ESMFold2Model``
+            Various settings, including what's needed to instantiate/modify
+            ``ESMFold2Model``.
 
         Returns
         -------
@@ -156,6 +269,9 @@ class ESMFold2Wrapper:
             atoms = atoms[0]
 
         builder = ESMFold2InputBuilderBlockLogs()
+
+        # This context manager seeds python, numpy, pytorch (CPU/CUDA) for reproducible
+        # featurization and restores the previous random states upon exit.
         with _seed_context(seed):
             features, chains = builder.prepare_input(
                 model_input,
@@ -163,20 +279,29 @@ class ESMFold2Wrapper:
                 device=self.model.device,
             )
 
+            # Recovers atom identities in native order before replacing integer feature
+            # IDs with one-hot encodings.
             model_atoms = esmfold2_features_to_atom_array(features, chains)
             atom_mask = features["atom_attention_mask"].float()
 
-            # Atom encodings: (batch, atoms, elements) and (batch, atoms, 4, characters).
+            # This matches the encoding normally done inside native ESMFold2.forward().
+            # Padded rows get zeroed so their placeholder IDs don't become real
+            # element/name features.
+
             features["ref_element"] = F.one_hot(
                 features["ref_element"].long(), num_classes=MAX_ATOMIC_NUMBER
-            ).float() * atom_mask.unsqueeze(-1)
+            ).float() * atom_mask.unsqueeze(-1)  # (batch, atoms, elements)
 
             features["ref_atom_name_chars"] = F.one_hot(
                 features["ref_atom_name_chars"].long(), num_classes=CHAR_VOCAB_SIZE
-            ).float() * atom_mask.unsqueeze(-1).unsqueeze(-1)
+            ).float() * atom_mask.unsqueeze(-1).unsqueeze(-1)  # (batch, atoms, 4, characters)
 
             features["atom_to_token"] = features["atom_to_token"] * atom_mask.long()
-            s_inputs, z_trunk, relative_position_encoding = self._compute_trunk(features, num_loops)
+
+            # Run the language model and trunk to get their conditioning.
+            s_inputs, z_trunk, relative_position_encoding = compute_esmfold2_trunk(
+                self.model, features, num_loops
+            )
 
         return GenerativeModelInput(
             conditioning=ESMFold2Conditioning(
@@ -189,107 +314,3 @@ class ESMFold2Wrapper:
                 true_atom_array=atoms.copy(),
             )
         )
-
-    def _compute_trunk(
-        self, features: dict[str, torch.Tensor], num_loops: int | None
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Run the conditioning portion of the native standard model's forward pass.
-
-        Parameters
-        ----------
-        features
-            Prepared features with padded, one-hot atom encodings.
-        num_loops
-            Native recycling setting, or None for the checkpoint default.
-
-        Returns
-        -------
-        tuple[Tensor, Tensor, Tensor]
-            Input embeddings, trunk pair embeddings, and relative position encoding.
-
-        Notes
-        -----
-        Mirrors esm 3.4.2 EsmFold2Model.forward up to structure_head.sample,
-        reusing its embedding, recycling, and final trunk modules.
-        """
-        model = self.model
-        token_mask = features["token_attention_mask"]
-        residue_types = F.one_hot(features["res_type"].long(), NUM_RES_TYPES).float()
-        residue_types = residue_types * token_mask.unsqueeze(-1)
-
-        # Even MSA-free input contains the query row; retain its native processing.
-        msa_profile = F.one_hot(features["msa"].long(), NUM_RES_TYPES).float()
-        msa_mask = features["msa_attention_mask"].float()
-        profile = (msa_profile * msa_mask.unsqueeze(-1)).sum(dim=1)
-        profile = profile / msa_mask.sum(dim=1).clamp(min=1).unsqueeze(-1)
-
-        with torch.autocast("cuda", enabled=self.model.device.type == "cuda", dtype=torch.bfloat16):
-            s_inputs = model.inputs_embedder(
-                aatype=residue_types,
-                profile=profile,
-                deletion_mean=features["deletion_mean"].float(),
-                ref_pos=features["ref_pos"],
-                atom_attention_mask=features["atom_attention_mask"],
-                ref_space_uid=features["ref_space_uid"],
-                ref_charge=features["ref_charge"],
-                ref_element=features["ref_element"],
-                ref_atom_name_chars=features["ref_atom_name_chars"],
-                atom_to_token=features["atom_to_token"],
-            )
-            z_init = model.z_init_1(s_inputs).unsqueeze(2) + model.z_init_2(s_inputs).unsqueeze(1)
-            relative_position_encoding = model.rel_pos(
-                residue_index=features["residue_index"],
-                asym_id=features["asym_id"],
-                sym_id=features["sym_id"],
-                entity_id=features["entity_id"],
-                token_index=features["token_index"],
-            )
-            z_init = (
-                z_init
-                + relative_position_encoding
-                + model.token_bonds(features["token_bonds"].float())
-            )
-            lm_hidden_states = model._compute_lm_hidden_states(
-                features["input_ids"],
-                features["asym_id"],
-                features["residue_index"],
-                features["mol_type"],
-                token_mask,
-                lm_mask_pct=model.config.lm_mask_pct,
-            )
-            lm_z = model.language_model(lm_hidden_states.detach())
-            del lm_hidden_states
-            # Pair mask: (batch, tokens, tokens).
-            pair_mask = token_mask[:, :, None].float() * token_mask[:, None, :].float()
-            z = model._init_pair_state(z_init)
-            a, b = model._discretized_dynamics()
-            msa_inputs = None
-            if model.msa_encoder is not None:
-                msa_config = model.config.msa_encoder
-                msa_inputs = {
-                    "msa": features["msa"],
-                    "msa_attention_mask": maybe_apply_msa_column_masking(
-                        features["msa_attention_mask"], rate=msa_config.column_mask_rate
-                    ),
-                    "has_deletion": features["has_deletion"],
-                    "deletion_value": features["deletion_value"],
-                    "x_inputs": s_inputs,
-                    "max_depth": msa_config.max_depth,
-                    "subsample_enabled": msa_config.max_depth is not None,
-                }
-            loops = model.config.num_loops if num_loops is None else num_loops
-            z = model._run_one_loop(
-                z=z,
-                z_init=z_init,
-                lm_z=lm_z,
-                _msa_inputs=msa_inputs,
-                pair_mask=pair_mask,
-                a=a.view(1, 1, 1, -1).to(z),
-                b_mat=b.to(z),
-                tok_mask=token_mask,
-                total_steps=max(1, loops + 1),
-            )
-            z = model.parcae_readout(z)
-            z = model.parcae_coda(z, pair_attention_mask=pair_mask)
-
-        return s_inputs, z.float(), relative_position_encoding
