@@ -22,6 +22,21 @@ COMMON_ARGS = [
     "output",
 ]
 
+# The CLI refuses loss input files that do not exist, so every test runs in a
+# directory that holds the (empty) files its arguments name.
+LOSS_INPUT_FILES = ("test.ccp4", "test.mtz", "1vme.mtz", "bragg.mtz", "diffuse.mtz")
+
+
+@pytest.fixture(autouse=True)
+def _in_dir_with_loss_inputs(tmp_path, monkeypatch):
+    """Run each test from a directory holding the loss input files the tests name.
+
+    Side effect: changes the working directory to ``tmp_path`` for the test.
+    """
+    for name in LOSS_INPUT_FILES:
+        (tmp_path / name).touch()
+    monkeypatch.chdir(tmp_path)
+
 
 class TestFromCliUnified:
     """Test from_cli() when model and guidance_type come from CLI args."""
@@ -914,3 +929,56 @@ class TestLossConfigFile:
 
         assert excinfo.value.code == 2
         assert "Unknown option(s) ['looss']" in capsys.readouterr().err
+
+    def test_a_missing_input_file_in_a_config_file_is_a_usage_error(self, tmp_path, capsys):
+        argv = self.BASE + [
+            "--loss-config",
+            self.write_config(
+                tmp_path,
+                "real_space_density:\n  loss_options: {density: absent.ccp4, resolution: 1.8}\n",
+            ),
+        ]
+
+        with pytest.raises(SystemExit) as excinfo:
+            GuidanceConfig.from_cli(argv)
+
+        assert excinfo.value.code == 2
+        assert "density file does not exist: absent.ccp4" in capsys.readouterr().err
+
+
+class TestMissingInputFiles:
+    """A loss input that does not exist stops the run before a model is loaded."""
+
+    MODEL_ARGS = ["--model", "boltz2", "--guidance-type", "pure_guidance"]
+    STRUCTURE_ARGS = ["--protein", "1VME", "--structure", "test.cif"]
+
+    @pytest.mark.parametrize(
+        ("loss_args", "message"),
+        [
+            (
+                ["--density", "absent.ccp4", "--resolution", "1.8"],
+                "real_space_density loss's density file does not exist: absent.ccp4",
+            ),
+            (
+                ["--loss-type", "structure_factor", "--mtzfile", "absent.mtz"],
+                "structure_factor loss's mtzfile file does not exist: absent.mtz",
+            ),
+            (
+                [
+                    "--loss-type",
+                    "diffuse_bragg",
+                    "--bragg-target",
+                    "bragg.mtz",
+                    "--diffuse-target",
+                    "absent.mtz",
+                ],
+                "diffuse_bragg loss's diffuse_target file does not exist: absent.mtz",
+            ),
+        ],
+    )
+    def test_a_missing_input_file_is_a_usage_error(self, capsys, loss_args, message):
+        with pytest.raises(SystemExit) as excinfo:
+            GuidanceConfig.from_cli(self.MODEL_ARGS + self.STRUCTURE_ARGS + loss_args)
+
+        assert excinfo.value.code == 2
+        assert message in capsys.readouterr().err
