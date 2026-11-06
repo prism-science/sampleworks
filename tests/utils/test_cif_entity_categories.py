@@ -688,6 +688,14 @@ def test_saved_cif_numbers_model_added_residues_from_the_deposit(
     assert all(carried[seq] == number for seq, number, _ in expected)
 
 
+def test_carry_rejects_two_residues_at_one_deposited_position():
+    """Two residues a match gives one deposited position fail instead of sharing its ids."""
+    atoms = _output([2, 3, 3, 4])  # HIS HIS HIS HIS, the middle two both author 0
+
+    with pytest.raises(ValueError, match="name several residues"):
+        annotate_deposit_ids(atoms, Deposit.from_cif(_reference()))
+
+
 def test_alignment_reports_ambiguous_placement():
     """Three of the tag's four histidines fit in several equally good places; say so."""
     atoms = _output([2, 3, 4], renumber=True)

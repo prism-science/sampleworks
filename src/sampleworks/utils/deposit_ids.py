@@ -1,5 +1,6 @@
 """Place structures in their deposited mmCIF's numbering and carry its polymer categories."""
 
+from collections import Counter
 from dataclasses import dataclass, replace
 from typing import Any, NamedTuple, Self, TypeVar
 
@@ -457,6 +458,54 @@ def _positions_by_alignment(
     return positions
 
 
+def _one_residue_per_position(
+    positions: list[_PolySeqSchemePosition | None], atom_array: AtomArray | AtomArrayStack
+) -> list[_PolySeqSchemePosition | None]:
+    """Check that no two residues take the same deposited position and monomer.
+
+    Two residues a match cannot tell apart (e.g. one the model built, numbered like a resolved
+    one) give one position and monomer to two atoms of the same name. Different monomers at
+    one position are the deposit's microheterogeneity (a CYS/CSO site) and are allowed, as are
+    altlocs.
+
+    Parameters
+    ----------
+    positions : list[_PolySeqSchemePosition | None]
+        Deposited position per residue of ``atom_array``.
+    atom_array : AtomArray | AtomArrayStack
+        The placed structure.
+
+    Returns
+    -------
+    list[_PolySeqSchemePosition | None]
+        ``positions``, unchanged.
+
+    Raises
+    ------
+    ValueError
+        If two atoms share a position, monomer, atom name and altloc.
+    """
+    residue_of_atom = get_residue_positions(atom_array, np.arange(atom_array.array_length()))
+    altloc_ids = (
+        atom_array.altloc_id
+        if "altloc_id" in atom_array.get_annotation_categories()
+        else np.full(atom_array.array_length(), "")
+    )
+    atoms = Counter(
+        (positions[residue].label, name, atom_name, altloc_id)
+        for residue, name, atom_name, altloc_id in zip(
+            residue_of_atom, atom_array.res_name, atom_array.atom_name, altloc_ids, strict=True
+        )
+        if positions[residue] is not None
+    )
+    shared = sorted({atom[:2] for atom, count in atoms.items() if count > 1})
+    if shared:
+        raise ValueError(
+            f"{len(shared)} deposited position(s) name several residues, e.g. {shared[:3]}"
+        )
+    return positions
+
+
 def _resolve_deposit_positions(
     atom_array: AtomArray | AtomArrayStack, deposit: Deposit
 ) -> list[_PolySeqSchemePosition | None]:
@@ -464,7 +513,8 @@ def _resolve_deposit_positions(
 
     Three matches are tried in turn: ``(chain_id, res_id, ins_code)`` as the deposit's author
     ids, ``(chain_id, res_id)`` as its label chain and position, then sequence alignment
-    (``_positions_by_alignment``). The first that places every polymer residue wins.
+    (``_positions_by_alignment``). The first that places every polymer residue, and no two at
+    one position (``_one_residue_per_position``), wins.
 
     Parameters
     ----------
@@ -495,16 +545,19 @@ def _resolve_deposit_positions(
     errors: list[str] = []
     try:
         keys = list(zip(residues.chain_id, residues.res_id, residues.ins_code, strict=True))
-        return _positions_by_lookup(keys, {p.author_key: p for p in scheme}, residues)
+        positions = _positions_by_lookup(keys, {p.author_key: p for p in scheme}, residues)
+        return _one_residue_per_position(positions, atom_array)
     except ValueError as error:
         errors.append(f"author lookup: {error}")
     try:
         keys = list(zip(residues.chain_id, residues.res_id, strict=True))
-        return _positions_by_lookup(keys, {(p.asym_id, p.seq_id): p for p in scheme}, residues)
+        positions = _positions_by_lookup(keys, {(p.asym_id, p.seq_id): p for p in scheme}, residues)
+        return _one_residue_per_position(positions, atom_array)
     except ValueError as error:
         errors.append(f"label lookup: {error}")
     try:
-        return _positions_by_alignment(residues, scheme)
+        positions = _positions_by_alignment(residues, scheme)
+        return _one_residue_per_position(positions, atom_array)
     except ValueError as error:
         errors.append(f"sequence alignment: {error}")
     raise ValueError("; ".join(errors))
