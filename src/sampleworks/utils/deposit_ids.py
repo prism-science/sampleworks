@@ -1,7 +1,7 @@
 """Place structures in their deposited mmCIF's numbering and carry its polymer categories."""
 
 from dataclasses import dataclass, replace
-from typing import NamedTuple, Self, TypeVar
+from typing import Any, NamedTuple, Self, TypeVar
 
 import numpy as np
 from atomworks.io.transforms.categories import category_to_dict
@@ -31,6 +31,7 @@ _STRUCT_ASYM = "struct_asym"
 _PDBX_POLY_SEQ_SCHEME = "pdbx_poly_seq_scheme"
 _CHEM_COMP = "chem_comp"
 _STRUCT_CONN = "struct_conn"
+_PDBX_NONPOLY_SCHEME = "pdbx_nonpoly_scheme"
 # The dictionary's value for an item that does not apply, e.g. label_seq_id of a ligand atom.
 _INAPPLICABLE = "."
 # entity_poly_seq.hetero marks positions with more than one monomer; absent, it defaults to no.
@@ -99,6 +100,8 @@ DEPOSIT_LABEL_ANNOTATIONS = (
     "deposit_label_seq_id",
     "deposit_label_entity_id",
 )
+# Each atom's deposited pdbx_nonpoly_scheme row, -1 outside the deposit's ligands and waters.
+_DEPOSIT_NONPOLY_ROW = "deposit_nonpoly_row"
 
 
 @dataclass(frozen=True)
@@ -202,11 +205,14 @@ class Deposit:
         Canonical names of the monomers its ``entity_poly_seq`` lists.
     scheme : tuple[_PolySeqSchemePosition, ...]
         Its polymer positions in ``pdbx_poly_seq_scheme`` order (``_scheme_positions``).
+    nonpoly : dict[str, Any]
+        Its ``pdbx_nonpoly_scheme`` columns, empty when it has none.
     """
 
     block: CIFBlock
     monomers: frozenset[str]
     scheme: tuple[_PolySeqSchemePosition, ...]
+    nonpoly: dict[str, Any]
 
     @classmethod
     def from_cif(cls, reference: CIFFile) -> Self:
@@ -236,7 +242,9 @@ class Deposit:
             _canonical_monomer(str(name))
             for name in block[_ENTITY_POLY_SEQ]["mon_id"].as_array(str)
         )
-        return cls(block, monomers, _scheme_positions(block))
+        return cls(
+            block, monomers, _scheme_positions(block), category_to_dict(block, _PDBX_NONPOLY_SCHEME)
+        )
 
 
 _Structure = TypeVar("_Structure", AtomArray, AtomArrayStack)
@@ -252,10 +260,7 @@ class _Residues(NamedTuple):
     hetero : np.ndarray
         Whether the residue is written as ``HETATM``.
     polymer : np.ndarray
-        Whether the residue belongs to a polymer chain (``_polymer_residues``).
-    entity_id : np.ndarray
-        Entity id ``set_structure`` would write. Under atomworks' patch of it, that is the
-        ``chain_entity`` annotation, or one entity per chain.
+        Whether the residue belongs to a polymer chain.
     """
 
     chain_id: np.ndarray
@@ -264,13 +269,6 @@ class _Residues(NamedTuple):
     res_name: np.ndarray
     hetero: np.ndarray
     polymer: np.ndarray
-    entity_id: np.ndarray
-
-
-def _chain_entity_ids(chain_ids: np.ndarray) -> np.ndarray:
-    """Number entities one per chain, in order of appearance, as ``set_structure`` does."""
-    numbers = {chain: str(number) for number, chain in enumerate(dict.fromkeys(chain_ids), 1)}
-    return np.array([numbers[chain] for chain in chain_ids])
 
 
 def _residues(atom_array: AtomArray | AtomArrayStack, deposit: Deposit) -> _Residues:
@@ -300,11 +298,6 @@ def _residues(atom_array: AtomArray | AtomArrayStack, deposit: Deposit) -> _Resi
     listed = np.array(
         [_canonical_monomer(str(name)) in deposit.monomers for name in res_name], dtype=bool
     )
-    entity_ids = (
-        atom_array.chain_entity.astype(str)
-        if "chain_entity" in atom_array.get_annotation_categories()
-        else _chain_entity_ids(atom_array.chain_id)
-    )
     return _Residues(
         chain_id=atom_array.chain_id[starts],
         res_id=atom_array.res_id[starts].astype(str),
@@ -312,7 +305,6 @@ def _residues(atom_array: AtomArray | AtomArrayStack, deposit: Deposit) -> _Resi
         res_name=res_name,
         hetero=hetero,
         polymer=~hetero | listed,
-        entity_id=entity_ids[starts],
     )
 
 
@@ -518,6 +510,89 @@ def _resolve_deposit_positions(
     raise ValueError("; ".join(errors))
 
 
+def _match_deposited_ligands(
+    residues: _Residues, positions: list[_PolySeqSchemePosition | None], nonpoly: dict[str, Any]
+) -> dict[int, int]:
+    """Match residues without a polymer position to the deposit's ``pdbx_nonpoly_scheme`` rows.
+
+    A residue matches a scheme row when its ``res_id``, ``ins_code`` and ``res_name`` equal the
+    row's ``pdb_seq_num``, ``pdb_ins_code`` and ``mon_id``, and its ``chain_id`` is the row's
+    ``asym_id`` or ``pdb_strand_id`` (the input may carry either). Residues without a match,
+    such as a ligand the deposit lacks, are left out.
+
+    Parameters
+    ----------
+    residues : _Residues
+        Residues to match.
+    positions : list[_PolySeqSchemePosition | None]
+        Deposited polymer position per residue; only residues without one are matched.
+    nonpoly : dict[str, Any]
+        Deposited ``pdbx_nonpoly_scheme`` columns, empty when the deposit has none.
+
+    Returns
+    -------
+    dict[int, int]
+        Residue index -> ``pdbx_nonpoly_scheme`` row index.
+
+    Raises
+    ------
+    ValueError
+        If a residue matches several scheme rows.
+    """
+    if not nonpoly:
+        return {}
+    candidates: dict[tuple[str, ...], set[int]] = {}  # (chain, number, code, monomer) -> rows
+    for index, (asym, strand, number, code, monomer) in enumerate(
+        zip(
+            nonpoly["asym_id"],
+            nonpoly["pdb_strand_id"],
+            nonpoly["pdb_seq_num"],
+            _blank_to_empty(nonpoly["pdb_ins_code"]),
+            nonpoly["mon_id"],
+            strict=True,
+        )
+    ):
+        for chain in (asym, strand):
+            candidates.setdefault((chain, number, code, monomer), set()).add(index)
+    ligands: dict[int, int] = {}
+    for residue, (position, *key) in enumerate(
+        zip(
+            positions,
+            residues.chain_id,
+            residues.res_id,
+            residues.ins_code,
+            residues.res_name,
+            strict=True,
+        )
+    ):
+        matches = candidates.get(tuple(key), set()) if position is None else set()
+        if len(matches) > 1:
+            raise ValueError(f"{key[3]} {key[0]} {key[1]}{key[2]} names several deposited ligands")
+        if matches:
+            (ligands[residue],) = matches
+    return ligands
+
+
+def _new_entity_ids(reference_block: CIFBlock, residue_names: list[str]) -> dict[str, str]:
+    """Number one new entity per residue name, after the deposit's highest entity id.
+
+    Parameters
+    ----------
+    reference_block : CIFBlock
+        Deposited block with ``entity``.
+    residue_names : list[str]
+        Names of residues the deposit does not list.
+
+    Returns
+    -------
+    dict[str, str]
+        Residue name -> new entity id.
+    """
+    deposited = [int(entity_id) for entity_id in reference_block[_ENTITY]["id"].as_array(str)]
+    first = max(deposited, default=0) + 1
+    return {name: str(first + i) for i, name in enumerate(sorted(set(residue_names)))}
+
+
 def annotate_deposit_ids(
     atom_array: _Structure,
     deposit: Deposit,
@@ -526,8 +601,11 @@ def annotate_deposit_ids(
     """Return a copy of ``atom_array`` carrying each residue's deposited ids.
 
     A polymer residue takes its position's author ids as ``chain_id``, ``res_id`` and
-    ``ins_code``, and its label ids as the ``DEPOSIT_LABEL_ANNOTATIONS``. A residue without a
-    position (a ligand or water) keeps its ids and entity and has no sequence position (``.``).
+    ``ins_code``, and its label ids as the ``DEPOSIT_LABEL_ANNOTATIONS``. A ligand or water the
+    deposit's ``pdbx_nonpoly_scheme`` lists (``_match_deposited_ligands``) takes that row's ids
+    the same way, and its row as ``_DEPOSIT_NONPOLY_ROW``. Any other residue keeps its ids under
+    a new entity per residue name (``_new_entity_ids``), so it cannot claim a deposited entity.
+    Residues outside the polymer have no sequence position (``.``).
 
     Parameters
     ----------
@@ -546,45 +624,82 @@ def annotate_deposit_ids(
     Raises
     ------
     ValueError
-        If ``positions`` is omitted and the residues cannot be placed.
+        If ``positions`` is omitted and the residues cannot be placed, or a ligand matches
+        several deposited ones.
     """
     if positions is None:
         positions = _resolve_deposit_positions(atom_array, deposit)
+    reference_block = deposit.block
     residues = _residues(atom_array, deposit)
-    starts = get_residue_starts(atom_array)
+    nonpoly = deposit.nonpoly
+    ligands = _match_deposited_ligands(residues, positions, nonpoly)
+    new_entity_ids = _new_entity_ids(
+        reference_block,
+        [
+            str(name)
+            for residue, (position, name) in enumerate(zip(positions, residues.res_name))
+            if position is None and residue not in ligands
+        ],
+    )
+    # (author chain, number, insertion code), (label asym, seq, entity) per residue
+    residue_ids: list[tuple[tuple[str, int, str], _Label]] = []
+    for residue, (position, chain, number, code, name) in enumerate(
+        zip(
+            positions,
+            residues.chain_id,
+            residues.res_id,
+            residues.ins_code,
+            residues.res_name,
+            strict=True,
+        )
+    ):
+        if position is not None:
+            author = (position.pdb_strand_id, int(position.pdb_seq_num), position.pdb_ins_code)
+            residue_ids.append((author, position.label))
+        elif residue in ligands:
+            row = ligands[residue]
+            author = (
+                str(nonpoly["pdb_strand_id"][row]),
+                int(nonpoly["pdb_seq_num"][row]),
+                str(_blank_to_empty(nonpoly["pdb_ins_code"])[row]),
+            )
+            label = (str(nonpoly["asym_id"][row]), _INAPPLICABLE, str(nonpoly["entity_id"][row]))
+            residue_ids.append((author, label))
+        else:
+            residue_ids.append(
+                (
+                    (str(chain), int(number), str(code)),
+                    (str(chain), _INAPPLICABLE, new_entity_ids[str(name)]),
+                )
+            )
     residue_of_atom = get_residue_positions(atom_array, np.arange(atom_array.array_length()))
     annotated = atom_array.copy()
-    placed = np.flatnonzero([position is not None for position in positions])
-    placed_positions = [position for position in positions if position is not None]
-    for name, values in (
-        ("chain_id", [p.pdb_strand_id for p in placed_positions]),
-        ("res_id", [int(p.pdb_seq_num) for p in placed_positions]),
-        ("ins_code", [p.pdb_ins_code for p in placed_positions]),
-    ):
-        residue_values = atom_array.get_annotation(name)[starts].copy()  # (n_residues,)
-        residue_values[placed] = values
-        annotated.set_annotation(name, residue_values[residue_of_atom])
-    labels = [
-        position.label if position is not None else (str(chain), _INAPPLICABLE, str(entity))
-        for position, chain, entity in zip(
-            positions, residues.chain_id, residues.entity_id, strict=True
+    for index, name in enumerate(("chain_id", "res_id", "ins_code")):
+        values = np.array([author[index] for author, _ in residue_ids])
+        annotated.set_annotation(
+            name, values[residue_of_atom].astype(atom_array.get_annotation(name).dtype)
         )
-    ]
     for index, name in enumerate(DEPOSIT_LABEL_ANNOTATIONS):
-        values = np.array([label[index] for label in labels], dtype=object)
-        annotated.set_annotation(name, values[residue_of_atom].astype(str))
+        values = np.array([label[index] for _, label in residue_ids])
+        annotated.set_annotation(name, values[residue_of_atom])
+    nonpoly_rows = np.array([ligands.get(residue, -1) for residue in range(len(residue_ids))])
+    annotated.set_annotation(_DEPOSIT_NONPOLY_ROW, nonpoly_rows[residue_of_atom])
     return annotated
 
 
 def _carried_categories(
-    reference_block: CIFBlock, polymer_labels: set[_Label]
+    reference_block: CIFBlock,
+    polymer_labels: set[_Label],
+    nonpoly: dict[str, Any],
+    ligand_rows: list[int],
 ) -> dict[str, dict[str, list[str]]]:
-    """Select the deposit's category rows for the polymer chains and entities present.
+    """Select the deposit's category rows for the polymer chains and ligands present.
 
     ``entity``, ``entity_poly`` and ``entity_poly_seq`` rows are kept for the entities in
-    ``polymer_labels``, and ``struct_asym`` and ``pdbx_poly_seq_scheme`` rows for its chains.
-    The scheme's ``auth_seq_num`` and ``auth_mon_id`` are filled at modeled positions and
-    ``?`` elsewhere.
+    ``polymer_labels``, and ``struct_asym`` and ``pdbx_poly_seq_scheme`` rows for its chains;
+    ``entity`` and ``struct_asym`` also for the ligands, whose ``pdbx_nonpoly_scheme`` rows are
+    kept too. The scheme's ``auth_seq_num`` and ``auth_mon_id`` are filled at modeled
+    positions and ``?`` elsewhere.
 
     Parameters
     ----------
@@ -592,6 +707,10 @@ def _carried_categories(
         Deposited block with the polymer entity categories.
     polymer_labels : set[_Label]
         Deposited labels of the output's polymer residues.
+    nonpoly : dict[str, Any]
+        Deposited ``pdbx_nonpoly_scheme`` columns, empty when the deposit has none.
+    ligand_rows : list[int]
+        Sorted ``pdbx_nonpoly_scheme`` rows of the output's deposited ligands.
 
     Returns
     -------
@@ -600,16 +719,22 @@ def _carried_categories(
     """
     asym_ids = {asym_id for asym_id, _, _ in polymer_labels}
     entity_ids = {entity_id for _, _, entity_id in polymer_labels}
+    ligand_asym_ids = {str(nonpoly["asym_id"][row]) for row in ligand_rows}
+    ligand_entity_ids = {str(nonpoly["entity_id"][row]) for row in ligand_rows}
     categories = {
         name: _rows_where(reference_block[name], column, ids_to_keep)
         for name, column, ids_to_keep in (
-            (_ENTITY, "id", entity_ids),
+            (_ENTITY, "id", entity_ids | ligand_entity_ids),
             (_ENTITY_POLY, "entity_id", entity_ids),
             (_ENTITY_POLY_SEQ, "entity_id", entity_ids),
-            (_STRUCT_ASYM, "id", asym_ids),
+            (_STRUCT_ASYM, "id", asym_ids | ligand_asym_ids),
             (_PDBX_POLY_SEQ_SCHEME, "asym_id", asym_ids),
         )
     }
+    if ligand_rows:
+        categories[_PDBX_NONPOLY_SCHEME] = {
+            column: list(values[ligand_rows]) for column, values in nonpoly.items()
+        }
     carried_scheme = categories[_PDBX_POLY_SEQ_SCHEME]
     modeled = {(asym_id, seq_id) for asym_id, seq_id, _ in polymer_labels}
     has_coords = [
@@ -777,7 +902,7 @@ def set_deposited_structure(
     cif_file : CIFFile
         Output CIF. Side effect: the structure and carried categories are written into it.
     atom_array : AtomArray | AtomArrayStack
-        Structure with the ``DEPOSIT_LABEL_ANNOTATIONS``.
+        Structure annotated by ``annotate_deposit_ids``.
     deposit : Deposit
         The deposit the annotations came from.
 
@@ -791,7 +916,9 @@ def set_deposited_structure(
     ValueError
         If ``atom_array`` lacks the annotations or has no deposited polymer residue.
     """
-    missing = set(DEPOSIT_LABEL_ANNOTATIONS) - set(atom_array.get_annotation_categories())
+    missing = {*DEPOSIT_LABEL_ANNOTATIONS, _DEPOSIT_NONPOLY_ROW} - set(
+        atom_array.get_annotation_categories()
+    )
     if missing:
         raise ValueError(f"Atom array lacks deposit annotations {sorted(missing)}")
     reference_block = deposit.block
@@ -811,8 +938,10 @@ def set_deposited_structure(
     if not polymer_labels:
         raise ValueError("Output has no deposited polymer residues")
 
+    ligand_rows = sorted(set(atom_array.get_annotation(_DEPOSIT_NONPOLY_ROW).tolist()) - {-1})
+
     # Select the deposit's rows for the chains present, plus the monomers the model adds.
-    categories = _carried_categories(reference_block, polymer_labels)
+    categories = _carried_categories(reference_block, polymer_labels, deposit.nonpoly, ligand_rows)
     _add_modeled_monomers(categories[_ENTITY_POLY_SEQ], atom_site, labels)
     if _CHEM_COMP in reference_block:
         components = set(atom_site["label_comp_id"].as_array(str))

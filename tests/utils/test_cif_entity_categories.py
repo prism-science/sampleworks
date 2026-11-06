@@ -335,11 +335,12 @@ def test_carry_copies_deposited_chem_comp_rows(caplog: pytest.LogCaptureFixture)
     ],
 )
 def test_carry_keeps_polymer_beside_non_polymer(positions, ligand, renumber):
-    """A ligand or water keeps its chain, gets no sequence position, stays out of the carry.
+    """A ligand or water the deposit lacks keeps its chain, under a new entity, unsequenced.
 
     6b8x numbers its glycerols 301-303 inside chain A's 1-321, so a non-polymer row whose
     author number is also a deposited sequence position must not be read as a renamed
-    residue, on either path.
+    residue, on either path. Its entity is numbered after the deposit's (1 and 2), so it
+    cannot claim the polymer's.
     """
     atoms = _output(positions, extra=(ligand,), renumber=renumber)
     ligand_chain = atoms.chain_id[atoms.res_name == ligand[2]][0]
@@ -353,7 +354,7 @@ def test_carry_keeps_polymer_beside_non_polymer(positions, ligand, renumber):
     ]
     assert {_column(output, "atom_site", "label_asym_id")[i] for i in ligand_rows} == {ligand_chain}
     assert {_column(output, "atom_site", "label_seq_id")[i] for i in ligand_rows} == {"."}
-    assert {_column(output, "atom_site", "label_entity_id")[i] for i in ligand_rows} == {"1"}
+    assert {_column(output, "atom_site", "label_entity_id")[i] for i in ligand_rows} == {"3"}
     polymer_seq = [
         seq
         for i, seq in enumerate(_column(output, "atom_site", "label_seq_id"))
@@ -533,12 +534,12 @@ _DEPOSIT_READS = {
     ],
 )
 def test_carry_writes_deposited_ids(resources_dir: Path, deposit, structure, read):
-    """Real data: polymer residues take the deposit's label ids and keep their author ids.
+    """Real data: residues and ligands take the deposit's label ids and keep their author ids.
 
     Inputs are RCSB CIFs read by label or author ids, renumbered as a model does or not, or
-    density inputs (author values in both columns). Each output row is checked against the
-    input atom it was written from: its author ids must be that atom's, and its label ids the
-    deposit's for those author ids.
+    density inputs (author values in both columns). Each output row the deposit lists is
+    checked against the input atom it was written from: its author ids must be that atom's,
+    and its label ids the deposit's for those author ids.
     """
     deposited = _read_by_author(resources_dir / deposit)
     deposited_labels = {
@@ -572,15 +573,19 @@ def test_carry_writes_deposited_ids(resources_dir: Path, deposit, structure, rea
         ),
         strict=True,
     )
-    polymer = [deposited_labels.get(key, ("", ".", ""))[1] != "." for key in author_ids]
-    expected = [(*key, *deposited_labels[key]) for key, keep in zip(author_ids, polymer) if keep]
+    listed = [key in deposited_labels for key in author_ids]
+    expected = [(*key, *deposited_labels[key]) for key, keep in zip(author_ids, listed) if keep]
     actual = [
         (chain, number, "" if code == "." else code, *labels)
-        for (chain, number, code, *labels), keep in zip(written, polymer, strict=True)
+        for (chain, number, code, *labels), keep in zip(written, listed, strict=True)
         if keep
     ]
     assert expected
     assert actual == expected
+    ligand_asyms = {asym for *_, asym, seq, _ in expected if seq == "."}
+    if ligand_asyms:
+        assert set(_column(output, "pdbx_nonpoly_scheme", "asym_id")) == ligand_asyms
+        assert ligand_asyms <= set(_column(output, "struct_asym", "id"))
 
 
 # The eight N-terminal residues of 1VME's deposited sequence that its experiment never resolved.
