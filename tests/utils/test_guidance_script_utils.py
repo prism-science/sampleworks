@@ -113,6 +113,7 @@ def test_save_everything_uses_model_atom_array_for_mismatch(
         traj_next_step=[],
         final_state=final_state,
         model_atom_array=model_atom_array,
+        deposit=guidance_script_utils._load_deposit(args.protein),
     )
 
     saved = ensure_atom_array_stack(load_any(tmp_path / "refined.cif"))
@@ -122,18 +123,18 @@ def test_save_everything_uses_model_atom_array_for_mismatch(
     assert "without polymer entity categories" in caplog.text
 
 
-def test_load_reference_cif_returns_none_for_non_deposited_name(
+def test_load_deposit_returns_none_for_non_deposited_name(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ):
     """A name that is not an RCSB id loads nothing, warns, and never touches the cache."""
     monkeypatch.setattr(guidance_script_utils, "_RCSB_CACHE", tmp_path / "rcsb-cache")
 
-    assert guidance_script_utils._load_reference_cif("example_run") is None
+    assert guidance_script_utils._load_deposit("example_run") is None
     assert "without polymer entity categories" in caplog.text
     assert not (tmp_path / "rcsb-cache").exists()
 
 
-def test_load_reference_cif_caches_atomically(
+def test_load_deposit_caches_atomically(
     tmp_path: Path, resources_dir: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Populate the shared cache in one move and reuse it without fetching again."""
@@ -159,14 +160,14 @@ def test_load_reference_cif_caches_atomically(
         """
         fetch_calls.append(Path(target_path))
         downloaded = Path(target_path) / f"{pdb_id}.{format}"
-        downloaded.write_bytes((resources_dir / "1vme" / "1vme_final.cif").read_bytes())
+        downloaded.write_bytes((resources_dir / "1vme" / "1vme_rcsb.cif").read_bytes())
         return str(downloaded)
 
     monkeypatch.setattr(guidance_script_utils, "fetch", fetch_reference)
     monkeypatch.setattr(guidance_script_utils, "_RCSB_CACHE", cache_dir)
 
-    first = guidance_script_utils._load_reference_cif("1vme_0.5occA")
-    second = guidance_script_utils._load_reference_cif("1VME_1.0occB")
+    first = guidance_script_utils._load_deposit("1vme_0.5occA")
+    second = guidance_script_utils._load_deposit("1VME_1.0occB")
 
     assert first is not None and second is not None
     assert len(fetch_calls) == 1
@@ -238,6 +239,7 @@ def test_save_everything_writes_validated_metadata_to_all_cifs(
         traj_denoised=[coords],
         traj_next_step=[coords],
         final_state=coords,
+        deposit=guidance_script_utils._load_deposit(args.protein),
     )
 
     assert len(fetch_calls) == 1
