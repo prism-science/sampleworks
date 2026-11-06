@@ -116,8 +116,11 @@ def water() -> AtomArray:
     return residue("HOH")
 
 
-@pytest.mark.parametrize("deviation", [0.0, 0.9 * BOND_TOLERANCE, -0.9 * BOND_TOLERANCE])
-def test_bond_deviation_within_tolerance_is_free(water, deviation):
+@pytest.mark.parametrize(
+    ["deviation", "expected"],
+    [[0.0, 0.0], [0.9 * BOND_TOLERANCE, 0.0], [-0.9 * BOND_TOLERANCE, 0.0]]
+)
+def test_bond_deviation_values(water, deviation, expected):
     """Bonds stretched or compressed by less than ``bond_tolerance`` cost nothing.
 
     Parameters
@@ -126,7 +129,7 @@ def test_bond_deviation_within_tolerance_is_free(water, deviation):
         Signed change of each O-H bond from its ideal length, in Å.
     """
     loss = make_loss(water)
-    assert loss.bond_length_loss(water_coords(OH_IDEAL_LENGTH + deviation)) == 0.0
+    assert loss.bond_length_loss(water_coords(OH_IDEAL_LENGTH + deviation)) == expected
 
 
 @pytest.mark.parametrize("bond_power", [1, 2])
@@ -173,12 +176,13 @@ def test_clash_penalty_grows_as_atoms_overlap():
 def test_clash_gradient_pushes_atoms_apart():
     """A gradient-descent step on a clashing pair increases their separation."""
     loss = make_loss(single_atom_residues("C"))
-    coords = pair_coords(1.2).requires_grad_(True)
+    distance = 1.2
+    coords = pair_coords(distance).requires_grad_(True)
     loss.collision_loss(coords).backward()
 
     assert coords.grad is not None
     stepped = coords.detach() - 0.01 * coords.grad
-    assert (stepped[0, 1] - stepped[0, 0]).norm() > 1.2
+    assert (stepped[0, 1] - stepped[0, 0]).norm() > distance
 
 
 def test_every_clashing_ensemble_member_receives_a_gradient():
@@ -212,10 +216,11 @@ def test_unrecognized_element_uses_the_fallback_radius():
     """
     unknown = make_loss(single_atom_residues("?"))
     carbon = make_loss(single_atom_residues("C"))
+    distance = 1.0 + CLASH_PADDING  # 2 * gemmi's unknown element radius + padding.
 
-    assert unknown.collision_loss(pair_coords(1.35)) > 0
-    assert unknown.collision_loss(pair_coords(1.45)) == 0.0
-    assert carbon.collision_loss(pair_coords(1.45)) > 0
+    assert unknown.collision_loss(pair_coords(distance - 0.05)) > 0
+    assert unknown.collision_loss(pair_coords(distance)) == 0.0
+    assert carbon.collision_loss(pair_coords(distance + 0.05)) > 0
 
 
 @pytest.mark.parametrize("weight", [0.0, 0.5, 3.0])
