@@ -723,6 +723,79 @@ def resolve_deposit_positions(
     raise ValueError("; ".join(errors))
 
 
+def _walk_deposited_positions(
+    atom_array: AtomArray | AtomArrayStack,
+    known: list[PolySeqSchemePosition | None],
+    deposit: Deposit,
+) -> list[PolySeqSchemePosition | None]:
+    """Place each polymer residue without a position from the nearest placed one in its chain.
+
+    A residue ``k`` polymer residues from the nearest placed residue of its chain (before it,
+    else after) takes the position ``k`` steps from that residue's in its deposited chain's
+    ``pdbx_poly_seq_scheme`` order. That order follows the deposit's numbering through skips
+    and insertion codes (thrombin's 149A-149E), which counting residue numbers does not.
+
+    Parameters
+    ----------
+    atom_array : AtomArray | AtomArrayStack
+        Structure whose residues ``known`` describes, e.g. a model with built residues.
+    known : list[PolySeqSchemePosition | None]
+        Deposited position per residue, ``None`` where unknown.
+    deposit : Deposit
+        The deposit to place them in.
+
+    Returns
+    -------
+    list[PolySeqSchemePosition | None]
+        Deposited position per residue, ``None`` for non-polymer residues.
+
+    Raises
+    ------
+    ValueError
+        If a chain has no placed residue, a residue would fall outside its deposited chain or
+        names a monomer its position does not list, or two residues share a position
+        (``_one_residue_per_position``).
+    """
+    residues = _residues(atom_array, deposit)
+    chain_positions: dict[str, list[PolySeqSchemePosition]] = {}  # asym_id -> scheme order
+    for position in deposit.scheme:
+        chain_positions.setdefault(position.asym_id, []).append(position)
+    index_of = {
+        (position.asym_id, position.seq_id): index
+        for positions in chain_positions.values()
+        for index, position in enumerate(positions)
+    }
+    positions = list(known)
+    for chain in dict.fromkeys(residues.chain_id):
+        rows = np.flatnonzero((residues.chain_id == chain) & residues.polymer)
+        if rows.size == 0:
+            continue  # ligands and waters
+        placed = np.flatnonzero([positions[row] is not None for row in rows])  # ranks in rows
+        if placed.size == 0:
+            raise ValueError(f"Chain {chain} has no residue placed in the deposit")
+        nearest = placed[
+            np.clip(np.searchsorted(placed, np.arange(rows.size), "right") - 1, 0, None)
+        ]
+        for rank, (row, anchor_rank) in enumerate(zip(rows, nearest, strict=True)):
+            if positions[row] is not None:
+                continue
+            anchor = positions[rows[anchor_rank]]
+            assert anchor is not None
+            deposited = chain_positions[anchor.asym_id]
+            index = index_of[(anchor.asym_id, anchor.seq_id)] + rank - anchor_rank
+            name = str(residues.res_name[row])
+            residue = f"{name} {chain} {residues.res_id[row]}{residues.ins_code[row]}"
+            if not 0 <= index < len(deposited):
+                raise ValueError(f"{residue} lies outside deposited chain {anchor.asym_id}")
+            if _canonical_monomer(name) not in deposited[index].monomers:
+                raise ValueError(
+                    f"{residue} lands on deposited {sorted(deposited[index].monomers)} at "
+                    f"{anchor.asym_id} {deposited[index].seq_id}"
+                )
+            positions[row] = deposited[index]
+    return _one_residue_per_position(positions, atom_array)
+
+
 def _match_deposited_ligands(
     residues: _Residues, positions: list[PolySeqSchemePosition | None], nonpoly: dict[str, Any]
 ) -> dict[int, int]:
@@ -804,6 +877,58 @@ def _new_entity_ids(reference_block: CIFBlock, residue_names: list[str]) -> dict
     deposited = [int(entity_id) for entity_id in reference_block[_ENTITY]["id"].as_array(str)]
     first = max(deposited, default=0) + 1
     return {name: str(first + i) for i, name in enumerate(sorted(set(residue_names)))}
+
+
+def place_in_deposit(
+    model_atom_array: AtomArray,
+    input_atom_array: AtomArray,
+    model_indices: np.ndarray,
+    input_indices: np.ndarray,
+    deposit: Deposit,
+) -> AtomArray:
+    """Annotate a model with deposited ids through the input it was matched to.
+
+    The input's residues are placed in the deposit (``resolve_deposit_positions``), each model
+    residue with a matched atom takes its input residue's position, and the residues the model
+    built are placed from their neighbors along the deposited chain
+    (``_walk_deposited_positions``).
+
+    Parameters
+    ----------
+    model_atom_array : AtomArray
+        Model topology, ``n_model`` atoms.
+    input_atom_array : AtomArray
+        Input topology the model was matched to, ``n_input`` atoms.
+    model_indices, input_indices : np.ndarray
+        Matched atoms, ``(n_common,)`` indices into each array (``AtomReconciler``).
+    deposit : Deposit
+        The deposit the input came from.
+
+    Returns
+    -------
+    AtomArray
+        Annotated copy of ``model_atom_array`` (``annotate_deposit_ids``).
+
+    Raises
+    ------
+    ValueError
+        If the input cannot be placed, or a model residue cannot.
+
+    Notes
+    -----
+    A model residue whose atoms match two input residues takes the position of the first,
+    without checking that the two agree; only the one-residue-per-position check
+    (``_one_residue_per_position``) would catch a resulting clash.
+    """
+    input_positions = resolve_deposit_positions(input_atom_array, deposit)
+    model_residue = get_residue_positions(model_atom_array, model_indices)  # (n_common,)
+    input_residue = get_residue_positions(input_atom_array, input_indices)  # (n_common,)
+    known: list[PolySeqSchemePosition | None] = [None] * len(get_residue_starts(model_atom_array))
+    for residue, matched in zip(model_residue, input_residue, strict=True):
+        # A model residue matched to atoms of two input residues keeps the first one's position.
+        known[residue] = known[residue] or input_positions[matched]
+    positions = _walk_deposited_positions(model_atom_array, known, deposit)
+    return annotate_deposit_ids(model_atom_array, deposit, positions)
 
 
 def annotate_deposit_ids(
