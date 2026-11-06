@@ -280,7 +280,7 @@ def patch_individual_cif_file(
         logger.error(msg)
         return msg
 
-    # CodeRabbit improved this: we are now not chain agnostic, so we can handle multiple chains
+        # CodeRabbit improved this: we are now not chain agnostic, so we can handle multiple chains
         ref_keys = list(dict.fromkeys(zip(reference.chain_id.tolist(), reference.res_id.tolist())))
     cif_keys = list(dict.fromkeys(zip(asym_unit.chain_id.tolist(), asym_unit.res_id.tolist())))
 
