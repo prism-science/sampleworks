@@ -10,6 +10,7 @@ import sampleworks.utils.guidance_script_utils as guidance_script_utils
 import torch
 from atomworks.io.transforms.atom_array import ensure_atom_array_stack
 from atomworks.io.utils.io_utils import load_any
+from biotite.database import RequestError
 from biotite.structure import AtomArrayStack
 from biotite.structure.io.pdbx.cif import CIFFile
 from sampleworks.core.scalers.step_scalers import (
@@ -133,6 +134,57 @@ def test_load_deposit_returns_none_for_non_deposited_name(
     assert guidance_script_utils._load_deposit("example_run") is None
     assert "without polymer entity categories" in caplog.text
     assert not (tmp_path / "rcsb-cache").exists()
+
+
+def _unreachable_rcsb(path: Path) -> None:
+    """Fail as a fetch from an unreachable RCSB does."""
+    raise RequestError("RCSB is down")
+
+
+def _error_page(path: Path) -> None:
+    """Write an HTML error page where the deposited CIF should be."""
+    path.write_text("<html>Not Found</html>")
+
+
+@pytest.mark.parametrize(
+    ("download", "reason"),
+    [(_unreachable_rcsb, "RCSB is down"), (_error_page, "Expected one CIF block")],
+    ids=["fetch-fails", "corrupt-download"],
+)
+def test_load_deposit_returns_none_when_the_deposit_cannot_be_loaded(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    download,
+    reason,
+):
+    """A failed fetch or an unreadable download warns and loads nothing."""
+
+    def fetch_reference(pdb_id: str, *, format: str, target_path: str) -> str:
+        """Fail or write ``download``'s file, as a faulty RCSB fetch would."""
+        path = Path(target_path) / f"{pdb_id}.{format}"
+        download(path)
+        return str(path)
+
+    monkeypatch.setattr(guidance_script_utils, "fetch", fetch_reference)
+    monkeypatch.setattr(guidance_script_utils, "_RCSB_CACHE", tmp_path / "rcsb-cache")
+
+    assert guidance_script_utils._load_deposit("1vme_0.5occA") is None
+    assert reason in caplog.text
+
+
+def test_load_deposit_raises_unexpected_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """An error that is not a fetch or read failure is a bug, so it is not swallowed."""
+
+    def fetch_reference(pdb_id: str, *, format: str, target_path: str) -> str:
+        """Fail the way a programming error would."""
+        raise TypeError("unexpected")
+
+    monkeypatch.setattr(guidance_script_utils, "fetch", fetch_reference)
+    monkeypatch.setattr(guidance_script_utils, "_RCSB_CACHE", tmp_path / "rcsb-cache")
+
+    with pytest.raises(TypeError, match="unexpected"):
+        guidance_script_utils._load_deposit("1vme_0.5occA")
 
 
 def test_load_deposit_caches_atomically(
