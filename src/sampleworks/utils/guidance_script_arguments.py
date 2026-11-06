@@ -646,6 +646,7 @@ def loss_config_from_args(
 
     Only what was given is recorded: defaults are not materialized and required
     options are not checked, so a grid search can still fill in per-protein data.
+    Path options that were given must name existing files.
 
     Parameters
     ----------
@@ -675,13 +676,25 @@ def loss_config_from_args(
 
     if args.loss_config is None:
         try:
-            return LossConfig.single(args.loss_type, **loss_options_from_args(args))
+            config = LossConfig.single(args.loss_type, **loss_options_from_args(args))
         except ValueError as error:
             parser.error(str(error))
-    try:
-        return LossConfig.from_file(args.loss_config)
-    except (OSError, ValueError) as error:
-        parser.error(f"--loss-config {args.loss_config}: {error}")
+    else:
+        try:
+            config = LossConfig.from_file(args.loss_config)
+        except (OSError, ValueError) as error:
+            parser.error(f"--loss-config {args.loss_config}: {error}")
+
+    missing_files = config.missing_input_files()
+    if missing_files:
+        parser.error(
+            "; ".join(
+                f"the {loss} loss's {option} file does not exist: {path}"
+                for loss, files in missing_files.items()
+                for option, path in files.items()
+            )
+        )
+    return config
 
 
 def add_loss_args(parser: argparse.ArgumentParser, loss: Losses | str):

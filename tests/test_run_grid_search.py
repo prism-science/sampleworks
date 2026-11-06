@@ -160,6 +160,20 @@ class TestLossSelection:
         assert config.density is None
         assert Path(job.output_dir).name == "ens4_gw0.1_structure_factor"
 
+    def test_a_missing_input_file_on_the_command_line_stops_the_grid(self, grid_inputs, capsys):
+        with pytest.raises(SystemExit) as excinfo:
+            _grid_args(
+                grid_inputs,
+                "name,structure\n1ABC,s.cif\n",
+                "--loss-type",
+                "structure_factor",
+                "--mtzfile",
+                str(grid_inputs / "absent.mtz"),
+            )
+
+        assert excinfo.value.code == 2
+        assert "mtzfile file does not exist" in capsys.readouterr().err
+
     def test_one_csv_serves_density_and_structure_factor_sweeps(self, grid_inputs):
         csv_text = "name,structure,density,mtzfile,resolution\n1ABC,s.cif,d.ccp4,x.mtz,1.8\n"
 
