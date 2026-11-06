@@ -13,6 +13,8 @@ from typing import Any
 import numpy as np
 import torch
 from atomworks.io.transforms.atom_array import ensure_atom_array_stack
+from biotite import DeserializationError, InvalidFileError
+from biotite.database import RequestError
 from biotite.database.rcsb import fetch
 from biotite.structure import (
     AtomArray,
@@ -136,7 +138,14 @@ def _load_deposit(protein: str) -> Deposit | None:
                 fetched_path = fetch(rcsb_id, format="cif", target_path=staging_dir)
                 os.replace(fetched_path, cached_path)
         return Deposit.from_cif(CIFFile.read(str(cached_path)))
-    except Exception as error:
+    except (
+        OSError,
+        RequestError,
+        DeserializationError,
+        InvalidFileError,
+        ValueError,
+        KeyError,
+    ) as error:
         logger.warning(
             f"Writing outputs without polymer entity categories because the deposited "
             f"CIF for {protein!r} could not be loaded: {error}"
