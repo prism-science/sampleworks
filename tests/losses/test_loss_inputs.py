@@ -13,6 +13,7 @@ import pytest
 import torch
 from biotite.structure import array, Atom, AtomArray, stack
 from sampleworks.core.losses.protocol import LossInputs
+from sampleworks.utils.elements import elements_to_scattering_indices
 
 
 class TestLossInputsFromAtomArray:
@@ -26,35 +27,42 @@ class TestLossInputsFromAtomArray:
             LossInputs.from_atom_array(atom_array_1vme_with_missing_atoms, ensemble_size=1)
 
     def test_cleaned_missing_atoms_accepted(self, atom_array_1vme_with_missing_atoms):
-        """After applying the same fixes as the RF3 wrapper, the atom array passes."""
+        """Once a wrapper cleans the array, the tensors carry exactly the cleaned values.
+
+        Cleaning follows the contract in the ``LossInputs`` docstring: finite
+        coordinates, occupancy 1.0, and the documented default B-factor of 20.0 for
+        atoms that had none.
+        """
         aa = atom_array_1vme_with_missing_atoms.copy()
+        nan_coord_mask = np.any(np.isnan(aa.coord), axis=-1)  # (n_atoms,)
+        nan_b_mask = np.isnan(aa.b_factor)  # (n_atoms,)
+        assert nan_coord_mask.any() and nan_b_mask.any(), "fixture must have missing atoms"
 
-        # Fix NaN coordinates
-        nan_coord_mask = np.any(np.isnan(aa.coord), axis=-1)
-        if nan_coord_mask.any():
-            resolved_coords = aa.coord[~nan_coord_mask]
-            if len(resolved_coords) > 0:
-                centroid = resolved_coords.mean(axis=0)
-            else:
-                centroid = np.zeros(3)
-            n_nan = int(nan_coord_mask.sum())
-            noise = np.random.normal(loc=0.0, scale=1.0, size=(n_nan, 3)).astype(np.float32)
-            new_coords = aa.coord.copy()
-            new_coords[nan_coord_mask] = centroid + noise
-            aa.coord = new_coords
-
-        # Fix occupancy
+        cleaned_coords = aa.coord.copy()  # (n_atoms, 3)
+        cleaned_coords[nan_coord_mask] = cleaned_coords[~nan_coord_mask].mean(axis=0)
+        aa.coord = cleaned_coords
         aa.set_annotation("occupancy", np.ones(len(aa), dtype=np.float32))
-
-        # Fix NaN b_factors
-        nan_b_mask = np.isnan(aa.b_factor)
-        if nan_b_mask.any():
-            b_factors = aa.b_factor.copy()
-            b_factors[nan_b_mask] = 20.0
-            aa.set_annotation("b_factor", b_factors)
+        aa.set_annotation("b_factor", np.where(nan_b_mask, 20.0, aa.b_factor).astype(np.float32))
 
         loss_inputs = LossInputs.from_atom_array(aa, ensemble_size=1)
-        assert loss_inputs.b_factors.shape[-1] == len(aa)
+
+        np.testing.assert_allclose(loss_inputs.input_coords[0].numpy(), cleaned_coords)
+        b_factors = loss_inputs.b_factors[0].numpy()  # (n_atoms,)
+        np.testing.assert_allclose(b_factors[nan_b_mask], 20.0)
+        np.testing.assert_allclose(
+            b_factors[~nan_b_mask], atom_array_1vme_with_missing_atoms.b_factor[~nan_b_mask]
+        )
+
+    @pytest.mark.parametrize("bad_occupancy", [1.5, -0.1])
+    def test_occupancy_outside_unit_interval_rejected(self, toy_atom_array, bad_occupancy):
+        """Occupancy is a fraction; values above 1 or below 0 are rejected."""
+        atom_array = toy_atom_array.copy()
+        occupancy = atom_array.occupancy.copy()
+        occupancy[2] = bad_occupancy
+        atom_array.set_annotation("occupancy", occupancy)
+
+        with pytest.raises(ValueError, match="invalid occupancy"):
+            LossInputs.from_atom_array(atom_array, ensemble_size=1)
 
     def test_nan_coordinates_rejected(self, structure_1vme):
         """NaN coordinates must be caught before constructing loss tensors."""
@@ -116,6 +124,48 @@ def toy_atom_array() -> AtomArray:
         ),
     ]
     return array(atoms)
+
+
+class TestLossInputsTensorValues:
+    """The tensors hold the array's per-atom values, tiled over ensemble and particles."""
+
+    @pytest.mark.parametrize("ensemble_size,num_particles", [(1, 1), (4, 1), (4, 2)])
+    def test_tensors_tile_per_atom_values_over_the_batch(
+        self, toy_atom_array, ensemble_size, num_particles
+    ):
+        """Each ensemble member carries weight ``1/ensemble_size``, whatever the file says.
+
+        The ensemble is the model's population, so occupancy is the uniform mixture
+        weight over its members (summing to 1 per atom within a particle), not the
+        deposited occupancy (0.5, 0.5, 1.0, 0.25 here). Elements, B-factors and
+        coordinates are the array's own, repeated for every member and particle.
+        """
+        loss_inputs = LossInputs.from_atom_array(
+            toy_atom_array, ensemble_size=ensemble_size, num_particles=num_particles
+        )
+
+        n_atoms = toy_atom_array.array_length()
+        batch_shape = (num_particles, ensemble_size) if num_particles > 1 else (ensemble_size,)
+        nitrogen, carbon = elements_to_scattering_indices(np.array(["N", "C"]))
+        expected_elements = torch.tensor([nitrogen, carbon, nitrogen, carbon]).expand(
+            *batch_shape, n_atoms
+        )  # (*batch, n_atoms)
+        expected_b_factors = torch.tensor([11.0, 12.0, 13.0, 14.0]).expand(*batch_shape, n_atoms)
+
+        assert nitrogen != carbon
+        torch.testing.assert_close(loss_inputs.elements, expected_elements, check_dtype=False)
+        torch.testing.assert_close(loss_inputs.b_factors, expected_b_factors)
+        torch.testing.assert_close(
+            loss_inputs.occupancies, torch.full((*batch_shape, n_atoms), 1.0 / ensemble_size)
+        )
+        torch.testing.assert_close(
+            loss_inputs.occupancies.sum(dim=-2), torch.ones(*batch_shape[:-1], n_atoms)
+        )
+        # Coordinates are flat over (particles * ensemble); FK steering adds noise per row.
+        expected_coords = torch.as_tensor(toy_atom_array.coord).expand(
+            num_particles * ensemble_size, n_atoms, 3
+        )  # (particles * ensemble, n_atoms, 3)
+        torch.testing.assert_close(loss_inputs.input_coords, expected_coords)
 
 
 class TestLossInputsTopology:
