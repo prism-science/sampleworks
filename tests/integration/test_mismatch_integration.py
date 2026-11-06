@@ -1125,6 +1125,7 @@ class TestSave:
             scaler_type="pure_guidance",
             final_state=final_state,
             model_atom_array=model_atom_array,
+            deposit=None,
         )
 
         saved = ensure_atom_array_stack(load_any(tmp_path / "refined.cif"))

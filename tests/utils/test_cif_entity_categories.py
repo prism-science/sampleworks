@@ -23,6 +23,7 @@ from sampleworks.utils.deposit_ids import (
     _matching_entity,
     annotate_deposit_ids,
     Deposit,
+    DEPOSIT_LABEL_ANNOTATIONS,
     set_deposited_structure,
 )
 from sampleworks.utils.guidance_script_arguments import GuidanceConfig
@@ -627,15 +628,24 @@ _1VME_UNRESOLVED = ["MET", "GLY", "SER", "ASP", "LYS", "ILE", "HIS", "HIS"]
         ),
     ],
 )
+@pytest.mark.parametrize("relabel_by_deposit", [False, True])
 def test_saved_cif_numbers_model_added_residues_from_the_deposit(
-    resources_dir: Path, tmp_path: Path, deposit, structure, read, chain, added, dropped
+    resources_dir: Path,
+    tmp_path: Path,
+    deposit,
+    structure,
+    read,
+    chain,
+    added,
+    dropped,
+    relabel_by_deposit,
 ):
     """Residues a model builds from the full sequence take the deposit's ids when saved.
 
     The model is the input chain plus ``added`` residues before it (one CA each); the input
     lacks those and its first ``dropped`` residues. The saved CIF must give all of them the
     deposited scheme's sequence positions and author ids, and fill the scheme's author
-    numbers for them.
+    numbers for them, whether relabeling places them in the deposit or saving does.
     """
     atoms = read(_read_by_author(resources_dir / structure))
     chain_atoms = atoms[(atoms.chain_id == chain) & filter_amino_acids(atoms)]
@@ -650,8 +660,14 @@ def test_saved_cif_numbers_model_added_residues_from_the_deposit(
     reference = Deposit.from_cif(CIFFile.read(str(resources_dir / deposit)))
     path = tmp_path / "refined.cif"
 
-    relabeled = relabel_model_residues(model, struct, AtomReconciler.from_arrays(model, struct))
-    _write_structure_cif(path, annotate_deposit_ids(relabeled, reference), reference)
+    relabeled = relabel_model_residues(
+        model,
+        struct,
+        AtomReconciler.from_arrays(model, struct),
+        reference if relabel_by_deposit else None,
+    )
+    saved = relabeled if relabel_by_deposit else annotate_deposit_ids(relabeled, reference)
+    _write_structure_cif(path, saved, reference)
 
     scheme = reference.block["pdbx_poly_seq_scheme"]
     expected = [
@@ -687,6 +703,90 @@ def test_saved_cif_numbers_model_added_residues_from_the_deposit(
         )
     )
     assert all(carried[seq] == number for seq, number, _ in expected)
+
+
+@pytest.mark.parametrize(
+    ("deposit", "chain", "dropped"),
+    [
+        # Thrombin's autolysis loop: the built residues need insertion codes 149A-149E.
+        pytest.param("1PPB/1ppb_rcsb.cif", "H", [(149, c) for c in "ABCDE"], id="1PPB-149A-E"),
+        # A built GLY at 1F numbered from its neighbor would be written as the resolved GLY 2.
+        pytest.param("1PPB/1ppb_rcsb.cif", "L", [(1, "F")], id="1PPB-1F"),
+        # Gaps inside runs of identical residues: the His-tag and LEU 8-9.
+        pytest.param("1vme/1vme_rcsb.cif", "A", [(-2, "")], id="1VME-HIS-2"),
+        pytest.param("6NI6/6ni6_rcsb.cif", "A", [(9, "")], id="6NI6-LEU9"),
+        # Complete chain with insertion codes (1H ... 1A, 1): nothing to build.
+        pytest.param("1PPB/1ppb_rcsb.cif", "L", [], id="1PPB-complete"),
+    ],
+)
+def test_saved_cif_places_residues_built_inside_gaps(
+    resources_dir: Path, tmp_path: Path, deposit, chain, dropped
+):
+    """Residues the model builds inside the input's gaps take their deposited ids when saved.
+
+    The model is the chain numbered 1..n without insertion codes, as a wrapper numbers it,
+    and the input is the author-numbered chain without ``dropped`` residues. Every saved
+    residue, resolved or built, must carry the deposit's label number and author number and
+    insertion code.
+    """
+    atoms = _read_by_author(resources_dir / deposit)
+    chain_atoms = atoms[(atoms.chain_id == chain) & filter_amino_acids(atoms)]
+    # One residue per position, as a model builds: keep the first of a microheterogeneity pair.
+    keys = list(zip(chain_atoms.res_id.tolist(), chain_atoms.ins_code.tolist(), strict=True))
+    first_name = {}
+    for key, name in zip(keys, chain_atoms.res_name, strict=True):
+        first_name.setdefault(key, name)
+    chain_atoms = chain_atoms[
+        [first_name[key] == name for key, name in zip(keys, chain_atoms.res_name, strict=True)]
+    ]
+    struct = chain_atoms[
+        [key not in dropped for key in zip(chain_atoms.res_id.tolist(), chain_atoms.ins_code)]
+    ]
+    model = chain_atoms.copy()
+    model.res_id = get_residue_positions(model, np.arange(model.array_length())) + 1
+    model.ins_code[:] = ""
+    reference = Deposit.from_cif(CIFFile.read(str(resources_dir / deposit)))
+    path = tmp_path / "refined.cif"
+
+    relabeled = relabel_model_residues(
+        model, struct, AtomReconciler.from_arrays(model, struct), reference
+    )
+    _write_structure_cif(path, relabeled, reference)
+
+    def residues(seq_ids, numbers, codes) -> list[tuple[str, str, str]]:
+        return list(dict.fromkeys(zip(seq_ids, numbers, codes, strict=True)))
+
+    atom_site = CIFFile.read(str(path)).block["atom_site"]
+    assert residues(
+        atom_site["label_seq_id"].as_array(str),
+        atom_site["auth_seq_id"].as_array(str),
+        atom_site["pdbx_PDB_ins_code"].as_array(str),
+    ) == residues(
+        chain_atoms.label_seq_id,
+        chain_atoms.res_id.astype(str),
+        np.where(chain_atoms.ins_code == "", ".", chain_atoms.ins_code),
+    )
+
+
+def test_relabel_keeps_input_labels_when_a_built_residue_contradicts_the_deposit(
+    resources_dir: Path, caplog: pytest.LogCaptureFixture
+):
+    """A built residue whose name the deposit does not list at its place is not put there."""
+    atoms = _read_by_author(resources_dir / "1vme" / "1vme_rcsb.cif")
+    chain_atoms = atoms[(atoms.chain_id == "A") & filter_amino_acids(atoms)]
+    struct = chain_atoms[chain_atoms.res_id != -2]
+    model = chain_atoms.copy()
+    model.res_name[model.res_id == -2] = "TRP"  # the deposit has HIS there
+    model.res_id = get_residue_positions(model, np.arange(model.array_length())) + 1
+    model.ins_code[:] = ""
+    reference = Deposit.from_cif(CIFFile.read(str(resources_dir / "1vme" / "1vme_rcsb.cif")))
+
+    relabeled = relabel_model_residues(
+        model, struct, AtomReconciler.from_arrays(model, struct), reference
+    )
+
+    assert not set(DEPOSIT_LABEL_ANNOTATIONS) & set(relabeled.get_annotation_categories())
+    assert "lands on deposited ['HIS']" in caplog.text
 
 
 def test_carry_rejects_two_residues_at_one_deposited_position():
@@ -769,7 +869,7 @@ def test_save_everything_writes_cifs_when_entity_carry_fails(
         traj_next_step=[coords],
         scaler_type="pure_guidance",
         final_state=coords,
-        reference_cif=reference,
+        deposit=Deposit.from_cif(reference),
     )
 
     assert "without polymer entity categories" in caplog.text

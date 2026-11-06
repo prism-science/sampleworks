@@ -51,6 +51,7 @@ from sampleworks.utils.deposit_ids import (
     annotate_deposit_ids,
     Deposit,
     DEPOSIT_LABEL_ANNOTATIONS,
+    place_in_deposit,
     set_deposited_structure,
 )
 from sampleworks.utils.guidance_constants import (
@@ -101,8 +102,8 @@ from sampleworks.utils.torch_utils import try_gpu
 _RCSB_CACHE = Path("~/.sampleworks/rcsb").expanduser()
 
 
-def _load_reference_cif(protein: str) -> CIFFile | None:
-    """Fetch and parse one deposited CIF for output metadata carry.
+def _load_deposit(protein: str) -> Deposit | None:
+    """Fetch and parse the deposited CIF a run's outputs are placed in.
 
     Parameters
     ----------
@@ -112,10 +113,10 @@ def _load_reference_cif(protein: str) -> CIFFile | None:
 
     Returns
     -------
-    CIFFile | None
-        Parsed deposited CIF from the local RCSB cache, or ``None`` when the name is not an
-        RCSB id. The cache entry is populated atomically, so concurrent first-time fetches
-        cannot read a truncated file.
+    Deposit | None
+        The deposit, read from the local RCSB cache, or ``None`` (with a warning) when the name
+        is not an RCSB id or the deposit cannot be fetched or read. The cache entry is
+        populated atomically, so concurrent first-time fetches cannot read a truncated file.
     """
     rcsb_id = rcsb_id_from_protein_name(protein)
     if rcsb_id is None:
@@ -124,16 +125,23 @@ def _load_reference_cif(protein: str) -> CIFFile | None:
         )
         return None
     rcsb_id = rcsb_id.lower()
-    _RCSB_CACHE.mkdir(parents=True, exist_ok=True)
-    cached_path = _RCSB_CACHE / f"{rcsb_id}.cif"
-    if not cached_path.is_file():
-        # Grid-search workers share the cache directory. Fetching straight into it lets one
-        # worker read another's partially written entry, so stage the download in a private
-        # directory on the same filesystem and move it into place atomically.
-        with TemporaryDirectory(dir=_RCSB_CACHE) as staging_dir:
-            fetched_path = fetch(rcsb_id, format="cif", target_path=staging_dir)
-            os.replace(fetched_path, cached_path)
-    return CIFFile.read(str(cached_path))
+    try:
+        _RCSB_CACHE.mkdir(parents=True, exist_ok=True)
+        cached_path = _RCSB_CACHE / f"{rcsb_id}.cif"
+        if not cached_path.is_file():
+            # Grid-search workers share the cache directory. Fetching straight into it lets one
+            # worker read another's partially written entry, so stage the download in a private
+            # directory on the same filesystem and move it into place atomically.
+            with TemporaryDirectory(dir=_RCSB_CACHE) as staging_dir:
+                fetched_path = fetch(rcsb_id, format="cif", target_path=staging_dir)
+                os.replace(fetched_path, cached_path)
+        return Deposit.from_cif(CIFFile.read(str(cached_path)))
+    except Exception as error:
+        logger.warning(
+            f"Writing outputs without polymer entity categories because the deposited "
+            f"CIF for {protein!r} could not be loaded: {error}"
+        )
+        return None
 
 
 def save_trajectory(
@@ -184,6 +192,7 @@ def relabel_model_residues(
     model_atom_array: AtomArray,
     struct_atom_array: AtomArray,
     reconciler: AtomReconciler,
+    deposit: Deposit | None = None,
 ) -> AtomArray:
     """Give the model topology the input's residue labels and the B-factors the loss scored.
 
@@ -194,6 +203,10 @@ def relabel_model_residues(
     the model's, except ``b_factor`` on matched atoms, which is the input's, as in
     ``SampleworksProcessedStructure.to_loss_inputs``.
 
+    With ``deposit``, every residue instead takes its deposited ids (``place_in_deposit``), so
+    a residue built inside thrombin's 149A-149E loop gets its insertion code. When that fails,
+    the consecutive labels are kept with a warning.
+
     Parameters
     ----------
     model_atom_array : AtomArray
@@ -202,11 +215,14 @@ def relabel_model_residues(
         Filtered input topology the reconciler was built against, ``n_struct`` atoms.
     reconciler : AtomReconciler
         Mapping between the two.
+    deposit : Deposit | None
+        The deposit the input came from.
 
     Returns
     -------
     AtomArray
-        Relabeled copy of ``model_atom_array``.
+        Relabeled copy of ``model_atom_array``, with the ``DEPOSIT_LABEL_ANNOTATIONS`` when
+        placed in ``deposit``.
     """
     model_idx = reconciler.predicted_indices.cpu().numpy()  # (n_common,)
     struct_idx = reconciler.input_indices.cpu().numpy()  # (n_common,)
@@ -243,6 +259,11 @@ def relabel_model_residues(
     relabeled.res_id = (model_atom_array.res_id[starts] + offset)[residue_of_atom]
     relabeled.ins_code = ins_code[residue_of_atom]
     relabeled.b_factor[model_idx] = struct_atom_array.b_factor[struct_idx]
+    if deposit is not None:
+        try:
+            return place_in_deposit(relabeled, struct_atom_array, model_idx, struct_idx, deposit)
+        except ValueError as error:
+            logger.warning(f"Numbering model residues without the deposit: {error}")
     residue_labels = list(
         zip(
             chain.tolist(),
@@ -530,7 +551,8 @@ def save_everything(
     scaler_type: str,
     final_state: torch.Tensor | None = None,
     model_atom_array: AtomArray | None = None,
-    reference_cif: CIFFile | None = None,
+    *,
+    deposit: Deposit | None,
 ) -> None:
     """Save everything: refined structure/ensemble CIF, trajectories, and losses.
 
@@ -563,36 +585,23 @@ def save_everything(
     model_atom_array : AtomArray | None
         Optional model-space atom template. When provided (mismatch runs),
         this template is used for final structure and trajectory saving.
-    reference_cif : CIFFile | None
-        Optional preloaded deposited CIF. When omitted, it is fetched from RCSB.
+    deposit : Deposit | None
+        The deposit (``_load_deposit``) whose ids and polymer entity categories the outputs
+        carry; ``None`` writes them without.
     """
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Saving results")
-    if reference_cif is None:
-        try:
-            reference_cif = _load_reference_cif(args.protein)
-        except Exception as error:
-            logger.warning(
-                f"Writing outputs without polymer entity categories because the deposited "
-                f"CIF for {args.protein!r} could not be loaded: {error}"
-            )
-
-    deposit = None
-    if reference_cif is not None:
-        try:
-            deposit = Deposit.from_cif(reference_cif)
-        except ValueError as error:
-            logger.warning(f"Writing outputs without polymer entity categories: {error}")
-
     base_atom_array = ensure_atom_array_stack(refined_structure["asym_unit"])[0]
+    if model_atom_array is None or final_state is None:
+        # The input is placed in the deposit once, here; a model was placed when relabeled.
+        base_atom_array = _with_deposit_ids(base_atom_array, deposit)
 
     # Use model's internal atom accounting template for mismatch runs when available
     # Wrappers must guarantee model atom arrays have valid coords and occupancy.
-    # Deposited ids are resolved once here; every saved frame reuses them.
-    atom_array_for_saving: AtomArray = _with_deposit_ids(
-        model_atom_array if model_atom_array is not None else base_atom_array, deposit
+    atom_array_for_saving: AtomArray = (
+        model_atom_array if model_atom_array is not None else base_atom_array
     )
 
     if final_state is not None:
@@ -601,10 +610,8 @@ def save_everything(
         ensemble_array = stack([atom_array_for_saving.copy() for _ in range(ensemble_size)])
         _write_coords_into_array(ensemble_array, final_state.detach().cpu().numpy())
         atom_array = ensemble_array
-    elif model_atom_array is None:
-        atom_array = atom_array_for_saving
     else:
-        atom_array = _with_deposit_ids(base_atom_array, deposit)
+        atom_array = base_atom_array
 
     metadata = args.as_dict()
     _write_structure_cif(
@@ -980,10 +987,11 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
         raise TypeError("Unknown guidance type!")
 
     metadata = result.metadata or {}
+    deposit = _load_deposit(args.protein)
     model_atom_array = metadata.get("model_atom_array")
     if model_atom_array is not None:
         model_atom_array = relabel_model_residues(
-            model_atom_array, metadata["struct_atom_array"], metadata["reconciler"]
+            model_atom_array, metadata["struct_atom_array"], metadata["reconciler"], deposit
         )
 
     save_everything(
@@ -995,6 +1003,7 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
         guidance_type,
         final_state=torch.as_tensor(result.final_state),
         model_atom_array=model_atom_array,
+        deposit=deposit,
     )
 
     if hasattr(model_wrapper, "_chiral_grad_stats") and model_wrapper._chiral_grad_stats:
