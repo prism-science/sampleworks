@@ -67,15 +67,19 @@ def opt(
     )
 
 
+def _is_finite_number(value: Any) -> bool:
+    # A config file can hand over a string or a bool; reject it here rather than
+    # let math.isfinite raise a TypeError that callers do not catch.
+    is_number = isinstance(value, (int, float)) and not isinstance(value, bool)
+    return is_number and math.isfinite(value)
+
+
 def _check_resolution(resolution: float | None):
     # Zero, negative or non-finite values otherwise surface as a division by zero
     # or an empty reflection set inside a worker, after the model has loaded.
     if resolution is None:
         return
-    # A config file can hand over a string or a bool; reject it here rather than
-    # let math.isfinite raise a TypeError that callers do not catch.
-    is_number = isinstance(resolution, (int, float)) and not isinstance(resolution, bool)
-    if not (is_number and math.isfinite(resolution) and resolution > 0):
+    if not (_is_finite_number(resolution) and resolution > 0):
         raise ValueError(
             f"resolution must be a positive, finite number of Angstroms; got {resolution}."
         )
@@ -135,6 +139,10 @@ class StructureFactorOptions:
 
     def __post_init__(self):
         _check_resolution(self.resolution)
+        if type(self.batch_partition) is not int or self.batch_partition <= 0:
+            raise ValueError(
+                f"batch_partition must be a positive integer, got {self.batch_partition!r}."
+            )
 
 
 @dataclass(frozen=True)
@@ -190,6 +198,12 @@ class DiffuseBraggOptions:
 
     def __post_init__(self):
         _check_resolution(self.resolution)
+        # A NaN weight would otherwise slip past the required-target check, which
+        # compares it against 0 and 1, and fail only once the loss is built.
+        if not (_is_finite_number(self.bragg_weight) and 0.0 <= self.bragg_weight <= 1.0):
+            raise ValueError(
+                f"bragg_weight must lie in [0, 1] to be a convex mixture; got {self.bragg_weight}."
+            )
 
 
 def option_type(options_cls: type, name: str) -> Any:
