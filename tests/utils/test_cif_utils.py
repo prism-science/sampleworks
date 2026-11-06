@@ -499,6 +499,6 @@ def test_find_altloc_selections_ensemble_matches_single_model(
     cif_path = resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
     ensemble_path = altlocs_to_ensemble_cif(cif_path, tmp_path / "ensemble.cif")
 
-    single_model = list(find_altloc_selections(cif_path))
-    assert single_model  # a span plus the catch-all
-    assert list(find_altloc_selections(ensemble_path)) == single_model
+    single_model = find_altloc_selections(cif_path)
+    assert all(single_model)  # spans and unions
+    assert find_altloc_selections(ensemble_path) == single_model

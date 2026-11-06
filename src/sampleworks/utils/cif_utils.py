@@ -54,13 +54,11 @@ def find_altloc_selections(
     cif_file: Path | str,
     altloc_label: str = "label_alt_id",
     min_span: int = 5,
-    include_all_altlocs: bool = True,
-) -> Iterable[str]:
+) -> tuple[list[str], list[str]]:
     """Find alternative location selections in a CIF file.
 
-    Individual spans at least ``min_span`` residues long are yielded as selection strings.
-    Optionally, a final batch of selection strings is also yielded that contains all residues
-    with altlocs, one selection per chain.
+    Spans and unions are returned separately because they are different kinds of selection: a
+    span is one contiguous altloc run, a union is a whole chain's altloc residues at once.
 
     A multi-model ensemble that keeps altloc annotation is treated as one conformer per model.
     This means that atoms with non-blank altloc ID in the first model conceptually corresponds
@@ -75,22 +73,22 @@ def find_altloc_selections(
         If you don't know it, search for ``"_atom_site"`` in your CIF file to identify it.
     min_span : int
         Minimum number of consecutive residues to consider an altloc selection.
-        Spans of altlocs shorter than this are not yielded as selection strings, but ARE
-        included in the final selections which includes all residues with altlocs in each chain when
-        ``include_all_altlocs=True``.
-    include_all_altlocs : bool
-        If True (default), yield a final per-chain selection string containing all residues
-        with altlocs regardless of span length.
+        Spans of altlocs shorter than this are not returned as spans, but ARE included in
+        the unions.
 
-    Yields
-    ------
-    str
-        Alternative location selections, keyed by altloc ID.
+    Returns
+    -------
+    spans : list[str]
+        One old-style selection per altloc span at least ``min_span`` residues long.
+    unions : list[str]
+        One atomworks-style selection per chain, covering every residue with an altloc in
+        that chain regardless of span length.
 
     Examples
     --------
-    For RCSB PDB entry 5SOP, this should yield items like:
-    ``['chain A and resi 125-137', "chain_id == 'A' and ((res_id >= 3 and res_id <= 6) or ...)"]``
+    For RCSB PDB entry 5SOP, this should return spans like
+    ``['chain A and resi 125-137', ...]`` and unions like
+    ``["chain_id == 'A' and ((res_id >= 3 and res_id <= 6) or ...)"]``.
     """
     cif_file = Path(cif_file)
     logger.info(f"Finding altloc selections for {cif_file}")
@@ -120,22 +118,26 @@ def find_altloc_selections(
             #   so this is probably not a big deal.
             altlocs[altloc_id] = sorted(list(unique_altk))
 
+    spans = []
     all_altloc_selections = {}
     for chain, start, end, _ in find_consecutive_residues(altlocs):
         if end - start >= min_span - 1:
             # FIXME use new style selection https://github.com/prism-science/sampleworks/issues/56
-            yield f"chain {chain} and resi {start}-{end}"  # old style, more compact, selection
+            # old style, more compact, selection
+            spans.append(f"chain {chain} and resi {start}-{end}")
 
-        if include_all_altlocs:
-            if chain not in all_altloc_selections:
-                all_altloc_selections[chain] = []
-            if start == end:
-                all_altloc_selections[chain].append(f"(res_id == {start})")
-            else:
-                all_altloc_selections[chain].append(f"(res_id >= {start} and res_id <= {end})")
+        if chain not in all_altloc_selections:
+            all_altloc_selections[chain] = []
+        if start == end:
+            all_altloc_selections[chain].append(f"(res_id == {start})")
+        else:
+            all_altloc_selections[chain].append(f"(res_id >= {start} and res_id <= {end})")
 
-    for chain, selections in all_altloc_selections.items():
-        yield f"chain_id == '{chain}' and ({' or '.join(selections)})"
+    unions = [
+        f"chain_id == '{chain}' and ({' or '.join(selections)})"
+        for chain, selections in all_altloc_selections.items()
+    ]
+    return spans, unions
 
 
 def find_consecutive_residues(

@@ -34,7 +34,8 @@ def test_ensemble_window_matches_single_model(tmp_path: Path, resources_dir: Pat
     # one conformer pair: A-B and model_0-model_1.
     assert detect_altlocs(load_structure_with_altlocs(cif_path)).altloc_ids == ["A", "B"]
     assert load_any(ensemble_path).stack_depth() == 2
-    selection = ";".join(find_altloc_selections(cif_path))
+    spans, _ = find_altloc_selections(cif_path)
+    selection = ";".join(spans)
 
     def windows(path: Path) -> list[dict]:
         """Narrow every altloc selection of the single-model structure on ``path``.
