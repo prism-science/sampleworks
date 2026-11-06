@@ -44,9 +44,14 @@ from sampleworks.utils.atom_array_utils import parse_structure
 from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.cif_utils import (
     add_category_to_cif,
-    carry_polymer_entity_categories,
     renumber_atom_site_ids,
     resolve_mixed_hetatm_atom_altlocs,
+)
+from sampleworks.utils.deposit_ids import (
+    annotate_deposit_ids,
+    Deposit,
+    DEPOSIT_LABEL_ANNOTATIONS,
+    set_deposited_structure,
 )
 from sampleworks.utils.guidance_constants import (
     GuidanceType,
@@ -138,7 +143,7 @@ def save_trajectory(
     output_dir,
     subdir_name,
     save_every=10,
-    reference_cif: CIFFile | None = None,
+    deposit: Deposit | None = None,
 ):
     """Dispatch trajectory serialization to the handler for the selected scaler."""
     # IT-opt wiring (changed): this condition was `== GuidanceType.PURE_GUIDANCE`; we widened it to
@@ -146,10 +151,10 @@ def save_trajectory(
     # its final sampling pass emits a trajectory with the same [ensemble, atoms, 3] layout that
     # _save_trajectory already expects, so no separate writer is needed for it.
     if scaler_type in (GuidanceType.PURE_GUIDANCE, GuidanceType.LATENT_OPT):
-        _save_trajectory(trajectory, atom_array, output_dir, subdir_name, save_every, reference_cif)
+        _save_trajectory(trajectory, atom_array, output_dir, subdir_name, save_every, deposit)
     elif scaler_type == GuidanceType.FK_STEERING:
         _save_fk_steering_trajectory(
-            trajectory, atom_array, output_dir, subdir_name, save_every, reference_cif
+            trajectory, atom_array, output_dir, subdir_name, save_every, deposit
         )
     else:  # we shouldn't ever get here, since we can't have run guidance w/o this!
         raise ValueError(f"Invalid scaler type: {scaler_type}")
@@ -259,7 +264,7 @@ def relabel_model_residues(
 def _write_structure_cif(
     output_path: Path,
     atom_array: AtomArray | AtomArrayStack,
-    reference_cif: CIFFile | None,
+    deposit: Deposit | None,
     metadata: dict[str, Any] | None = None,
 ) -> None:
     """Write a structure with unique atom IDs and available entity metadata.
@@ -269,24 +274,55 @@ def _write_structure_cif(
     output_path : Path
         Destination CIF path.
     atom_array : AtomArray | AtomArrayStack
-        Single structure or multi-model ensemble to serialize.
-    reference_cif : CIFFile | None
-        Deposited CIF used to carry polymer entity categories when available.
+        Single structure or multi-model ensemble to serialize. When it carries the
+        ``DEPOSIT_LABEL_ANNOTATIONS`` (``_with_deposit_ids``), it is written with the deposit's
+        label ids and polymer entity categories.
+    deposit : Deposit | None
+        The deposit the annotations came from.
     metadata : dict[str, Any] | None
         Optional Sampleworks metadata added to the output CIF.
     """
     cif_file = CIFFile()
-    set_structure(cif_file, atom_array)
+    annotated = set(DEPOSIT_LABEL_ANNOTATIONS) <= set(atom_array.get_annotation_categories())
+    if deposit is not None and annotated:
+        try:
+            set_deposited_structure(cif_file, atom_array, deposit)
+        except (ValueError, KeyError) as error:
+            # A deposit the structure does not fit must not cost a completed run its coordinates.
+            logger.warning(f"Writing {output_path} without polymer entity categories: {error}")
+            cif_file = CIFFile()
+            set_structure(cif_file, atom_array)
+    else:
+        set_structure(cif_file, atom_array)
     renumber_atom_site_ids(cif_file)
     if metadata is not None:
         add_category_to_cif(cif_file, metadata, category_name="sampleworks")
-    if reference_cif is not None:
-        try:
-            carry_polymer_entity_categories(cif_file, reference_cif)
-        except Exception as error:
-            # Entity metadata is best effort: never lose a completed run's coordinates over it.
-            logger.warning(f"Writing {output_path} without polymer entity categories: {error}")
     cif_file.write(str(output_path))
+
+
+def _with_deposit_ids(atom_array: AtomArray, deposit: Deposit | None) -> AtomArray:
+    """Annotate ``atom_array`` with its deposited label ids, or warn and return it unchanged.
+
+    Parameters
+    ----------
+    atom_array : AtomArray
+        Structure about to be saved.
+    deposit : Deposit | None
+        The deposit to place it in; ``None`` returns ``atom_array`` unchanged.
+
+    Returns
+    -------
+    AtomArray
+        Annotated copy (``annotate_deposit_ids``), or ``atom_array`` when it cannot be placed.
+    """
+    if deposit is None:
+        return atom_array
+    try:
+        return annotate_deposit_ids(atom_array, deposit)
+    except (ValueError, KeyError) as error:
+        # A deposit the structure does not fit must not cost a completed run its coordinates.
+        logger.warning(f"Writing outputs without polymer entity categories: {error}")
+        return atom_array
 
 
 def _save_trajectory(
@@ -295,7 +331,7 @@ def _save_trajectory(
     output_dir,
     subdir_name,
     save_every,
-    reference_cif: CIFFile | None = None,
+    deposit: Deposit | None = None,
 ):
     """Save a pure-guidance coordinate trajectory as sampled multi-model CIFs."""
     output_dir = Path(output_dir / "trajectory" / subdir_name)
@@ -316,7 +352,7 @@ def _save_trajectory(
         array_copy = atom_array.copy()
         array_copy = stack([array_copy] * ensemble_size)
         _write_coords_into_array(array_copy, coords.detach().numpy())
-        _write_structure_cif(output_dir / f"trajectory_{i}.cif", array_copy, reference_cif)
+        _write_structure_cif(output_dir / f"trajectory_{i}.cif", array_copy, deposit)
 
 
 def _save_fk_steering_trajectory(
@@ -325,7 +361,7 @@ def _save_fk_steering_trajectory(
     output_dir,
     subdir_name,
     save_every,
-    reference_cif: CIFFile | None = None,
+    deposit: Deposit | None = None,
 ):
     """Save the first-particle FK-steering trajectory as sampled multi-model CIFs."""
     output_dir = Path(output_dir / "trajectory" / subdir_name)
@@ -348,7 +384,7 @@ def _save_fk_steering_trajectory(
         # we save only the first ensemble out of n_particles, since saving
         # each particle at every step would clog trajectory saving
         _write_coords_into_array(array_copy, coords[0].detach().numpy())
-        _write_structure_cif(output_dir / f"trajectory_{i}.cif", array_copy, reference_cif)
+        _write_structure_cif(output_dir / f"trajectory_{i}.cif", array_copy, deposit)
 
 
 def save_losses(losses, output_dir):
@@ -543,12 +579,20 @@ def save_everything(
                 f"CIF for {args.protein!r} could not be loaded: {error}"
             )
 
+    deposit = None
+    if reference_cif is not None:
+        try:
+            deposit = Deposit.from_cif(reference_cif)
+        except ValueError as error:
+            logger.warning(f"Writing outputs without polymer entity categories: {error}")
+
     base_atom_array = ensure_atom_array_stack(refined_structure["asym_unit"])[0]
 
     # Use model's internal atom accounting template for mismatch runs when available
     # Wrappers must guarantee model atom arrays have valid coords and occupancy.
-    atom_array_for_saving: AtomArray = (
-        model_atom_array if model_atom_array is not None else base_atom_array
+    # Deposited ids are resolved once here; every saved frame reuses them.
+    atom_array_for_saving: AtomArray = _with_deposit_ids(
+        model_atom_array if model_atom_array is not None else base_atom_array, deposit
     )
 
     if final_state is not None:
@@ -557,14 +601,16 @@ def save_everything(
         ensemble_array = stack([atom_array_for_saving.copy() for _ in range(ensemble_size)])
         _write_coords_into_array(ensemble_array, final_state.detach().cpu().numpy())
         atom_array = ensemble_array
+    elif model_atom_array is None:
+        atom_array = atom_array_for_saving
     else:
-        atom_array = base_atom_array
+        atom_array = _with_deposit_ids(base_atom_array, deposit)
 
     metadata = args.as_dict()
     _write_structure_cif(
         output_dir / "refined.cif",
         atom_array,
-        reference_cif,
+        deposit,
         metadata,
     )
 
@@ -579,7 +625,7 @@ def save_everything(
         output_dir,
         "denoised",
         save_every=10,
-        reference_cif=reference_cif,
+        deposit=deposit,
     )
     save_trajectory(
         scaler_type,
@@ -588,7 +634,7 @@ def save_everything(
         output_dir,
         "next_step",
         save_every=10,
-        reference_cif=reference_cif,
+        deposit=deposit,
     )
     save_losses(losses, output_dir)
 
