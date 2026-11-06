@@ -535,7 +535,6 @@ def test_save_everything_writes_cifs_when_entity_carry_fails(
         refined_structure={"asym_unit": atom_array},
         traj_denoised=[coords],
         traj_next_step=[coords],
-        scaler_type="pure_guidance",
         final_state=coords,
         reference_cif=reference,
     )
