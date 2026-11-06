@@ -181,6 +181,17 @@ structure_factor:
 Weights default to `1/N` when omitted, so combining losses leaves the meaning of the
 guidance step size intact.
 
+A `weight_schedule` phases a loss in over the guided steps: its weight is off before `start`,
+rises linearly to full at `end`, and stays full after (fractions of the guided steps, 0 at the
+first and 1 at the last; `start == end` switches it on in one step). Adding this to the
+`structure_factor` entry above turns it on for the last 40% of guided steps only:
+
+```yaml
+  weight_schedule:
+    start: 0.6
+    end: 1.0
+```
+
 ## Grid Search
 
 `run_grid_search.py` sweeps a model across scalers, ensemble sizes, and gradient weights:

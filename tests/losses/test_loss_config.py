@@ -5,6 +5,7 @@ import pickle
 
 import pytest
 from sampleworks.core.losses.config import LossConfig, LossEntry
+from sampleworks.core.losses.weight_schedule import WeightSchedule
 from sampleworks.utils.guidance_constants import Losses
 
 
@@ -91,6 +92,18 @@ class TestParsing:
 
         assert LossConfig.from_mapping(mapping).to_mapping() == mapping
 
+    def test_weight_schedule_is_parsed_and_round_trips(self):
+        mapping = {
+            "real_space_density": {"weight": 0.5},
+            "structure_factor": {"weight": 0.5, "weight_schedule": {"start": 0.6, "end": 1.0}},
+        }
+
+        config = LossConfig.from_mapping(mapping)
+
+        assert config.entries[0].weight_schedule is None
+        assert config.entries[1].weight_schedule == WeightSchedule(start=0.6, end=1.0)
+        assert config.to_mapping() == mapping
+
     def test_mapping_survives_json_and_pickle(self):
         """Run configurations are JSON-serialized into metadata and pickled into job queues."""
         mapping = LossConfig.single(Losses.STRUCTURE_FACTOR, mtzfile="/data/x.mtz").to_mapping()
@@ -120,6 +133,21 @@ class TestValidation:
         """A flat entry is the most likely mistake; say where the options go."""
         with pytest.raises(ValueError, match="Loss options belong under 'loss_options'"):
             LossConfig.from_mapping({"real_space_density": {"loss_order": 1}})
+
+    @pytest.mark.parametrize(
+        "schedule",
+        [{"start": 0.6}, {"start": 0.6, "end": 1.0, "shape": "linear"}, [0.6, 1.0]],
+        ids=["missing-end", "extra-key", "not-a-mapping"],
+    )
+    def test_weight_schedule_must_give_exactly_start_and_end(self, schedule):
+        with pytest.raises(ValueError, match=r"exactly the keys \['end', 'start'\]"):
+            LossConfig.from_mapping({"real_space_density": {"weight_schedule": schedule}})
+
+    def test_weight_schedule_bounds_are_checked(self):
+        with pytest.raises(ValueError, match="0 <= start <= end <= 1"):
+            LossConfig.from_mapping(
+                {"real_space_density": {"weight_schedule": {"start": 0.8, "end": 0.6}}}
+            )
 
     def test_empty_configuration_is_rejected(self):
         with pytest.raises(ValueError, match="needs at least one loss"):

@@ -12,7 +12,12 @@ import torch.nn.functional as F
 from loguru import logger
 from tqdm import tqdm
 
-from sampleworks.core.losses.protocol import LossFunctionProtocol, prepare_loss_if_needed
+from sampleworks.core.losses.protocol import (
+    loss_at_progress,
+    LossFunctionProtocol,
+    prepare_loss_if_needed,
+)
+from sampleworks.core.losses.weight_schedule import guidance_progress
 from sampleworks.core.samplers.protocol import (
     SamplerStepOutput,
     StepParams,
@@ -145,13 +150,17 @@ class FKSteering:
 
         coords_4d_current = coords.reshape(num_particles, self.ensemble_size, -1, 3)
 
+        first_guided_step = max(self.starting_step, self.guidance_start)
         pbar = tqdm(range(self.starting_step, self.num_steps), desc="FK Steering")
         for i in pbar:
             context = sampler.get_context_for_step(i, schedule)
             apply_guidance = i >= self.guidance_start
 
             if apply_guidance:
-                context = context.with_loss(loss_function, loss_inputs)
+                # A scheduled loss changes between steps; the potential increments below then
+                # telescope to the loss in force at the end, as for any annealed FK potential.
+                progress = guidance_progress(i, first_guided_step, self.num_steps)
+                context = context.with_loss(loss_at_progress(loss_function, progress), loss_inputs)
 
             context = context.with_reconciler(
                 reconciler=reconciler,

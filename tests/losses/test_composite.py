@@ -6,9 +6,15 @@ import pytest
 import torch
 from sampleworks.core.losses.composite import CompositeLoss
 from sampleworks.core.losses.config import build_loss, LossConfig, LossEntry
-from sampleworks.core.losses.protocol import LossFunctionProtocol, LossInputs
+from sampleworks.core.losses.protocol import (
+    loss_at_progress,
+    LossFunctionProtocol,
+    LossInputs,
+    ScheduledLossFunctionProtocol,
+)
 from sampleworks.core.losses.real_space_density import RealSpaceLossFunction
 from sampleworks.core.losses.registry import LossBuildContext
+from sampleworks.core.losses.weight_schedule import WeightSchedule
 from sampleworks.utils.guidance_constants import Losses
 
 from tests.losses.loss_input_helpers import build_loss_input_tensors_without_coords
@@ -132,6 +138,67 @@ class TestCompositeValidation:
         with pytest.raises(ValueError, match="must be non-negative"):
             CompositeLoss([QuadraticLoss()], [-1.0])
 
+    def test_mismatched_schedule_count_is_rejected(self):
+        with pytest.raises(ValueError, match="one to one"):
+            CompositeLoss([QuadraticLoss()], [1.0], [None, None])
+
+
+class TestCompositeSchedule:
+    """A scheduled term contributes its weight times the schedule's fraction."""
+
+    def test_is_a_scheduled_loss_function(self):
+        assert isinstance(CompositeLoss([QuadraticLoss()]), ScheduledLossFunctionProtocol)
+
+    def test_scheduled_term_is_scaled_and_unscheduled_term_is_not(self):
+        data, prior = QuadraticLoss(1.0), QuadraticLoss(3.0)
+        composite = CompositeLoss(
+            [data, prior], [1.0, 0.1], [None, WeightSchedule(start=0.5, end=1.0)]
+        )
+        x = coords()
+
+        values = [composite.at_progress(p)(x, **per_atom()) for p in (0.0, 0.75, 1.0)]
+
+        assert torch.isclose(values[0], data(x))
+        assert torch.isclose(values[1], data(x) + 0.05 * prior(x))
+        assert torch.isclose(values[2], data(x) + 0.1 * prior(x))
+
+    def test_scheduled_term_adds_no_gradient_before_it_starts(self):
+        composite = CompositeLoss(
+            [QuadraticLoss(1.0), QuadraticLoss(3.0)],
+            [1.0, 1.0],
+            [None, WeightSchedule(start=0.9, end=0.9)],
+        )
+        x = coords().requires_grad_(True)
+
+        composite.at_progress(0.5)(x, **per_atom()).backward()
+
+        assert x.grad is not None
+        assert torch.allclose(x.grad, coords())
+
+    def test_at_progress_leaves_the_schedule_in_place(self):
+        """Each step's loss is a snapshot; later steps still see the configured weights."""
+        composite = CompositeLoss(
+            [QuadraticLoss(), QuadraticLoss()], [1.0, 0.1], [None, WeightSchedule(0.5, 1.0)]
+        )
+
+        composite.at_progress(0.0)
+
+        assert composite.weights == [1.0, 0.1]
+        assert torch.isclose(
+            composite.at_progress(1.0)(coords(), **per_atom()),
+            1.1 * QuadraticLoss()(coords()),
+        )
+
+    def test_unscheduled_composite_is_its_own_snapshot(self):
+        composite = CompositeLoss([QuadraticLoss(), QuadraticLoss()], [0.5, 0.5])
+
+        assert composite.at_progress(0.3) is composite
+
+    def test_loss_without_a_schedule_is_used_as_is(self):
+        loss = QuadraticLoss()
+
+        assert loss_at_progress(loss, 0.3) is loss
+
 
 def test_prepare_is_forwarded_only_to_terms_that_need_it():
     n_atoms = 6
@@ -160,6 +227,26 @@ class TestBuildLoss:
         loss = build_loss(config, LossBuildContext(structure=structure_1vme_density, device=device))
 
         assert isinstance(loss, RealSpaceLossFunction)
+
+    def test_a_scheduled_single_loss_keeps_its_schedule(
+        self, density_path_1vme, device, structure_1vme_density
+    ):
+        schedule = WeightSchedule(start=0.6, end=1.0)
+        config = LossConfig(
+            entries=(
+                LossEntry(
+                    loss=Losses.REAL_SPACE_DENSITY,
+                    options=density_options(density_path_1vme),
+                    weight_schedule=schedule,
+                ),
+            )
+        )
+
+        loss = build_loss(config, LossBuildContext(structure=structure_1vme_density, device=device))
+
+        assert isinstance(loss, CompositeLoss)
+        assert loss.schedules == [schedule]
+        assert loss.at_progress(0.3).weights == [0.0]
 
     @pytest.mark.gpu
     def test_a_single_loss_scores_at_its_configured_weight(

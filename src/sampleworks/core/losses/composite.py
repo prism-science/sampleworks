@@ -13,6 +13,7 @@ from sampleworks.core.losses.protocol import LossFunctionProtocol, prepare_loss_
 
 if TYPE_CHECKING:
     from sampleworks.core.losses.protocol import LossInputs
+    from sampleworks.core.losses.weight_schedule import WeightSchedule
 
 
 class CompositeLoss:
@@ -28,24 +29,33 @@ class CompositeLoss:
     ``1/len(losses)``, which keeps the combined magnitude comparable to a single
     loss's and so leaves the guidance step size meaning what it meant before.
 
+    A term with a :class:`~sampleworks.core.losses.weight_schedule.WeightSchedule`
+    contributes only the scheduled fraction of its weight. Trajectory scalers ask
+    for that through :meth:`at_progress` at every guided step; calling a scheduled
+    combination directly scores it at full weight.
+
     Parameters
     ----------
     losses
         Loss functions to combine. Must not be empty.
     weights
         One weight per loss, or None (default) for uniform ``1/N`` weights.
+    schedules
+        One schedule per loss, None for a term that always applies at full
+        weight, or None (default) to schedule no term.
 
     Raises
     ------
     ValueError
-        If ``losses`` is empty, ``weights`` has a different length, or any
-        weight is negative.
+        If ``losses`` is empty, ``weights`` or ``schedules`` has a different
+        length, or any weight is negative.
     """
 
     def __init__(
         self,
         losses: Sequence[LossFunctionProtocol],
         weights: Sequence[float] | None = None,
+        schedules: Sequence[WeightSchedule | None] | None = None,
     ):
         if not losses:
             raise ValueError(
@@ -68,8 +78,17 @@ class CompositeLoss:
                 "inverts that term's sign and steers away from it."
             )
 
+        if schedules is None:
+            schedules = [None] * len(losses)
+        elif len(schedules) != len(losses):
+            raise ValueError(
+                f"Got {len(schedules)} weight schedules for {len(losses)} losses; they must "
+                "correspond one to one."
+            )
+
         self.losses = list(losses)
         self.weights = [float(w) for w in weights]
+        self.schedules = list(schedules)
 
     def __call__(
         self,
@@ -118,6 +137,30 @@ class CompositeLoss:
             )
         return total
 
+    def at_progress(self, progress: float) -> CompositeLoss:
+        """Return the combination in force at ``progress`` through the guided steps.
+
+        Parameters
+        ----------
+        progress
+            Position in the guided steps, 0 at the first and 1 at the last (see
+            :func:`~sampleworks.core.losses.weight_schedule.guidance_progress`).
+
+        Returns
+        -------
+        CompositeLoss
+            ``self`` when no term is scheduled; otherwise an unscheduled
+            combination of the same (already prepared) loss objects whose
+            scheduled weights are scaled by their schedule's fraction.
+        """
+        if all(schedule is None for schedule in self.schedules):
+            return self
+        weights = [
+            weight if schedule is None else weight * schedule.fraction(progress)
+            for weight, schedule in zip(self.weights, self.schedules, strict=True)
+        ]
+        return CompositeLoss(self.losses, weights)
+
     def prepare(self, loss_inputs: LossInputs, *, device: torch.device | str = "cpu") -> None:
         """Prepare each component loss that needs binding to the loss inputs.
 
@@ -134,6 +177,9 @@ class CompositeLoss:
     def __repr__(self) -> str:
         terms = ", ".join(
             f"{weight:g}*{type(loss).__name__}"
-            for loss, weight in zip(self.losses, self.weights, strict=True)
+            + ("" if schedule is None else f"[{schedule.start:g}->{schedule.end:g}]")
+            for loss, weight, schedule in zip(
+                self.losses, self.weights, self.schedules, strict=True
+            )
         )
         return f"CompositeLoss({terms})"

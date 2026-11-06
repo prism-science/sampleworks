@@ -49,7 +49,12 @@ from torch import Tensor
 from tqdm import tqdm
 
 from sampleworks.core.losses.geometry import BondGeometryLoss
-from sampleworks.core.losses.protocol import LossFunctionProtocol, prepare_loss_if_needed
+from sampleworks.core.losses.protocol import (
+    loss_at_progress,
+    LossFunctionProtocol,
+    prepare_loss_if_needed,
+)
+from sampleworks.core.losses.weight_schedule import guidance_progress
 from sampleworks.core.samplers.protocol import TrajectorySampler
 from sampleworks.core.scalers.protocol import GuidanceOutput, StepScalerProtocol
 from sampleworks.core.scalers.step_scalers import NoScalingScaler
@@ -549,12 +554,16 @@ class LatentOptimization:
             starting_context = sampler.get_context_for_step(self.starting_step - 1, schedule)
             coords = alignment_reference + coords * torch.as_tensor(starting_context.noise_scale)
         losses: list[float] = []
+        first_guided_step = max(self.starting_step, self.guidance_start)
         steps = tqdm(range(self.starting_step, self.num_steps), f"IT-opt round {round_index}")
         for i in steps:
             optimize = i >= self.guidance_start
             context = sampler.get_context_for_step(i, schedule)
+            step_loss = loss_at_progress(
+                loss_function, guidance_progress(i, first_guided_step, self.num_steps)
+            )
             if optimize:
-                context = context.with_loss(loss_function, loss_inputs)
+                context = context.with_loss(step_loss, loss_inputs)
             context = context.with_reconciler(
                 reconciler=reconciler, alignment_reference=alignment_reference
             )
@@ -570,7 +579,7 @@ class LatentOptimization:
             if optimize:
                 data_loss = self._latent_optimizer_step(
                     denoised=step_output.denoised,
-                    loss_function=loss_function,
+                    loss_function=step_loss,
                     loss_inputs=loss_inputs,
                     optimizer=optimizer,
                     anchor=anchor,

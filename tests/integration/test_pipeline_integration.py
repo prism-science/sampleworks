@@ -15,7 +15,9 @@ Tests are organized from fast (mock-based) to slow (real wrappers).
 
 import pytest
 import torch
+from sampleworks.core.losses.composite import CompositeLoss
 from sampleworks.core.losses.protocol import LossInputs
+from sampleworks.core.losses.weight_schedule import WeightSchedule
 from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
 from sampleworks.core.samplers.protocol import SamplerStepOutput, StepParams
 from sampleworks.core.scalers.protocol import GuidanceOutput
@@ -652,6 +654,47 @@ class TestTrajectoryScalerMatrixMock:
         assert list(prepared.atom_array.atom_name) == list(case.model_atom_array.atom_name)
         assert loss_function.calls > 0
         assert loss_function.calls_before_prepare == 0
+
+    @pytest.mark.parametrize(
+        "trajectory_scaler_type", get_all_trajectory_scalers(), ids=lambda s: s.value
+    )
+    def test_scheduled_loss_term_counts_only_once_its_schedule_starts(
+        self,
+        trajectory_scaler_type: TrajectoryScalers,
+        device: torch.device,
+        mock_structure: dict,
+    ):
+        """A term scheduled for the last guided step scores nothing on the steps before it.
+
+        The model always predicts the same nonzero structure, so the term's value is the
+        same at every step and any change in the reported loss comes from the schedule.
+        """
+        num_steps = 4
+        n_atoms = mock_structure["asym_unit"].array_length()
+        target = torch.linspace(-1.0, 2.0, n_atoms * 3).reshape(1, n_atoms, 3)
+        wrapper = MockFlowModelWrapper(num_atoms=n_atoms, device=device, target=target)
+        loss_function = CompositeLoss(
+            [MockGradientLossFunction()], [1.0], [WeightSchedule(start=1.0, end=1.0)]
+        )
+        sampler = AF3EDMSampler(
+            EDMSamplerConfig(device=device, augmentation=False, align_to_input=False)
+        )
+        trajectory_scaler = create_trajectory_scaler_from_type(
+            trajectory_scaler_type, ensemble_size=1, num_steps=num_steps
+        )
+
+        result = trajectory_scaler.sample(
+            structure=mock_structure,
+            model=wrapper,
+            sampler=sampler,
+            step_scaler=DataSpaceDPSScaler(step_size=0.1),
+            loss_function=loss_function,
+            num_particles=1,
+        )
+
+        assert result.losses is not None
+        assert result.losses[:-1] == [0.0] * (num_steps - 1)
+        assert result.losses[-1] > 0.0
 
 
 class TestPartialDiffusion:

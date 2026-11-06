@@ -333,6 +333,53 @@ def prepare_loss_if_needed(
 
 
 @runtime_checkable
+class ScheduledLossFunctionProtocol(LossFunctionProtocol, Protocol):
+    """Protocol for loss functions whose form depends on how far guidance has progressed.
+
+    ``LossFunctionProtocol`` carries no time, so a loss that changes over the
+    run -- a term switched on only for the last guided steps, say -- exposes the
+    loss in force at each point instead. Trajectory scalers call
+    :meth:`at_progress` once per guided step and score with what it returns.
+    """
+
+    def at_progress(self, progress: float) -> LossFunctionProtocol:
+        """Return the loss in force at ``progress`` through the guided steps.
+
+        Must not mutate ``self``: the returned loss is a per-step snapshot.
+
+        Parameters
+        ----------
+        progress
+            Position in the guided steps, 0 at the first and 1 at the last (see
+            :func:`~sampleworks.core.losses.weight_schedule.guidance_progress`).
+        """
+        ...
+
+
+def loss_at_progress(loss_function: LossFunctionProtocol, progress: float) -> LossFunctionProtocol:
+    """Return the loss in force at ``progress`` when ``loss_function`` is scheduled.
+
+    Losses that do not implement :class:`ScheduledLossFunctionProtocol` are
+    returned unchanged, so callers can apply this unconditionally.
+
+    Parameters
+    ----------
+    loss_function
+        Loss function the run guides with.
+    progress
+        Position in the guided steps, 0 at the first and 1 at the last.
+
+    Returns
+    -------
+    LossFunctionProtocol
+        The loss to score this step with.
+    """
+    if isinstance(loss_function, ScheduledLossFunctionProtocol):
+        return loss_function.at_progress(progress)
+    return loss_function
+
+
+@runtime_checkable
 class PrecomputableLossFunctionProtocol(LossFunctionProtocol, Protocol):
     """Protocol for loss functions with precomputation for vmap compatibility.
 

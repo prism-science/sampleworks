@@ -138,6 +138,11 @@ structure_factor:
 
 Weights default to `1/N`, so combining losses does not change what the guidance step size
 means. Omit them all or give them all; a partly-weighted configuration is an error.
+An entry can also carry `weight_schedule: {start, end}` to phase its weight in over the guided
+steps (fractions, 0 at the first guided step and 1 at the last): off before `start`, linear up
+to full at `end`. Trajectory scalers apply it through `ScheduledLossFunctionProtocol.at_progress`;
+a physical-plausibility prior scheduled late repairs geometry without fighting the data term
+early on.
 
 **Adding a loss type** is three things and no argparse edits: implement the loss in
 `core/losses/`, declare its options as a frozen dataclass in `core/losses/options.py`, and

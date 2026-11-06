@@ -22,6 +22,19 @@ works on :class:`LossConfig` and does not care which surface produced it.
 Weights are resolved at build time: omitting them all gives every loss ``1/N``,
 so a single-loss run is unweighted and a two-loss run is a plain average
 unless the user says otherwise.
+
+A loss can also be phased in over the guided steps with a ``weight_schedule``
+(see :class:`~sampleworks.core.losses.weight_schedule.WeightSchedule`); here the
+structure-factor term is off for the first 60% of guided steps and ramps up to
+its full weight at the last one::
+
+    real_space_density:
+      weight: 0.5
+    structure_factor:
+      weight: 0.5
+      weight_schedule:
+        start: 0.6
+        end: 1.0
 """
 
 from __future__ import annotations
@@ -44,6 +57,7 @@ from sampleworks.core.losses.registry import (
     loss_type_names,
     LossBuildContext,
 )
+from sampleworks.core.losses.weight_schedule import WeightSchedule
 from sampleworks.utils.guidance_constants import Losses
 
 
@@ -54,6 +68,8 @@ if TYPE_CHECKING:
 # Key holding a loss's options inside a configuration file entry.
 LOSS_OPTIONS_KEY = "loss_options"
 WEIGHT_KEY = "weight"
+WEIGHT_SCHEDULE_KEY = "weight_schedule"
+ENTRY_KEYS = (WEIGHT_KEY, WEIGHT_SCHEDULE_KEY, LOSS_OPTIONS_KEY)
 
 _YAML_SUFFIXES = (".yaml", ".yml")
 
@@ -73,11 +89,15 @@ class LossEntry:
     options
         Option values for this loss. Options that are absent take the defaults
         declared in :mod:`sampleworks.core.losses.options`.
+    weight_schedule
+        How the weight is phased in over the guided steps; ``None`` applies the
+        full weight throughout.
     """
 
     loss: Losses
     weight: float | None = None
     options: dict[str, Any] = field(default_factory=dict)
+    weight_schedule: WeightSchedule | None = None
 
     def validated(self) -> LossEntry:
         """Return this entry with its options checked against the loss's schema.
@@ -144,7 +164,7 @@ class LossConfig:
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> LossConfig:
-        """Build a configuration from the ``{loss: {weight, loss_options}}`` mapping.
+        """Build a configuration from the ``{loss: {weight, weight_schedule, loss_options}}`` map.
 
         A bare ``{loss: {}}`` (or ``{loss: None}``) is accepted and means
         "this loss, all defaults".
@@ -162,8 +182,9 @@ class LossConfig:
         Raises
         ------
         ValueError
-            If a loss name is unknown, an entry is not a mapping, or an entry
-            holds keys other than ``weight`` and ``loss_options``.
+            If a loss name is unknown, an entry is not a mapping, an entry holds
+            keys other than ``weight``, ``weight_schedule`` and ``loss_options``,
+            or a weight schedule is not a ``{start, end}`` mapping.
         """
         entries = []
         for name, raw_entry in data.items():
@@ -171,12 +192,11 @@ class LossConfig:
             entry = {} if raw_entry is None else raw_entry
             if not isinstance(entry, Mapping):
                 raise ValueError(
-                    f"Configuration for loss '{loss.value}' must be a mapping with "
-                    f"'{WEIGHT_KEY}' and/or '{LOSS_OPTIONS_KEY}' keys, got "
-                    f"{type(entry).__name__}."
+                    f"Configuration for loss '{loss.value}' must be a mapping with any of "
+                    f"the keys {list(ENTRY_KEYS)}, got {type(entry).__name__}."
                 )
 
-            unexpected = sorted(set(entry) - {WEIGHT_KEY, LOSS_OPTIONS_KEY})
+            unexpected = sorted(set(entry) - set(ENTRY_KEYS))
             if unexpected:
                 raise ValueError(
                     f"Unexpected key(s) {unexpected} in the configuration for loss "
@@ -196,6 +216,7 @@ class LossConfig:
                     loss=loss,
                     weight=None if weight is None else float(weight),
                     options=dict(raw_options),
+                    weight_schedule=_parse_weight_schedule(loss, entry.get(WEIGHT_SCHEDULE_KEY)),
                 )
             )
 
@@ -249,7 +270,7 @@ class LossConfig:
         if not isinstance(data, Mapping):
             raise ValueError(
                 f"Loss configuration in {path} must be a mapping of loss name to "
-                f"{{{WEIGHT_KEY}, {LOSS_OPTIONS_KEY}}}, got {type(data).__name__}."
+                f"{{{', '.join(ENTRY_KEYS)}}}, got {type(data).__name__}."
             )
 
         return cls.from_mapping(data)
@@ -271,6 +292,8 @@ class LossConfig:
             payload: dict[str, Any] = {}
             if entry.weight is not None:
                 payload[WEIGHT_KEY] = entry.weight
+            if entry.weight_schedule is not None:
+                payload[WEIGHT_SCHEDULE_KEY] = dataclasses.asdict(entry.weight_schedule)
             if entry.options:
                 payload[LOSS_OPTIONS_KEY] = dict(entry.options)
             mapping[entry.loss.value] = payload
@@ -417,10 +440,10 @@ class LossConfig:
 def build_loss(config: LossConfig, context: LossBuildContext) -> LossFunctionProtocol:
     """Build the loss function a run scores against.
 
-    One configured loss at full weight is built and returned directly, so the
-    single-loss runs that are today's norm keep exactly the values and gradients
-    they had before there was a registry. Anything else becomes a
-    :class:`~sampleworks.core.losses.composite.CompositeLoss`.
+    One configured loss at full, unscheduled weight is built and returned
+    directly, so the single-loss runs that are today's norm keep exactly the
+    values and gradients they had before there was a registry. Anything else
+    becomes a :class:`~sampleworks.core.losses.composite.CompositeLoss`.
 
     Parameters
     ----------
@@ -435,9 +458,10 @@ def build_loss(config: LossConfig, context: LossBuildContext) -> LossFunctionPro
         A single loss or a weighted combination of several.
     """
     weights = config.resolved_weights()
+    schedules = [entry.weight_schedule for entry in config.entries]
     losses = [build_single_loss(entry.loss, entry.options, context) for entry in config.entries]
 
-    if len(losses) == 1 and weights[0] == 1.0:
+    if len(losses) == 1 and weights[0] == 1.0 and schedules[0] is None:
         return losses[0]
 
     from sampleworks.core.losses.composite import CompositeLoss
@@ -446,7 +470,40 @@ def build_loss(config: LossConfig, context: LossBuildContext) -> LossFunctionPro
         "Combining losses: "
         + ", ".join(
             f"{weight:g}*{entry.loss.value}"
-            for entry, weight in zip(config.entries, weights, strict=True)
+            + ("" if schedule is None else f" (from {schedule.start:g} to {schedule.end:g})")
+            for entry, weight, schedule in zip(config.entries, weights, schedules, strict=True)
         )
     )
-    return CompositeLoss(losses, weights)
+    return CompositeLoss(losses, weights, schedules)
+
+
+def _parse_weight_schedule(loss: Losses, raw: Any) -> WeightSchedule | None:
+    """Parse one loss's ``weight_schedule`` entry.
+
+    Parameters
+    ----------
+    loss
+        The loss the schedule belongs to, for error messages.
+    raw
+        The configured value: ``None`` or a ``{start, end}`` mapping.
+
+    Returns
+    -------
+    WeightSchedule | None
+        The schedule, or ``None`` when none is configured.
+
+    Raises
+    ------
+    ValueError
+        If ``raw`` is not a mapping with exactly the keys ``start`` and ``end``,
+        or its bounds are invalid.
+    """
+    if raw is None:
+        return None
+    expected = {schedule_field.name for schedule_field in dataclasses.fields(WeightSchedule)}
+    if not isinstance(raw, Mapping) or set(raw) != expected:
+        raise ValueError(
+            f"'{WEIGHT_SCHEDULE_KEY}' for loss '{loss.value}' must be a mapping with exactly "
+            f"the keys {sorted(expected)} (fractions of the guided steps), got {raw!r}."
+        )
+    return WeightSchedule(start=float(raw["start"]), end=float(raw["end"]))
