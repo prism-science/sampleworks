@@ -66,6 +66,7 @@ def test_save_restores_input_numbering_and_keeps_model_only_atoms_in_residue(tmp
         traj_next_step=[],
         final_state=coords,
         model_atom_array=relabel_model_residues(model, struct, reconciler),
+        deposit=None,
     )
 
     output_path = tmp_path / "refined.cif"
@@ -110,6 +111,7 @@ def test_save_writes_modeled_met_and_input_b_factors_at_mse_position(tmp_path: P
         traj_next_step=[],
         final_state=coords,
         model_atom_array=relabel_model_residues(model, struct, reconciler),
+        deposit=None,
     )
 
     output = load_structure_with_altlocs(tmp_path / "refined.cif")
@@ -215,6 +217,7 @@ def test_save_maps_each_final_and_trajectory_coordinate_set(
         traj_next_step=[trajectory_shape(next_coords)],
         final_state=final_coords,
         model_atom_array=relabel_model_residues(model, struct, reconciler),
+        deposit=None,
     )
 
     paths_and_expected = [

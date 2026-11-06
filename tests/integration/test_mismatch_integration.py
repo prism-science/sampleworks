@@ -1173,6 +1173,7 @@ class TestSave:
             traj_next_step=[],
             final_state=final_state,
             model_atom_array=model_atom_array,
+            deposit=None,
         )
 
         saved = ensure_atom_array_stack(load_any(tmp_path / "refined.cif"))
