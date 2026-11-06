@@ -8,10 +8,11 @@ numbering of chains, sequence positions and entities) and the categories that de
 polymer chains.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import NamedTuple, Self, TypeVar
 
 import numpy as np
+from atomworks.io.transforms.categories import category_to_dict
 from biotite.structure import (
     AtomArray,
     AtomArrayStack,
@@ -45,10 +46,13 @@ _HETERO = "hetero"
 _HETERO_YES = "y"
 _HETERO_NO = "n"
 
-_POLYMER_ENTITY_CATEGORIES = (_ENTITY, _ENTITY_POLY, _ENTITY_POLY_SEQ)
-# Looking residues up by author id also needs these; without them only sequence alignment can
-# place residues.
-_SCHEME_CATEGORIES = (_STRUCT_ASYM, _PDBX_POLY_SEQ_SCHEME)
+_POLYMER_ENTITY_CATEGORIES = (
+    _ENTITY,
+    _ENTITY_POLY,
+    _ENTITY_POLY_SEQ,
+    _STRUCT_ASYM,
+    _PDBX_POLY_SEQ_SCHEME,
+)
 
 
 def _canonical_monomer(name: str) -> str:
@@ -66,75 +70,6 @@ def _canonical_monomer(name: str) -> str:
         when it is not an amino acid.
     """
     return closest_canonical_amino_acid(name) or name
-
-
-def _matching_entity_and_poly_seq_num(
-    reference_block: CIFBlock, residue_names: list[str]
-) -> tuple[str, list[str]]:
-    """Find the deposited entity that contains a modeled sequence, and where each residue sits.
-
-    Parameters
-    ----------
-    reference_block : CIFBlock
-        Block of the deposited mmCIF, with ``entity_poly`` and ``entity_poly_seq``.
-    residue_names : list[str]
-        Names of the polymer residues of one output entity, sorted by residue number.
-
-    Returns
-    -------
-    tuple[str, list[str]]
-        Id of the matching deposited entity, and the ``entity_poly_seq.num`` each residue
-        aligns to.
-
-    Raises
-    ------
-    ValueError
-        If ``residue_names`` is empty, no deposited entity contains the sequence, several do,
-        or the sequence fits one entity in several equally good ways.
-    """
-    if not residue_names:
-        raise ValueError("Output entity has no polymer residues")
-    sequence = reference_block[_ENTITY_POLY_SEQ]
-    sequence_ids = np.asarray(sequence["entity_id"].as_array(str))
-    sequence_nums = np.asarray(sequence["num"].as_array(str))
-    sequence_names = np.asarray(sequence["mon_id"].as_array(str))
-    matches: list[tuple[str, list[str]]] = []
-    ambiguous: list[str] = []  # "entity 1 around deposited residue 158 (ALA)"
-    for entity_id in reference_block[_ENTITY_POLY]["entity_id"].as_array(str):
-        rows = np.flatnonzero(sequence_ids == entity_id)
-        # Microheterogeneity (several monomers at one residue): any of them may match.
-        nums = sorted({str(num) for num in sequence_nums[rows]}, key=lambda num: int(num))
-        reference_names = [
-            [str(name) for name in sequence_names[rows][sequence_nums[rows] == num]] for num in nums
-        ]
-        # Output residue numbers may not follow the deposited numbering, so align by name only.
-        positions, ambiguous_at = align_to_sequence(
-            [_canonical_monomer(name) for name in residue_names],
-            [{_canonical_monomer(name) for name in names} for names in reference_names],
-            None,
-            None,
-        )
-        if np.any(positions < 0):
-            continue  # no embedding in this entity
-        if ambiguous_at is None:
-            matches.append((str(entity_id), [nums[position] for position in positions]))
-        else:
-            ambiguous.append(
-                f"entity {entity_id} around deposited residue {nums[ambiguous_at]} "
-                f"({'/'.join(reference_names[ambiguous_at])})"
-            )
-    if len(matches) == 1:
-        return matches[0]
-    if matches:
-        entity_ids = [entity_id for entity_id, _ in matches]
-        raise ValueError(f"Modeled sequence matches several deposited entities: {entity_ids}")
-    if ambiguous:
-        raise ValueError(
-            "Modeled sequence fits the deposited sequence in several equally good ways "
-            f"({'; '.join(ambiguous)}): a gap inside a run of repeated residues cannot be "
-            "placed from the sequence alone"
-        )
-    raise ValueError("No deposited entity contains the modeled sequence")
 
 
 def _rows_where(category: CIFCategory, column_name: str, values: set[str]) -> dict[str, list[str]]:
@@ -163,6 +98,106 @@ def _blank_to_empty(values: np.ndarray) -> np.ndarray:
     return np.where(np.isin(values, [".", "?"]), "", values)
 
 
+_Label = tuple[str, str, str]  # deposited (label_asym_id, label_seq_id, label_entity_id)
+
+# Deposited label ids of each atom; the deposit_ prefix keeps them apart from label_*
+# annotations that readers load from an input file.
+DEPOSIT_LABEL_ANNOTATIONS = (
+    "deposit_label_asym_id",
+    "deposit_label_seq_id",
+    "deposit_label_entity_id",
+)
+
+
+@dataclass(frozen=True)
+class _PolySeqSchemePosition:
+    """One deposited polymer position: the ``pdbx_poly_seq_scheme`` row(s) of one residue.
+
+    Fields are named after the scheme's columns. A residue at this position takes ``asym_id``,
+    ``seq_id`` and ``entity_id`` as its ``label_asym_id``, ``label_seq_id`` and
+    ``label_entity_id``, and ``pdb_strand_id``, ``pdb_seq_num`` and ``pdb_ins_code`` as its
+    ``auth_asym_id``, ``auth_seq_id`` and ``pdbx_PDB_ins_code``.
+
+    Attributes
+    ----------
+    asym_id, entity_id : str
+        Label chain and entity.
+    seq_id : str
+        Position in the entity's ``entity_poly_seq`` (its ``num``), counting from 1. It has
+        no insertion code; only author numbering does.
+    pdb_strand_id, pdb_seq_num, pdb_ins_code : str
+        Author chain, residue number and insertion code (``""`` when absent).
+    monomers : frozenset[str]
+        Canonical names of the monomers allowed here. A microheterogeneity site (e.g.
+        CYS/CSO) has one scheme row per monomer, all merged into this position.
+    """
+
+    asym_id: str
+    seq_id: str
+    entity_id: str
+    pdb_strand_id: str
+    pdb_seq_num: str
+    pdb_ins_code: str
+    monomers: frozenset[str]
+
+    @property
+    def label(self) -> _Label:
+        """``(label_asym_id, label_seq_id, label_entity_id)`` of the position."""
+        return (self.asym_id, self.seq_id, self.entity_id)
+
+    @property
+    def author_key(self) -> tuple[str, str, str]:
+        """``(auth_asym_id, auth_seq_id, pdbx_PDB_ins_code)`` of the position."""
+        return (self.pdb_strand_id, self.pdb_seq_num, self.pdb_ins_code)
+
+    def with_monomer(self, name: str) -> Self:
+        """Return a copy that also allows monomer ``name``.
+
+        Parameters
+        ----------
+        name : str
+            Monomer name; it is stored canonicalized (``MSE -> MET``).
+
+        Returns
+        -------
+        Self
+            The position with ``name`` added to ``monomers``.
+        """
+        return replace(self, monomers=self.monomers | {_canonical_monomer(name)})
+
+
+def _scheme_positions(block: CIFBlock) -> tuple[_PolySeqSchemePosition, ...]:
+    """List every deposited polymer position, resolved or not, in scheme order.
+
+    Parameters
+    ----------
+    block : CIFBlock
+        Deposited block with ``pdbx_poly_seq_scheme``.
+
+    Returns
+    -------
+    tuple[_PolySeqSchemePosition, ...]
+        One entry per ``(asym_id, seq_id)``; microheterogeneity rows merge into ``monomers``.
+    """
+    scheme = category_to_dict(block, _PDBX_POLY_SEQ_SCHEME)
+    positions: dict[tuple[str, str], _PolySeqSchemePosition] = {}
+    for asym, seq, entity, strand, number, ins_code, monomer in zip(
+        scheme["asym_id"],
+        scheme["seq_id"],
+        scheme["entity_id"],
+        scheme["pdb_strand_id"],
+        scheme["pdb_seq_num"],
+        _blank_to_empty(scheme["pdb_ins_code"]),
+        scheme["mon_id"],
+        strict=True,
+    ):
+        position = positions.get((asym, seq)) or _PolySeqSchemePosition(
+            asym, seq, entity, strand, number, ins_code, frozenset()
+        )
+        positions[(asym, seq)] = position.with_monomer(monomer)
+    return tuple(positions.values())
+
+
 @dataclass(frozen=True)
 class Deposit:
     """A deposited mmCIF, read once and reused to label many output structures.
@@ -174,10 +209,13 @@ class Deposit:
     monomers : frozenset[str]
         Canonical names of the monomers listed in ``entity_poly_seq``, used to tell modified
         residues from ligands.
+    scheme : tuple[_PolySeqSchemePosition, ...]
+        Its polymer positions in ``pdbx_poly_seq_scheme`` order (``_scheme_positions``).
     """
 
     block: CIFBlock
     monomers: frozenset[str]
+    scheme: tuple[_PolySeqSchemePosition, ...]
 
     @classmethod
     def from_cif(cls, reference: CIFFile) -> Self:
@@ -196,8 +234,8 @@ class Deposit:
         Raises
         ------
         ValueError
-            If the file has no block or several blocks, or lacks ``entity``, ``entity_poly`` or
-            ``entity_poly_seq``.
+            If the file has no block or several blocks, or lacks ``entity``, ``entity_poly``,
+            ``entity_poly_seq``, ``struct_asym`` or ``pdbx_poly_seq_scheme``.
         """
         block = reference.block
         missing = [name for name in _POLYMER_ENTITY_CATEGORIES if name not in block]
@@ -207,18 +245,7 @@ class Deposit:
             _canonical_monomer(str(name))
             for name in block[_ENTITY_POLY_SEQ]["mon_id"].as_array(str)
         )
-        return cls(block, monomers)
-
-
-_Label = tuple[str, str, str]  # deposited (label_asym_id, label_seq_id, label_entity_id)
-
-# Deposited label ids of each atom; the deposit_ prefix keeps them apart from label_*
-# annotations that readers load from an input file.
-DEPOSIT_LABEL_ANNOTATIONS = (
-    "deposit_label_asym_id",
-    "deposit_label_seq_id",
-    "deposit_label_entity_id",
-)
+        return cls(block, monomers, _scheme_positions(block))
 
 
 _Structure = TypeVar("_Structure", AtomArray, AtomArrayStack)
@@ -299,55 +326,34 @@ def _residues(atom_array: AtomArray | AtomArrayStack, deposit: Deposit) -> _Resi
     )
 
 
-def _labels_by_author_ids(residues: _Residues, reference_block: CIFBlock) -> list[_Label | None]:
-    """Find deposited label ids by reading residue ids as deposited author ids.
-
-    Works when the output keeps the author numbering of the deposited mmCIF, as structures read
-    from it do: ``chain_id``, ``res_id`` and ``ins_code`` are looked up as ``pdb_strand_id``,
-    ``pdb_seq_num`` and ``pdb_ins_code`` in ``pdbx_poly_seq_scheme``. A polymer ``HETATM``
-    residue with no row there is treated as a ligand, since a free amino acid (a GLU ligand
-    beside a chain containing GLU) looks like a modified residue by name.
+def _positions_by_lookup(
+    keys: list[tuple[str, ...]],
+    lookup: dict[tuple[str, ...], _PolySeqSchemePosition],
+    residues: _Residues,
+) -> list[_PolySeqSchemePosition | None]:
+    """Place residues by looking their keys up among the deposited positions.
 
     Parameters
     ----------
+    keys : list[tuple[str, ...]]
+        Lookup key per residue.
+    lookup : dict[tuple[str, ...], _PolySeqSchemePosition]
+        Deposited positions by key.
     residues : _Residues
-        Residues to label.
-    reference_block : CIFBlock
-        Block of the deposited mmCIF, with ``pdbx_poly_seq_scheme`` and ``struct_asym``.
+        The residues ``keys`` describe.
 
     Returns
     -------
-    list[_Label | None]
-        Deposited label ids of each residue, ``None`` for ligands and waters.
+    list[_PolySeqSchemePosition | None]
+        Deposited position per residue, ``None`` for residues outside the scheme (e.g.
+        ligands).
 
     Raises
     ------
     ValueError
-        If ``pdbx_poly_seq_scheme`` or ``struct_asym`` is missing, an ``ATOM`` residue has no
-        row in ``pdbx_poly_seq_scheme``, a polymer residue name differs from the deposited
-        name at that position, or no residue is labeled.
+        If a non-``HETATM`` residue has no position, a residue's name is not one of its
+        position's monomers, or no residue is placed.
     """
-    missing = [name for name in _SCHEME_CATEGORIES if name not in reference_block]
-    if missing:
-        raise ValueError(f"Reference CIF lacks {missing}")
-    scheme = reference_block[_PDBX_POLY_SEQ_SCHEME]
-    scheme_keys = zip(
-        scheme["pdb_strand_id"].as_array(str),
-        scheme["pdb_seq_num"].as_array(str),
-        _blank_to_empty(scheme["pdb_ins_code"].as_array(str)),
-    )
-    scheme_labels = zip(
-        scheme["asym_id"].as_array(str),
-        scheme["seq_id"].as_array(str),
-        scheme["entity_id"].as_array(str),
-    )
-    lookup: dict[tuple[str, str, str], _Label] = {}
-    monomers: dict[tuple[str, str, str], set[str]] = {}
-    for key, label, monomer in zip(scheme_keys, scheme_labels, scheme["mon_id"].as_array(str)):
-        lookup.setdefault(key, label)  # microheterogeneity rows (e.g. CYS/CSO) share a seq_id
-        monomers.setdefault(key, set()).add(_canonical_monomer(monomer))
-
-    keys = list(zip(residues.chain_id, residues.res_id, residues.ins_code, strict=True))
     unmatched = {
         key for key, hetero in zip(keys, residues.hetero) if not hetero and key not in lookup
     }
@@ -359,98 +365,124 @@ def _labels_by_author_ids(residues: _Residues, reference_block: CIFBlock) -> lis
     renamed = {
         (key, name)
         for key, name, polymer in zip(keys, residues.res_name, residues.polymer)
-        if polymer and key in lookup and _canonical_monomer(name) not in monomers[key]
+        if polymer and key in lookup and _canonical_monomer(name) not in lookup[key].monomers
     }
     if renamed:
         raise ValueError(f"Residue names disagree with the deposit, e.g. {sorted(renamed)[:3]}")
-    labels = [lookup.get(key) if polymer else None for key, polymer in zip(keys, residues.polymer)]
-    if not any(labels):
+    positions = [
+        lookup.get(key) if polymer else None for key, polymer in zip(keys, residues.polymer)
+    ]
+    if not any(positions):
         raise ValueError("Output has no polymer residues")
-    return labels
+    return positions
 
 
-def _labels_by_alignment(residues: _Residues, reference_block: CIFBlock) -> list[_Label | None]:
-    """Find deposited label ids by aligning each output entity sequence to the deposited ones.
+def _positions_by_alignment(
+    residues: _Residues, scheme: tuple[_PolySeqSchemePosition, ...]
+) -> list[_PolySeqSchemePosition | None]:
+    """Place residues by aligning each chain's sequence to a deposited chain's.
 
-    Used when residues are not numbered as in the deposited mmCIF, e.g. after a model wrapper
-    renumbers them in ``featurize``. All chains of one output entity share one alignment, so
-    their residues are pooled by residue number and insertion code. Each residue takes the
-    deposited ``entity_poly_seq.num`` it aligns to as ``label_seq_id`` and the matching
-    deposited entity id as ``label_entity_id``; ``label_asym_id`` stays the output chain id.
+    The fallback when the residues keep neither the deposit's author nor its label numbering,
+    e.g. a model that numbers from 1. Each chain is aligned to the deposited chains whose
+    ``pdbx_poly_seq_scheme.asym_id`` or ``pdb_strand_id`` equals its name, and must fit exactly
+    one. Either id can appear: an input read from an RCSB CIF brings label chain ids, a density
+    input author ones. Names are compared after canonicalizing (``MSE -> MET``), and any
+    monomer of a microheterogeneity site (several monomers at one position) matches.
+
+    Chains are taken one by one, not merged per entity: a model numbers each chain from 1, so
+    two copies of one entity resolved over different ranges share numbers but not residues.
 
     Parameters
     ----------
     residues : _Residues
-        Residues to label.
-    reference_block : CIFBlock
-        Block of the deposited mmCIF, with ``entity_poly`` and ``entity_poly_seq``.
+        Residues to place.
+    scheme : tuple[_PolySeqSchemePosition, ...]
+        Deposited positions (``Deposit.scheme``).
 
     Returns
     -------
-    list[_Label | None]
-        Deposited label ids of each residue, ``None`` for ligands and waters.
+    list[_PolySeqSchemePosition | None]
+        Deposited position per residue, ``None`` for non-polymer residues.
 
     Raises
     ------
     ValueError
-        If no residue is polymer, two residues of one entity share a number and insertion code
-        but differ in name, or an entity does not fit exactly one deposited entity in exactly
-        one way.
+        If no chain has polymer residues, a chain has conflicting names for one residue, fits
+        a deposited chain in several equally good ways, does not fit exactly one deposited
+        chain of its name, or two chains fit the same one.
     """
-    # (output entity, res_id, ins_code) -> (deposited entity, entity_poly_seq.num)
-    remap: dict[tuple[str, str, str], tuple[str, str]] = {}
-    for entity_id in dict.fromkeys(residues.entity_id):
-        names: dict[tuple[int, str], str] = {}  # (res_id, ins_code) -> res_name
-        for entity, number, ins_code, name, polymer in zip(
-            residues.entity_id,
-            residues.res_id,
-            residues.ins_code,
-            residues.res_name,
-            residues.polymer,
-            strict=True,
-        ):
-            if entity != entity_id or not polymer:
-                continue
-            key = (int(number), str(ins_code))
-            if key in names and names[key] != name:
-                raise ValueError(
-                    f"Output entity {entity_id} has conflicting names for {number}{ins_code}"
-                )
-            names[key] = str(name)
-        residue_keys = sorted(names)
-        if not residue_keys:
+    chain_positions: dict[str, list[_PolySeqSchemePosition]] = {}  # asym_id -> scheme order
+    for position in scheme:
+        chain_positions.setdefault(position.asym_id, []).append(position)
+    positions: list[_PolySeqSchemePosition | None] = [None] * len(residues.chain_id)
+    output_chain_by_asym_id: dict[str, str] = {}
+    for chain in dict.fromkeys(residues.chain_id):
+        rows = np.flatnonzero((residues.chain_id == chain) & residues.polymer)
+        if rows.size == 0:
             continue  # ligands and waters
-        deposited_id, nums = _matching_entity_and_poly_seq_num(
-            reference_block, [names[key] for key in residue_keys]
+        names: dict[tuple[int, str], str] = {}  # (number, insertion code) -> name
+        for row in rows:
+            key = (int(residues.res_id[row]), str(residues.ins_code[row]))
+            if key in names and names[key] != residues.res_name[row]:
+                raise ValueError(f"Output chain {chain} has conflicting names for residue {key}")
+            names[key] = str(residues.res_name[row])
+        # Stable: residues sharing a number keep their order (14, 14A, 14B; thrombin's 1H ... 1).
+        sequence_keys = sorted(names, key=lambda key: key[0])
+        observed = [_canonical_monomer(names[key]) for key in sequence_keys]
+        fits: dict[str, np.ndarray] = {}  # asym_id -> index in its chain of each residue
+        ambiguous: list[str] = []
+        for asym_id, deposited in chain_positions.items():
+            # The name is ambiguous when it is one copy's label id and another's author id.
+            if chain not in (asym_id, deposited[0].pdb_strand_id):
+                continue
+            # Output numbering says nothing about the deposit's gaps.
+            indices, ambiguous_at = align_to_sequence(
+                observed, [position.monomers for position in deposited], None, None
+            )
+            if np.any(indices < 0):  # -1: no embedding in this chain
+                continue
+            if ambiguous_at is None:
+                fits[asym_id] = indices
+            else:
+                ambiguous.append(
+                    f"chain {asym_id} around position {deposited[ambiguous_at].seq_id}"
+                )
+        if not fits and ambiguous:
+            raise ValueError(
+                f"Output chain {chain} fits the deposited sequence in several equally good ways "
+                f"({'; '.join(ambiguous)}): a gap inside a run of repeated residues cannot be "
+                "placed from the sequence alone"
+            )
+        if len(fits) != 1:
+            raise ValueError(
+                f"Output chain {chain} names deposited chains {sorted(fits)} that contain its "
+                "sequence, not exactly one"
+            )
+        ((asym_id, indices),) = fits.items()
+        if asym_id in output_chain_by_asym_id:
+            raise ValueError(
+                f"Output chains {output_chain_by_asym_id[asym_id]} and {chain} both name "
+                f"chain {asym_id}"
+            )
+        output_chain_by_asym_id[asym_id] = str(chain)
+        position_of = dict(
+            zip(sequence_keys, (chain_positions[asym_id][index] for index in indices), strict=True)
         )
-        for (number, ins_code), num in zip(residue_keys, nums, strict=True):
-            remap[(str(entity_id), str(number), ins_code)] = (deposited_id, num)
-    if not remap:
-        raise ValueError("Output has no polymer entities")
-    labels: list[_Label | None] = []
-    for chain, entity, number, ins_code, polymer in zip(
-        residues.chain_id,
-        residues.entity_id,
-        residues.res_id,
-        residues.ins_code,
-        residues.polymer,
-        strict=True,
-    ):
-        match = remap.get((str(entity), str(number), str(ins_code))) if polymer else None
-        labels.append(None if match is None else (str(chain), match[1], match[0]))
-    return labels
+        for row in rows:
+            positions[row] = position_of[(int(residues.res_id[row]), str(residues.ins_code[row]))]
+    if not output_chain_by_asym_id:
+        raise ValueError("Output has no polymer chains")
+    return positions
 
 
-def resolve_deposit_labels(
+def _resolve_deposit_positions(
     atom_array: AtomArray | AtomArrayStack, deposit: Deposit
-) -> list[_Label | None]:
-    """Find where each residue of a structure sits in its deposited mmCIF.
+) -> list[_PolySeqSchemePosition | None]:
+    """Find each residue's deposited ``pdbx_poly_seq_scheme`` position.
 
-    This maps model output, which may be renumbered, onto the chain, sequence position and
-    entity ids of the PDB entry. Residues are first looked up by their ids as deposited author
-    ids (``_labels_by_author_ids``). If that fails for any reason, including a residue whose
-    name differs from the deposited one at the same number, each output entity sequence is
-    aligned to the deposited sequences instead (``_labels_by_alignment``).
+    Three matches are tried in turn: ``(chain_id, res_id, ins_code)`` as the deposit's author
+    ids, ``(chain_id, res_id)`` as its label chain and position, then sequence alignment
+    (``_positions_by_alignment``). The first that places every polymer residue wins.
 
     Parameters
     ----------
@@ -461,50 +493,60 @@ def resolve_deposit_labels(
 
     Returns
     -------
-    list[_Label | None]
-        Deposited ``(label_asym_id, label_seq_id, label_entity_id)`` of each residue, ``None``
-        for ligands and waters.
+    list[_PolySeqSchemePosition | None]
+        Deposited position per residue, ``None`` for non-polymer residues.
 
     Raises
     ------
     ValueError
-        If neither method places every polymer residue; the message gives both reasons.
+        If no match places every residue; the message gives each one's reason.
+
+    Notes
+    -----
+    Which ids the residues carry is inferred, not recorded: inputs are loaded without saying
+    whether they were read by label or author ids. Author ids are tried first, so residues
+    whose label ids also read as valid author ids, with matching names, are placed by author
+    ids.
     """
-    reference_block = deposit.block
     residues = _residues(atom_array, deposit)
+    scheme = deposit.scheme
+    errors: list[str] = []
     try:
-        return _labels_by_author_ids(residues, reference_block)
-    except ValueError as lookup_error:
-        try:
-            return _labels_by_alignment(residues, reference_block)
-        except ValueError as alignment_error:
-            raise ValueError(
-                f"author lookup: {lookup_error}; sequence alignment: {alignment_error}"
-            ) from alignment_error
+        keys = list(zip(residues.chain_id, residues.res_id, residues.ins_code, strict=True))
+        return _positions_by_lookup(keys, {p.author_key: p for p in scheme}, residues)
+    except ValueError as error:
+        errors.append(f"author lookup: {error}")
+    try:
+        keys = list(zip(residues.chain_id, residues.res_id, strict=True))
+        return _positions_by_lookup(keys, {(p.asym_id, p.seq_id): p for p in scheme}, residues)
+    except ValueError as error:
+        errors.append(f"label lookup: {error}")
+    try:
+        return _positions_by_alignment(residues, scheme)
+    except ValueError as error:
+        errors.append(f"sequence alignment: {error}")
+    raise ValueError("; ".join(errors))
 
 
 def annotate_deposit_ids(
     atom_array: _Structure,
     deposit: Deposit,
-    labels: list[_Label | None] | None = None,
+    positions: list[_PolySeqSchemePosition | None] | None = None,
 ) -> _Structure:
-    """Return a copy of a structure annotated with the deposited label ids of every atom.
+    """Return a copy of ``atom_array`` carrying each residue's deposited ids.
 
-    Placing residues can take a sequence alignment, so annotate once and reuse the copy for
-    every frame written with ``set_deposited_structure``. The ids are stored in the
-    ``DEPOSIT_LABEL_ANNOTATIONS``. Ligands and waters keep their chain id, have no sequence
-    position (``.``), and keep the entity id that ``set_structure`` writes, which is not
-    necessarily a deposited entity id.
+    A polymer residue takes its position's author ids as ``chain_id``, ``res_id`` and
+    ``ins_code``, and its label ids as the ``DEPOSIT_LABEL_ANNOTATIONS``. A residue without a
+    position (a ligand or water) keeps its ids and entity and has no sequence position (``.``).
 
     Parameters
     ----------
     atom_array : AtomArray | AtomArrayStack
         Structure to annotate.
     deposit : Deposit
-        Deposited mmCIF to place it in.
-    labels : list[_Label | None] | None
-        Deposited label ids of each residue, from ``resolve_deposit_labels``; resolved here
-        when omitted.
+        The deposit to place them in.
+    positions : list[_PolySeqSchemePosition | None] | None
+        Deposited position per residue; found with ``_resolve_deposit_positions`` when omitted.
 
     Returns
     -------
@@ -514,44 +556,52 @@ def annotate_deposit_ids(
     Raises
     ------
     ValueError
-        If ``labels`` is omitted and the residues cannot be placed.
+        If ``positions`` is omitted and the residues cannot be placed.
     """
-    if labels is None:
-        labels = resolve_deposit_labels(atom_array, deposit)
+    if positions is None:
+        positions = _resolve_deposit_positions(atom_array, deposit)
     residues = _residues(atom_array, deposit)
-    residue_ids = [
-        label if label is not None else (str(chain), _INAPPLICABLE, str(entity))
-        for label, chain, entity in zip(labels, residues.chain_id, residues.entity_id, strict=True)
-    ]
+    starts = get_residue_starts(atom_array)
     residue_of_atom = get_residue_positions(atom_array, np.arange(atom_array.array_length()))
     annotated = atom_array.copy()
+    placed = np.flatnonzero([position is not None for position in positions])
+    placed_positions = [position for position in positions if position is not None]
+    for name, values in (
+        ("chain_id", [p.pdb_strand_id for p in placed_positions]),
+        ("res_id", [int(p.pdb_seq_num) for p in placed_positions]),
+        ("ins_code", [p.pdb_ins_code for p in placed_positions]),
+    ):
+        residue_values = atom_array.get_annotation(name)[starts].copy()  # (n_residues,)
+        residue_values[placed] = values
+        annotated.set_annotation(name, residue_values[residue_of_atom])
+    labels = [
+        position.label if position is not None else (str(chain), _INAPPLICABLE, str(entity))
+        for position, chain, entity in zip(
+            positions, residues.chain_id, residues.entity_id, strict=True
+        )
+    ]
     for index, name in enumerate(DEPOSIT_LABEL_ANNOTATIONS):
-        values = np.array([ids[index] for ids in residue_ids], dtype=object)
+        values = np.array([label[index] for label in labels], dtype=object)
         annotated.set_annotation(name, values[residue_of_atom].astype(str))
     return annotated
 
 
 def _carried_categories(
-    reference_block: CIFBlock, polymer_labels: set[_Label], with_scheme: bool
+    reference_block: CIFBlock, polymer_labels: set[_Label]
 ) -> dict[str, dict[str, list[str]]]:
     """Select the deposited rows that describe the polymer chains and entities in an output.
 
-    Rows of ``entity``, ``entity_poly`` and ``entity_poly_seq`` are kept for the entities in
-    ``polymer_labels``. With ``with_scheme``, rows of ``struct_asym`` and
-    ``pdbx_poly_seq_scheme`` are kept for the chains in ``polymer_labels``, and the scheme
-    columns ``auth_seq_num`` and ``auth_mon_id`` are ``?`` at positions the output does not
-    model. Without it, ``struct_asym`` is rebuilt to list each polymer chain of the output
-    with its entity.
+    ``entity``, ``entity_poly`` and ``entity_poly_seq`` rows are kept for the entities in
+    ``polymer_labels``, and ``struct_asym`` and ``pdbx_poly_seq_scheme`` rows for its chains.
+    The scheme's ``auth_seq_num`` and ``auth_mon_id`` are filled at modeled positions and
+    ``?`` elsewhere.
 
     Parameters
     ----------
     reference_block : CIFBlock
         Block of the deposited mmCIF.
     polymer_labels : set[_Label]
-        Deposited label ids of the polymer residues in the output.
-    with_scheme : bool
-        Whether the output keeps the deposited chains and author ids, so the deposited
-        ``pdbx_poly_seq_scheme`` still describes it.
+        Deposited labels of the output's polymer residues.
 
     Returns
     -------
@@ -566,17 +616,10 @@ def _carried_categories(
             (_ENTITY, "id", entity_ids),
             (_ENTITY_POLY, "entity_id", entity_ids),
             (_ENTITY_POLY_SEQ, "entity_id", entity_ids),
+            (_STRUCT_ASYM, "id", asym_ids),
+            (_PDBX_POLY_SEQ_SCHEME, "asym_id", asym_ids),
         )
     }
-    if not with_scheme:
-        chain_entities = {asym_id: entity_id for asym_id, _, entity_id in polymer_labels}
-        categories[_STRUCT_ASYM] = {
-            "id": sorted(chain_entities),
-            "entity_id": [chain_entities[chain] for chain in sorted(chain_entities)],
-        }
-        return categories
-    for name, column in ((_STRUCT_ASYM, "id"), (_PDBX_POLY_SEQ_SCHEME, "asym_id")):
-        categories[name] = _rows_where(reference_block[name], column, asym_ids)
     carried_scheme = categories[_PDBX_POLY_SEQ_SCHEME]
     modeled = {(asym_id, seq_id) for asym_id, seq_id, _ in polymer_labels}
     has_coords = [
@@ -728,57 +771,6 @@ def _relabeled_struct_conn_partners(
     return partner_labels
 
 
-def _keeps_deposited_author_ids(
-    atom_site: CIFCategory, labels: list[_Label | None], reference_block: CIFBlock
-) -> bool:
-    """Check whether every polymer residue was written with its deposited author ids.
-
-    If so, the deposited ``pdbx_poly_seq_scheme``, which maps label ids to author ids, still
-    describes the output and can be copied into it.
-
-    Parameters
-    ----------
-    atom_site : CIFCategory
-        Output ``atom_site``.
-    labels : list[_Label | None]
-        Deposited label ids of each ``atom_site`` row, ``None`` for ligand and water atoms.
-    reference_block : CIFBlock
-        Block of the deposited mmCIF.
-
-    Returns
-    -------
-    bool
-        ``True`` when the author ids written for every polymer atom are the ones
-        ``pdbx_poly_seq_scheme`` lists for its label ids. ``False`` otherwise, or when the
-        deposited mmCIF lacks ``struct_asym`` or ``pdbx_poly_seq_scheme``.
-    """
-    if not all(name in reference_block for name in _SCHEME_CATEGORIES):
-        return False
-    scheme = reference_block[_PDBX_POLY_SEQ_SCHEME]
-    deposited = dict(
-        zip(
-            zip(scheme["asym_id"].as_array(str), scheme["seq_id"].as_array(str), strict=True),
-            zip(
-                scheme["pdb_strand_id"].as_array(str),
-                scheme["pdb_seq_num"].as_array(str),
-                _blank_to_empty(scheme["pdb_ins_code"].as_array(str)),
-                strict=True,
-            ),
-            strict=True,
-        )
-    )
-    written = zip(
-        atom_site["auth_asym_id"].as_array(str),
-        atom_site["auth_seq_id"].as_array(str),
-        _blank_to_empty(atom_site["pdbx_PDB_ins_code"].as_array(str)),
-        strict=True,
-    )
-    return all(
-        label is None or deposited.get(label[:2]) == author_ids
-        for label, author_ids in zip(labels, written, strict=True)
-    )
-
-
 def set_deposited_structure(
     cif_file: CIFFile, atom_array: AtomArray | AtomArrayStack, deposit: Deposit
 ) -> tuple[str, ...]:
@@ -841,8 +833,7 @@ def set_deposited_structure(
         raise ValueError("Output has no deposited polymer residues")
 
     # Copy the deposited rows for the chains present, plus monomers the model adds.
-    with_scheme = _keeps_deposited_author_ids(atom_site, labels, reference_block)
-    categories = _carried_categories(reference_block, polymer_labels, with_scheme)
+    categories = _carried_categories(reference_block, polymer_labels)
     _add_modeled_monomers(categories[_ENTITY_POLY_SEQ], atom_site, labels)
     if _CHEM_COMP in reference_block:
         components = set(atom_site["label_comp_id"].as_array(str))
