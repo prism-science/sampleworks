@@ -16,13 +16,14 @@ sampleworks loss, scaler, CLI path and eval applies unchanged.
 | Static context (pair + relative position → z-conditioning) | `model.compute_static_context` | once per structure |
 | Pad atoms to a multiple of 32, `denoise`, slice back | `BioEmu2Wrapper.step` | every sampler step |
 
-BioEmu2's EDM recipe matches `AF3EDMSampler`. `build_bioemu2_edm_sampler(model_wrapper, mode)`
-(`models/bioemu2/sampler.py`) returns one configured like BioEmu2's own `edm_sampler`:
-`sigma_data`, `sigma_min` and `sigma_max` from the checkpoint (the denoiser preconditions with the
-same schedule), `gamma_0=0.8`, `gamma_min=1.0`, `noise_scale=1.0`, `step_scale=1.0`
-(equilibrium) or `1.5` (structure), with reverse-diffusion alignment on. `_run_guidance` uses it;
-keyword overrides change any `EDMSamplerConfig` field. The wrapper itself holds no sampler
-settings.
+BioEmu2's EDM recipe matches `AF3EDMSampler`. `bioemu2_edm_settings(model_wrapper, mode)`
+(`models/bioemu2/sampler.py`) returns the `EDMSamplerConfig` keyword arguments for BioEmu2's own
+`edm_sampler`: `sigma_data`, `sigma_min` and `sigma_max` from the checkpoint (the denoiser
+preconditions with the same schedule), `gamma_0=0.8`, `gamma_min=1.0`, `noise_scale=1.0`,
+`step_scale=1.0` (equilibrium) or `1.5` (structure). Spread them into an `EDMSamplerConfig` and pass
+it to `AF3EDMSampler`, exactly as for every other model — `_run_guidance` does this on the shared
+sampler path (with reverse-diffusion alignment on), and any field can be overridden at the call
+site. The wrapper itself holds no sampler settings.
 
 `step()` keeps the autograd graph. Gradients reach `x_t` (noise-space DPS), and the trunk `single`
 and `pair` tensors. The static context is built from `single`, `pair` and the relative-position

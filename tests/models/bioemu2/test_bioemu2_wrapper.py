@@ -14,9 +14,10 @@ from atomworks.enums import ChainType
 from bioemu2 import Ligand, Protein, System
 from bioemu2.structure.preparation import prepare_sampling_inputs
 from biotite.structure import AtomArrayStack
+from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
 from sampleworks.core.scalers.pure_guidance import PureGuidance
 from sampleworks.core.scalers.step_scalers import DataSpaceDPSScaler
-from sampleworks.models.bioemu2.sampler import build_bioemu2_edm_sampler
+from sampleworks.models.bioemu2.sampler import bioemu2_edm_settings
 from sampleworks.models.bioemu2.wrapper import (
     annotate_structure_for_bioemu2,
     BioEmu2Conditioning,
@@ -391,26 +392,34 @@ class TestInitializeFromPrior:
             tiny_bioemu2_wrapper.initialize_from_prior(2)
 
 
-class TestBuildSampler:
+class TestEdmSettings:
     @pytest.mark.parametrize(("mode", "step_scale"), [("equilibrium", 1.0), ("structure", 1.5)])
     def test_uses_checkpoint_schedule_and_bioemu2_defaults(
         self, tiny_bioemu2_wrapper: BioEmu2Wrapper, mode, step_scale
     ):
         schedule = tiny_bioemu2_wrapper.model.edm_schedule
-        config = build_bioemu2_edm_sampler(tiny_bioemu2_wrapper, mode).config
+        settings = bioemu2_edm_settings(tiny_bioemu2_wrapper, mode)
 
-        assert (config.sigma_data, config.s_max, config.s_min) == (
+        assert (settings["sigma_data"], settings["s_max"], settings["s_min"]) == (
             schedule.sigma_data,
             schedule.sigma_max,
             schedule.sigma_min,
         )
-        assert (config.gamma_0, config.gamma_min, config.noise_scale) == (0.8, 1.0, 1.0)
-        assert config.step_scale == step_scale
-        assert config.alignment_reverse_diffusion
+        assert (settings["gamma_0"], settings["gamma_min"], settings["noise_scale"]) == (
+            0.8,
+            1.0,
+            1.0,
+        )
+        assert settings["step_scale"] == step_scale
 
-    def test_overrides_apply(self, tiny_bioemu2_wrapper: BioEmu2Wrapper):
-        sampler = build_bioemu2_edm_sampler(tiny_bioemu2_wrapper, gamma_min=0.0, step_scale=2.0)
-        assert (sampler.config.gamma_min, sampler.config.step_scale) == (0.0, 2.0)
+    def test_settings_are_valid_edm_sampler_config_kwargs(
+        self, tiny_bioemu2_wrapper: BioEmu2Wrapper
+    ):
+        """The settings spread into EDMSamplerConfig, and callers can override any field."""
+        config = EDMSamplerConfig(
+            **{**bioemu2_edm_settings(tiny_bioemu2_wrapper), "gamma_min": 0.0, "step_scale": 2.0}
+        )
+        assert (config.gamma_min, config.step_scale) == (0.0, 2.0)
 
 
 def test_guided_sampling_runs_end_to_end(
@@ -421,7 +430,11 @@ def test_guided_sampling_runs_end_to_end(
     out = PureGuidance(ensemble_size=2, num_steps=3).sample(
         structure=structure,
         model=tiny_bioemu2_wrapper,
-        sampler=build_bioemu2_edm_sampler(tiny_bioemu2_wrapper),
+        sampler=AF3EDMSampler(
+            config=EDMSamplerConfig(
+                **bioemu2_edm_settings(tiny_bioemu2_wrapper), alignment_reverse_diffusion=True
+            )
+        ),
         step_scaler=DataSpaceDPSScaler(step_size=0.1),
         loss_function=MockGradientLossFunction(),
     )

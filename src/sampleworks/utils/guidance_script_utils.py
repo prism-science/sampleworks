@@ -793,14 +793,18 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
             "step_scale": 1.0,
         }
     elif is_bioemu2:
+        from sampleworks.models.bioemu2.sampler import bioemu2_edm_settings
         from sampleworks.models.bioemu2.wrapper import annotate_structure_for_bioemu2
 
-        bioemu2_mode = getattr(args, "bioemu2_mode", None) or "equilibrium"
         structure = annotate_structure_for_bioemu2(
             structure,
-            mode=bioemu2_mode,
-            msa_path=getattr(args, "msa_path", None),
-            use_msa_server=not bool(getattr(args, "bioemu2_no_msa_server", False)),
+            mode=args.bioemu2_mode,
+            msa_path=args.msa_path,
+            use_msa_server=not bool(args.bioemu2_no_msa_server),
+        )
+        # BioEmu2's EDM settings feed the shared sampler path below, like every other model.
+        edm_sampler_kwargs = bioemu2_edm_settings(
+            model_wrapper, structure["_bioemu2_config"].mode
         )
     else:
         raise ValueError(f"Unknown model wrapper class: {wrapper_class_name}")
@@ -811,26 +815,14 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
     )
 
     # Create sampler with model-appropriate settings
-    if is_bioemu2:
-        from sampleworks.models.bioemu2.sampler import build_bioemu2_edm_sampler
-
-        sampler = build_bioemu2_edm_sampler(
-            model_wrapper,
-            structure["_bioemu2_config"].mode,
-            device=str(device),
-            augmentation=args.augmentation,
-            align_to_input=args.align_to_input,
-            alignment_reverse_diffusion=use_alignment_for_reverse_diffusion,
-        )
-    else:
-        sampler_config = EDMSamplerConfig(
-            device=str(device),
-            augmentation=args.augmentation,
-            align_to_input=args.align_to_input,
-            alignment_reverse_diffusion=use_alignment_for_reverse_diffusion,
-            **edm_sampler_kwargs,
-        )
-        sampler = AF3EDMSampler(config=sampler_config)
+    sampler_config = EDMSamplerConfig(
+        device=str(device),
+        augmentation=args.augmentation,
+        align_to_input=args.align_to_input,
+        alignment_reverse_diffusion=use_alignment_for_reverse_diffusion,
+        **edm_sampler_kwargs,
+    )
+    sampler = AF3EDMSampler(config=sampler_config)
 
     step_scaler = _build_step_scaler(args, guidance_type)
 

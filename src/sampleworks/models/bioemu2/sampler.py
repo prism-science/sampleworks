@@ -1,29 +1,20 @@
-"""``AF3EDMSampler`` configured the way BioEmu2 samples."""
+"""BioEmu2's EDM sampler settings for :class:`~sampleworks.core.samplers.edm.AF3EDMSampler`."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-
-import torch
-
-from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
 
 
 if TYPE_CHECKING:
     from sampleworks.models.bioemu2.wrapper import BioEmu2Wrapper, SamplingMode
 
 
-def build_bioemu2_edm_sampler(
-    model_wrapper: BioEmu2Wrapper,
-    mode: SamplingMode = "equilibrium",
-    *,
-    device: str | torch.device | None = None,
-    augmentation: bool = True,
-    align_to_input: bool = True,
-    alignment_reverse_diffusion: bool = True,
-    **overrides,
-) -> AF3EDMSampler:
-    """Build an ``AF3EDMSampler`` with BioEmu2's own EDM sampler settings.
+def bioemu2_edm_settings(model_wrapper: BioEmu2Wrapper, mode: SamplingMode = "equilibrium") -> dict:
+    """Return BioEmu2's EDM sampler settings as :class:`EDMSamplerConfig` keyword arguments.
+
+    Build a sampler by spreading these into an
+    :class:`~sampleworks.core.samplers.edm.EDMSamplerConfig` (overriding any field as needed)
+    and passing the config to :class:`~sampleworks.core.samplers.edm.AF3EDMSampler`.
 
     ``sigma_data``, ``sigma_min`` and ``sigma_max`` come from the checkpoint: the denoiser
     preconditions its inputs with the same schedule, so they are fixed by the model. The rest
@@ -37,22 +28,15 @@ def build_bioemu2_edm_sampler(
         Loaded BioEmu2 model; supplies the checkpoint's EDM schedule.
     mode : {"equilibrium", "structure"}
         Sampling mode the structure is featurized with; sets ``step_scale``.
-    device : str | torch.device | None
-        Device for the schedule tensors. Defaults to the wrapper's device.
-    augmentation, align_to_input, alignment_reverse_diffusion : bool
-        Passed to :class:`EDMSamplerConfig`. BioEmu2 aligns the noisy state to the
-        denoised prediction before each step, so ``alignment_reverse_diffusion`` defaults
-        to True.
-    **overrides
-        Other :class:`EDMSamplerConfig` fields, applied over BioEmu2's values.
 
     Returns
     -------
-    AF3EDMSampler
-        Sampler for ``model_wrapper``.
+    dict
+        ``EDMSamplerConfig`` field values: ``sigma_data``, ``s_max``, ``s_min``, ``gamma_0``,
+        ``gamma_min``, ``noise_scale`` and ``step_scale``.
     """
     schedule = model_wrapper.model.edm_schedule
-    settings = {
+    return {
         "sigma_data": schedule.sigma_data,
         "s_max": schedule.sigma_max,
         "s_min": schedule.sigma_min,
@@ -60,13 +44,4 @@ def build_bioemu2_edm_sampler(
         "gamma_min": 1.0,
         "noise_scale": 1.0,
         "step_scale": 1.0 if mode == "equilibrium" else 1.5,
-        **overrides,
     }
-    config = EDMSamplerConfig(
-        device=device if device is not None else model_wrapper.device,
-        augmentation=augmentation,
-        align_to_input=align_to_input,
-        alignment_reverse_diffusion=alignment_reverse_diffusion,
-        **settings,
-    )
-    return AF3EDMSampler(config=config)
