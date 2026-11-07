@@ -89,6 +89,11 @@ except (ImportError, OSError):  # OSError can arise from a missing model_params 
         "model_params directory exists. You may need to set the environment variable "
         "PROTPARDELLE_MODEL_PARAMS."
     )
+try:
+    from sampleworks.models.bioemu2.wrapper import BioEmu2Wrapper
+except ImportError:
+    BioEmu2Wrapper = None  # ty:ignore[invalid-assignment]
+    logger.warning("Failed to import BioEmu2, hopefully you're running a different model")
 
 from sampleworks.utils.torch_utils import try_gpu
 
@@ -443,6 +448,13 @@ def get_model_and_device(
             device=device,
             model=model,
         )
+    elif model_type == StructurePredictor.BIOEMU2:
+        if BioEmu2Wrapper is None:
+            raise ImportError("BioEmu2 dependencies not installed")
+        logger.debug(f"Loading BioEmu2 model from {validated_checkpoint_path}")
+        model_wrapper = BioEmu2Wrapper(
+            checkpoint_path=validated_checkpoint_path, device=device, model=model
+        )
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
@@ -721,6 +733,7 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
     # Determine model type from wrapper class name
     wrapper_class_name = model_wrapper.__class__.__name__
     is_boltz = "Boltz" in wrapper_class_name
+    is_bioemu2 = "BioEmu2" in wrapper_class_name
 
     structure = apply_sequence_override(structure, args.sequence)
 
@@ -779,11 +792,24 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
             "sigma_data": 10.3,
             "step_scale": 1.0,
         }
+    elif is_bioemu2:
+        from sampleworks.models.bioemu2.sampler import bioemu2_edm_settings
+        from sampleworks.models.bioemu2.wrapper import annotate_structure_for_bioemu2
+
+        structure = annotate_structure_for_bioemu2(
+            structure,
+            mode=args.bioemu2_mode,
+            msa_path=args.msa_path,
+            use_msa_server=not bool(args.bioemu2_no_msa_server),
+        )
+        # BioEmu2's EDM settings feed the shared sampler path below, like every other model.
+        edm_sampler_kwargs = bioemu2_edm_settings(model_wrapper, structure["_bioemu2_config"].mode)
     else:
         raise ValueError(f"Unknown model wrapper class: {wrapper_class_name}")
 
+    # BioEmu2 samples with reverse-diffusion alignment, like Boltz.
     use_alignment_for_reverse_diffusion = _three_state_resolver(
-        args.alignment_reverse_diffusion, is_boltz
+        args.alignment_reverse_diffusion, is_boltz or is_bioemu2
     )
 
     # Create sampler with model-appropriate settings
@@ -794,9 +820,7 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
         alignment_reverse_diffusion=use_alignment_for_reverse_diffusion,
         **edm_sampler_kwargs,
     )
-    sampler = AF3EDMSampler(
-        config=sampler_config,
-    )
+    sampler = AF3EDMSampler(config=sampler_config)
 
     step_scaler = _build_step_scaler(args, guidance_type)
 

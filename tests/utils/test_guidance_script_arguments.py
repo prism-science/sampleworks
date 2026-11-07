@@ -11,7 +11,9 @@ from unittest.mock import patch
 import pytest
 from sampleworks.utils.guidance_constants import GuidanceType, StructurePredictor
 from sampleworks.utils.guidance_script_arguments import (
+    _CHECKPOINT_CANDIDATES,
     _remap_container_path,
+    _resolve_checkpoint,
     get_checkpoint,
     GuidanceConfig,
     JobConfig,
@@ -180,6 +182,23 @@ def test_populate_config_uses_model_checkpoint_argument(model_wrapper_type):
         mock_resolve.assert_not_called()
 
     assert config.model_checkpoint == "/tmp/custom.ckpt"
+
+
+def test_resolve_checkpoint_skips_bioemu2_checkpoint_without_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A BioEmu2 checkpoint counts only once its config.yaml sits beside it."""
+    checkpoint = tmp_path / "checkpoint.ckpt"
+    checkpoint.touch()
+    monkeypatch.setenv("BIOEMU2_CHECKPOINT", str(checkpoint))
+    # Shared-storage candidates exist on GPU runners; only the env var is under test.
+    monkeypatch.setitem(_CHECKPOINT_CANDIDATES, "bioemu2", [])
+
+    with pytest.raises(ValueError, match="config.yaml"):
+        _resolve_checkpoint("bioemu2")
+
+    (tmp_path / "config.yaml").touch()
+    assert _resolve_checkpoint("bioemu2") == str(checkpoint)
 
 
 # ============================================================================
@@ -607,3 +626,25 @@ def test_run_metadata_survives_a_round_trip_through_the_output_cif(tmp_path):
     reread = CIFFile.read(str(written)).block["sampleworks"]
     stored = json.loads(reread["loss_config"].as_item())
     assert stored["real_space_density"]["loss_options"]["resolution"] == 1.8
+
+
+def test_populate_config_passes_bioemu2_flags():
+    """Grid-search jobs carry the BioEmu2 flags into the guidance config."""
+    config = GuidanceConfig(
+        protein="protein",
+        structure="/tmp/structure.cif",
+        density="/tmp/density.mrc",
+        model_name=StructurePredictor.BIOEMU2,
+        guidance_type=GuidanceType.PURE_GUIDANCE,
+        log_path="/tmp/output/run.log",
+    )
+    args = Namespace(
+        model_checkpoint="/tmp/checkpoint.ckpt",
+        step_scaler_type="noisespace",
+        bioemu2_mode="structure",
+        bioemu2_no_msa_server=True,
+    )
+    config.populate_config_for_guidance_type(_build_job(StructurePredictor.BIOEMU2), args)
+
+    assert getattr(config, "bioemu2_mode") == "structure"
+    assert getattr(config, "bioemu2_no_msa_server") is True
