@@ -43,6 +43,7 @@ from sampleworks.utils.atom_array_utils import (
     filter_to_common_atoms,
     parse_structure,
     remove_atoms_with_any_nan_coords,
+    use_author_numbering,
 )
 from sampleworks.utils.density_utils import (
     build_density_transformer,
@@ -143,8 +144,8 @@ def process_group(
             )
         # parse_structure() returns only the first altloc. A multi-model ensemble reference
         # holds one conformer per model; keep the first, the same conformer.
-        ref_structure = parse_structure(ref_path)
-        ref_atom_array = get_asym_unit_from_structure(ref_structure)
+        ref_structure = parse_structure(ref_path, extra_fields=["auth_asym_id"])
+        ref_atom_array = use_author_numbering(get_asym_unit_from_structure(ref_structure))
         if isinstance(ref_atom_array, AtomArrayStack):
             ref_atom_array = ref_atom_array[:1]
         ref_atom_array = remove_atoms_with_any_nan_coords(ref_atom_array)
@@ -168,8 +169,8 @@ def process_group(
     # parse refined, align, and compute density once per trial.
     for trial in trials:
         try:
-            structure = parse_structure(trial.refined_cif_path)
-            atom_array = get_asym_unit_from_structure(structure)
+            structure = parse_structure(trial.refined_cif_path, extra_fields=["auth_asym_id"])
+            atom_array = use_author_numbering(get_asym_unit_from_structure(structure))
             if not hasattr(atom_array, "coord") or atom_array.coord is None:
                 raise AttributeError("AtomArray | AtomArrayStack is missing coordinates")
 

@@ -145,7 +145,7 @@ def get_mask_from_old_selection_string(
     return mask
 
 
-def parse_structure(path: str | Path) -> dict[str, Any]:
+def parse_structure(path: str | Path, extra_fields: list[str] | None = None) -> dict[str, Any]:
     """Parse a structure with the options used by Sampleworks production kwargs in
     guidance.
 
@@ -153,6 +153,9 @@ def parse_structure(path: str | Path) -> dict[str, Any]:
     ----------
     path : str | Path
         Path to a PDB or mmCIF structure file.
+    extra_fields : list[str] | None
+        ``atom_site`` columns to load as annotations on top of atomworks' defaults
+        (which already include ``auth_seq_id``), e.g. ``["auth_asym_id"]``.
 
     Returns
     -------
@@ -165,7 +168,44 @@ def parse_structure(path: str | Path) -> dict[str, Any]:
         hydrogen_policy="remove",
         add_missing_atoms=False,
         ccd_mirror_path=None,
+        extra_fields=extra_fields,
     )
+
+
+def use_author_numbering(atom_array: AtomArray | AtomArrayStack) -> AtomArray | AtomArrayStack:
+    """Relabel ``res_id`` and ``chain_id`` from the author columns of a loaded mmCIF.
+
+    Atomworks loads mmCIF with ``use_author_fields=False``, so ``res_id`` and ``chain_id`` are
+    ``label_seq_id`` and ``label_asym_id``. An output written with the deposit's polymer
+    categories carries the deposit's label ids in those columns and the input's chain and
+    numbering in ``auth_asym_id`` and ``auth_seq_id``. Evaluation selections and atom pairing
+    are in the input's numbering, so the evaluators call this right after loading.
+
+    Side effect: ``res_id`` and ``chain_id`` are overwritten in place wherever the
+    ``auth_seq_id`` and ``auth_asym_id`` annotations exist (load with them in ``extra_fields``).
+    Rows whose ``auth_seq_id`` is not an integer (non-polymer rows written as ``.``) keep their
+    ``res_id``. An array without those annotations is returned unchanged.
+
+    Parameters
+    ----------
+    atom_array : AtomArray | AtomArrayStack
+        Loaded structure. A stack shares its per-atom annotations across models.
+
+    Returns
+    -------
+    AtomArray | AtomArrayStack
+        The same object, relabeled.
+    """
+    categories = atom_array.get_annotation_categories()
+    if "auth_seq_id" in categories:
+        auth_seq_id = np.asarray(atom_array.auth_seq_id).astype(str)
+        is_integer = np.char.isdigit(np.char.lstrip(auth_seq_id, "-"))
+        res_id = cast(np.ndarray, atom_array.res_id).copy()
+        res_id[is_integer] = auth_seq_id[is_integer].astype(int)
+        atom_array.res_id = res_id
+    if "auth_asym_id" in categories:
+        atom_array.chain_id = np.asarray(atom_array.auth_asym_id).astype(str)
+    return atom_array
 
 
 def load_structure_with_altlocs(path: Path, model: int = 0) -> AtomArray:
