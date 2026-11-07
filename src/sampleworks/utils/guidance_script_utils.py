@@ -803,9 +803,7 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
             use_msa_server=not bool(args.bioemu2_no_msa_server),
         )
         # BioEmu2's EDM settings feed the shared sampler path below, like every other model.
-        edm_sampler_kwargs = bioemu2_edm_settings(
-            model_wrapper, structure["_bioemu2_config"].mode
-        )
+        edm_sampler_kwargs = bioemu2_edm_settings(model_wrapper, structure["_bioemu2_config"].mode)
     else:
         raise ValueError(f"Unknown model wrapper class: {wrapper_class_name}")
 
