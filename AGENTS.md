@@ -85,7 +85,7 @@ for each step in sampler.compute_schedule():
 
 **Scaler** (`core/scalers/protocol.py`): `StepScalerProtocol.scale()` returns a guidance direction + loss. `TrajectoryScalerProtocol.sample()` orchestrates full trajectory generation with population-level control.
 
-**LossFunction** (`core/losses/protocol.py`): `LossFunctionProtocol` defines a callable computing scalar loss from coordinates. `PrecomputableLossFunctionProtocol` extends it with `precompute_unique_combinations()` for vmap compatibility. `LossInputs` dataclass bundles pre-extracted inputs (elements, b_factors, occupancies, coords).
+**LossFunction** (`core/losses/protocol.py`): `LossFunctionProtocol` defines a callable computing scalar loss from coordinates. `PreparableLossFunctionProtocol` extends it with `prepare()`, which binds a loss to the `LossInputs` it will be fed once sampling has built them. `LossInputs` dataclass bundles pre-extracted inputs (elements, b_factors, occupancies, coords).
 
 ### Reference Implementations
 
