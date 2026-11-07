@@ -57,12 +57,14 @@ _CHECKPOINT_CANDIDATES = {
         "/mnt/diffuse-shared/raw/checkpoints/protenix_base_default_v0.5.0.pt",
         ".pixi/envs/protenix-dev/lib/python3.12/site-packages/release_data/checkpoint/protenix_base_default_v0.5.0.pt",
     ],
-    # BioEmu2 reads config.yaml from the checkpoint's directory.
     "bioemu2": [
         "/checkpoints/bioemu2-preview/checkpoint.ckpt",
         "/mnt/diffuse-shared/raw/checkpoints/bioemu2-preview/checkpoint.ckpt",
     ],
 }
+
+# Files a checkpoint needs in its own directory; a candidate without them is skipped.
+_CHECKPOINT_SIDECARS = {"bioemu2": ("config.yaml",)}
 
 
 def _resolve_checkpoint(model_key: str) -> str:
@@ -71,33 +73,46 @@ def _resolve_checkpoint(model_key: str) -> str:
     Model-specific environment variables from :data:`_CHECKPOINT_ENV_VARS` win
     when set. Otherwise, candidates from :data:`_CHECKPOINT_CANDIDATES` are
     tried in order, starting with baked-in ``/checkpoints/`` paths and then
-    ACTL shared-storage and legacy development locations.
+    ACTL shared-storage and legacy development locations. A candidate counts only
+    if the files in :data:`_CHECKPOINT_SIDECARS` sit beside it.
+
+    Parameters
+    ----------
+    model_key : str
+        Model name, e.g. ``"boltz2"`` or ``"bioemu2"``.
+
+    Returns
+    -------
+    str
+        Path to the checkpoint.
+
+    Raises
+    ------
+    ValueError
+        If the model has no candidates or none of them exists with its sidecar files.
     """
     env_var = _CHECKPOINT_ENV_VARS.get(model_key)
     candidates = []
     if env_var and os.environ.get(env_var):
         candidates.append(os.environ[env_var])
     candidates.extend(_CHECKPOINT_CANDIDATES.get(model_key, []))
-    for candidate in candidates:
-        resolved = Path(candidate).expanduser()
-        if resolved.exists():
-            return str(resolved)
-    # Nothing found – return the primary (baked-in) path so the error message
-    # points the user to the expected location.
-    resolved = candidates[0] if candidates else ""
-    if not resolved:
+    if not candidates:
         raise ValueError(
             f"Running guidance requires a model checkpoint for '{model_key}'. "
             f"Provide --model-checkpoint or bake checkpoints into /checkpoints/."
         )
-    if not Path(resolved).exists():
-        env_hint = _CHECKPOINT_ENV_VARS.get(model_key, "a checkpoint env var")
-        raise ValueError(
-            f"Model checkpoint for '{model_key}' was not found. Checked: {candidates}. "
-            f"Provide --model-checkpoint or set {env_hint}."
-        )
+    sidecars = _CHECKPOINT_SIDECARS.get(model_key, ())
+    for candidate in candidates:
+        resolved = Path(candidate).expanduser()
+        if resolved.exists() and all(resolved.with_name(name).exists() for name in sidecars):
+            return str(resolved)
 
-    return resolved
+    beside = f" with {', '.join(sidecars)} beside it" if sidecars else ""
+    env_hint = _CHECKPOINT_ENV_VARS.get(model_key, "a checkpoint env var")
+    raise ValueError(
+        f"Model checkpoint for '{model_key}'{beside} was not found. Checked: {candidates}. "
+        f"Provide --model-checkpoint or set {env_hint}."
+    )
 
 
 # ---------------------------------------------------------------------------
