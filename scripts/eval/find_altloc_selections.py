@@ -36,8 +36,6 @@ def main(args):
     RCSB ID, selections for altlocs, and path to the corresponding CIF file,
 
     The spans go to ``--output-file`` and the per-chain unions to a sibling ``_union`` file.
-    Both have the same columns, so either can be fed to the scoring scripts. Both are written
-    every run, so they can never be left disagreeing with each other.
 
     This script will likely change until we settle on a final input/output
     results directory structure.
