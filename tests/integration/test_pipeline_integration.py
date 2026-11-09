@@ -18,6 +18,7 @@ import torch
 from sampleworks.core.losses.protocol import LossInputs
 from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
 from sampleworks.core.samplers.protocol import SamplerStepOutput, StepParams
+from sampleworks.core.scalers.fk_steering import FKSteering
 from sampleworks.core.scalers.protocol import GuidanceOutput
 from sampleworks.core.scalers.step_scalers import (
     DataSpaceDPSScaler,
@@ -557,40 +558,60 @@ class TestTrajectoryScalerMatrixMock:
         assert mock_wrapper.prior_initialization_features[0] is not None
         assert not hasattr(mock_wrapper.prior_initialization_features[0], "x_init")
 
-    @pytest.mark.parametrize(
-        "trajectory_scaler_type", get_all_trajectory_scalers(), ids=lambda s: s.value
-    )
-    def test_trajectory_scaler_handles_multiple_particles(
-        self,
-        trajectory_scaler_type: TrajectoryScalers,
-        device: torch.device,
-        mock_wrapper: MockFlowModelWrapper,
-        mock_structure: dict,
-        mock_step_scaler: MockStepScaler,
-        mock_gradient_loss: MockGradientLossFunction,
-    ):
-        """TrajectoryScaler handles multiple particles correctly."""
-        sampler = create_sampler_from_type(TrajectorySamplers.AF3EDM, device=device)
-        num_particles = 3
+    def test_fk_steering_returns_the_lowest_loss_particle(self):
+        """FK steering returns the particle whose final denoised prediction scores lowest.
 
-        trajectory_scaler = create_trajectory_scaler_from_type(
-            trajectory_scaler_type,
-            ensemble_size=1,
-            num_steps=3,
+        The wrapper denoises to ``0.1 * x_t``, so particles drawn from different prior
+        noise get different predictions. With ``loss = 0.5 * ||x||^2`` each particle's
+        loss follows from the returned denoised trajectory alone. A single step keeps
+        resampling, which only starts once a previous loss exists, from duplicating
+        particles. The test runs on CPU so the seed fixes which particle wins.
+        """
+        device = torch.device("cpu")
+        num_particles, ensemble_size, num_atoms = 4, 2, 6
+        struct_atom_array = build_test_atom_array(
+            chain_ids=["A"] * num_atoms,
+            res_ids=[1, 1, 1, 2, 2, 2],
+            atom_names=["N", "CA", "C"] * 2,
+        )
+        case = MismatchCase(
+            id="identical_topology",
+            description="Model and structure share every atom.",
+            model_atom_array=struct_atom_array.copy(),
+            struct_atom_array=struct_atom_array,
+            expected_n_common=num_atoms,
+            expected_has_mismatch=False,
+        )
+        sampler = AF3EDMSampler(
+            EDMSamplerConfig(device=device, augmentation=False, align_to_input=False)
         )
 
-        result = trajectory_scaler.sample(
-            structure=mock_structure,
-            model=mock_wrapper,
+        torch.manual_seed(0)
+        result = FKSteering(ensemble_size=ensemble_size, num_steps=1).sample(
+            structure={"asym_unit": struct_atom_array, "metadata": {"id": "fk"}},
+            model=MismatchCaseWrapper(case, device=device),
             sampler=sampler,
-            step_scaler=mock_step_scaler,
-            loss_function=mock_gradient_loss,
+            step_scaler=DataSpaceDPSScaler(step_size=0.1),
+            loss_function=MockGradientLossFunction(),
             num_particles=num_particles,
         )
 
-        assert isinstance(result, GuidanceOutput)
-        assert result.final_state is not None
-        assert torch.isfinite(torch.as_tensor(result.final_state)).all()
+        assert result.metadata is not None and result.trajectory is not None
+        # final_denoised, final_states: (particles, ensemble, atoms, 3)
+        final_denoised = result.metadata["trajectory_denoised"][-1]
+        final_states = torch.as_tensor(result.trajectory[-1])
+        # final_losses: (particles,)
+        final_losses = 0.5 * final_denoised.pow(2).sum(dim=(1, 2, 3))
+        ranked = torch.argsort(final_losses).tolist()
+        lowest = ranked[0]
+        assert final_losses[ranked[1]] > final_losses[lowest] * 1.01
+        # The seed puts the winner past index 0, so returning the first particle fails.
+        assert lowest != 0
+
+        final_state = torch.as_tensor(result.final_state)
+        torch.testing.assert_close(final_state, final_states[lowest])
+        for other in ranked[1:]:
+            assert not torch.allclose(final_state, final_states[other])
 
     @pytest.mark.parametrize(
         "trajectory_scaler_type", get_all_trajectory_scalers(), ids=lambda s: s.value
