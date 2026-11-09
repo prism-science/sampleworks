@@ -34,6 +34,7 @@ from torch import Tensor
 from sampleworks.models.protocol import GenerativeModelInput
 from sampleworks.utils.framework_utils import match_batch
 from sampleworks.utils.structure_utils import get_asym_unit_from_structure, get_valid_atom_mask
+from sampleworks.utils.torch_utils import gaussian_prior
 
 
 # Number of atom37 slots in the all-atom (atom37) representation. Matches
@@ -885,13 +886,7 @@ class ProtpardelleWrapper:
         ValueError
             If neither ``features`` nor a valid ``shape`` is provided.
         """
-        if shape is not None:
-            if len(shape) != 2 or shape[1] != 3:
-                raise ValueError("shape must be of the form (num_atoms, 3)")
-            return torch.randn((batch_size, *shape), device=self.device)
-
-        if features is None or features.conditioning is None:
-            raise ValueError("Either features or shape must be provided to initialize_from_prior()")
-
-        num_atoms = int(features.conditioning.atom_mask[0].sum().item())
-        return torch.randn((batch_size, num_atoms, 3), device=self.device)
+        num_atoms = None
+        if features is not None and features.conditioning is not None:
+            num_atoms = int(features.conditioning.atom_mask[0].sum().item())
+        return gaussian_prior(batch_size, num_atoms, self.device, shape=shape)
