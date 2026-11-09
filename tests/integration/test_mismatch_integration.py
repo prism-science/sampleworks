@@ -1169,7 +1169,6 @@ class TestSave:
             refined_structure=refined,
             traj_denoised=[],
             traj_next_step=[],
-            scaler_type="pure_guidance",
             final_state=final_state,
             model_atom_array=model_atom_array,
         )
