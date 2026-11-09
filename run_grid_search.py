@@ -179,6 +179,7 @@ MODEL_PIXI_ENVS: dict[StructurePredictor, str] = {
     StructurePredictor.PROTENIX: "protenix",
     StructurePredictor.RF3: "rf3",
     StructurePredictor.PROTPARDELLE: "protpardelle",
+    StructurePredictor.BIOEMU2: "bioemu2",
 }
 
 
@@ -816,7 +817,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--model",
         default="boltz2",
-        choices=["boltz1", "boltz2", "protenix", "rf3", "protpardelle"],
+        choices=["boltz1", "boltz2", "protenix", "rf3", "protpardelle", "bioemu2"],
         help="The protein structure predictor model to use",
     )
     parser.add_argument(
@@ -919,6 +920,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Log RF3 chiral gradient magnitudes at each denoising step",
     )
 
+    # BioEmu2-specific arguments. MSAs come from ColabFold (cached per sequence), since one
+    # --msa-path cannot serve every protein in the grid.
+    parser.add_argument(
+        "--bioemu2-mode",
+        default="equilibrium",
+        choices=["equilibrium", "structure"],
+        help="BioEmu2 sampling mode: equilibrium ensemble or single folded structure",
+    )
+    parser.add_argument(
+        "--bioemu2-no-msa-server",
+        action="store_true",
+        help="Use single-sequence MSAs instead of querying ColabFold",
+    )
+
     # Loss arguments. Option flags apply to every protein and win over the CSV's columns.
     add_loss_selection_args(parser)
     if pre_args.loss_config is None:
@@ -977,6 +992,9 @@ def log_args(args: argparse.Namespace, gpus: list[str]):
     if args.model == "rf3":
         log.info(f"Disable chiral features: {args.disable_chiral_features}")
         log.info(f"Track chiral features: {args.track_chiral_features}")
+    if args.model == "bioemu2":
+        log.info(f"BioEmu2 mode: {args.bioemu2_mode}")
+        log.info(f"BioEmu2 MSA server: {not args.bioemu2_no_msa_server}")
     log.info(f"Losses: {args.losses.to_mapping()}")
     log.info(f"Scalers: {args.scalers}")
     log.info(f"Ensemble sizes: {args.ensemble_sizes}")

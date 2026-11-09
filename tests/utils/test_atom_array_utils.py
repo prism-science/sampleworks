@@ -18,6 +18,7 @@ from sampleworks.utils.atom_array_utils import (
 )
 
 from tests.conftest import STRUCTURES
+from tests.utils.atom_array_builders import build_test_atom_array
 
 
 STANDARD_AA_NAMES = frozenset(amino_acid_names())
@@ -666,6 +667,18 @@ class TestFilterToCommonAtomsNormalized:
         model_chains = model.chain_id
         struct_chains = struct.chain_id
         np.testing.assert_array_equal(model_chains[m_idx], struct_chains[s_idx])
+
+    def test_model_without_first_chain(self):
+        """A model that leaves out chain A (e.g. a ligand) still pairs chain B with chain B."""
+        model = build_test_atom_array(chain_ids=["B", "C"], res_ids=[1, 1], atom_names=["N", "N"])
+        struct = build_test_atom_array(
+            chain_ids=["A", "B", "C"], res_ids=[1, 1, 1], atom_names=["N", "N", "N"]
+        )
+        _, (m_idx, s_idx) = filter_to_common_atoms(
+            model, struct, normalize_ids=True, return_indices=True
+        )
+        np.testing.assert_array_equal(model.chain_id[m_idx], ["B", "C"])
+        np.testing.assert_array_equal(struct.chain_id[s_idx], ["B", "C"])
 
     def test_1vme_normalized_atom_names_align(self, structure_1vme):
         """Normalized matching of 1vme chain A vs B produces atom-level alignment."""

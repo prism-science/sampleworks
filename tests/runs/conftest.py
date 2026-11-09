@@ -35,6 +35,7 @@ def force_pixi_argv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 # A tuple, not a set: this parametrizes tests, and set iteration order varies
 # with PYTHONHASHSEED, which would make test IDs differ between runs.
 BUNDLED = (
+    "bioemu2",
     "boltz",
     "boltz1",
     "boltz2",
