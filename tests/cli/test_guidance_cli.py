@@ -211,6 +211,9 @@ class TestFromCliDefaults:
         assert config.augmentation is False
         assert config.align_to_input is False
         assert config.ensemble_size == 4
+        # Empty means auto-detect the device and log to output-dir/run.log downstream.
+        assert config.device == ""
+        assert config.log_path == ""
 
     def test_boolean_flags(self):
         argv = [
