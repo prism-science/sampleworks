@@ -177,17 +177,19 @@ class TestWeights:
             )
 
 
-class TestExperimentalDataInjection:
-    """Grid search resolves the data file per protein, after the loss is chosen."""
+class TestPerProteinOptions:
+    """Grid search fills each protein's CSV columns in after the loss is chosen."""
 
-    def test_data_lands_in_each_loss_s_own_option(self):
+    PROTEIN_ROW = {"density": "/data/1vme.ccp4", "mtzfile": "/data/1vme.mtz", "resolution": 1.8}
+
+    def test_each_value_lands_only_in_losses_that_declare_it(self):
         config = LossConfig.from_mapping(
             {"real_space_density": {}, "structure_factor": {}}
-        ).with_experimental_data(path="/data/1vme.mtz", resolution=1.8)
+        ).with_unset_options_from(self.PROTEIN_ROW)
 
         by_loss = {entry.loss: entry.options for entry in config.entries}
         assert by_loss[Losses.REAL_SPACE_DENSITY] == {
-            "density": "/data/1vme.mtz",
+            "density": "/data/1vme.ccp4",
             "resolution": 1.8,
         }
         assert by_loss[Losses.STRUCTURE_FACTOR] == {
@@ -198,9 +200,41 @@ class TestExperimentalDataInjection:
     def test_explicitly_configured_values_win(self):
         config = LossConfig.single(
             Losses.STRUCTURE_FACTOR, mtzfile="/explicit.mtz"
-        ).with_experimental_data(path="/per-protein.mtz", resolution=2.5)
+        ).with_unset_options_from(self.PROTEIN_ROW)
 
-        assert config.entries[0].options == {"mtzfile": "/explicit.mtz", "resolution": 2.5}
+        assert config.entries[0].options == {"mtzfile": "/explicit.mtz", "resolution": 1.8}
+
+    def test_filled_options_satisfy_required_option_checks(self):
+        config = LossConfig.single(Losses.STRUCTURE_FACTOR)
+
+        assert config.missing_required_options() == {"structure_factor": ("mtzfile",)}
+        assert config.with_unset_options_from(self.PROTEIN_ROW).missing_required_options() == {}
+
+    @pytest.mark.parametrize(
+        ("bragg_weight", "missing"),
+        [
+            (0.5, ("bragg_target", "diffuse_target")),
+            (1.0, ("bragg_target",)),
+            (0.0, ("diffuse_target",)),
+        ],
+    )
+    def test_diffuse_bragg_requires_the_targets_its_weight_scores(self, bragg_weight, missing):
+        config = LossConfig.single(Losses.DIFFUSE_BRAGG, bragg_weight=bragg_weight)
+
+        assert config.missing_required_options() == {"diffuse_bragg": missing}
+
+    def test_diffuse_bragg_with_its_weighted_target_is_complete(self):
+        config = LossConfig.single(
+            Losses.DIFFUSE_BRAGG, bragg_weight=1.0, bragg_target="/data/bragg.mtz"
+        )
+
+        assert config.missing_required_options() == {}
+
+    @pytest.mark.parametrize("loss", list(Losses))
+    @pytest.mark.parametrize("resolution", [0.0, -1.0, float("nan"), float("inf"), "1.8", True])
+    def test_each_loss_rejects_an_invalid_resolution(self, loss, resolution):
+        with pytest.raises(ValueError, match="resolution must be a positive, finite number"):
+            LossConfig.single(loss).with_unset_options_from({"resolution": resolution})
 
     def test_paths_are_remapped_for_run_metadata(self):
         config = LossConfig.single(Losses.STRUCTURE_FACTOR, mtzfile="/data/x.mtz", resolution=2.0)

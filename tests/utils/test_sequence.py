@@ -381,10 +381,20 @@ class TestReconcilerWithSequenceOverride:
             for cid, info in structure_5i09_density["chain_info"].items()
             if info["chain_type"].is_protein()
         )
-        chain_mask = np.asarray(result["asym_unit"].chain_id) == protein_chain
+        arr = result["asym_unit"]
+        chain_mask = np.asarray(arr.chain_id) == protein_chain
         assert not np.array_equal(ids_without[chain_mask], ids_with[chain_mask]), (
             "make_normalized_atom_id should produce different IDs when seq_idx is present"
         )
+
+        # 5I09 author numbering is deposited position + 1, so each protein atom's
+        # normalized position must be its res_id - 1 (the only chain is index 0).
+        protein = arr.seq_idx >= 0
+        expected_ids = [
+            f"0_{res_id - 1}_{atom_name}"
+            for res_id, atom_name in zip(arr.res_id[protein], arr.atom_name[protein])
+        ]
+        np.testing.assert_array_equal(ids_with[protein], expected_ids)
 
     def test_reconciler_pairs_same_residues_after_override(
         self, structure_5i09_density: dict, seq_5i09_deposited: str
@@ -392,10 +402,13 @@ class TestReconcilerWithSequenceOverride:
         """After override with the real deposited sequence, AtomReconciler should
         pair each atom with the correct residue — not shifted by gaps.
 
-        Simulates the model-side array as having the full deposited sequence's
-        residue range (386 residues) with dense numbering.
+        Simulates the model-side array the way a wrapper emits it: the full deposited
+        sequence (386 residues) with dense numbering and no ``seq_idx``. 5I09 author
+        numbering is deposited position + 1, so model residue k must pair with
+        structure residue k.
         """
         import biotite.structure as struc
+        from biotite.sequence import ProteinSequence
         from sampleworks.utils.atom_reconciler import AtomReconciler
         from sampleworks.utils.structure_utils import get_asym_unit_from_structure
 
@@ -414,39 +427,35 @@ class TestReconcilerWithSequenceOverride:
         n_res = len(seq_5i09_deposited)
         n_atoms = n_res * len(backbone)
         model_arr = struc.AtomArray(n_atoms)
-        atom_names, res_ids, chain_ids = [], [], []
-        for i in range(n_res):
+        atom_names, res_ids, res_names, chain_ids = [], [], [], []
+        for i, aa in enumerate(seq_5i09_deposited):
             for atom in backbone:
                 atom_names.append(atom)
                 res_ids.append(i + 1)
+                res_names.append(ProteinSequence.convert_letter_1to3(aa))
                 chain_ids.append(protein_chain)
         model_arr.atom_name = np.array(atom_names)
         model_arr.res_id = np.array(res_ids, dtype=np.int64)
+        model_arr.res_name = np.array(res_names)
         model_arr.chain_id = np.array(chain_ids)
         model_arr.coord = np.zeros((n_atoms, 3), dtype=np.float32)
-        # The model array needs seq_idx too: it's dense, so seq_idx == res_id - 1.
-        model_arr.set_annotation("seq_idx", np.array([r - 1 for r in res_ids], dtype=np.int64))
 
         # Filter struct to backbone only for comparison.
         backbone_mask = np.isin(struct_arr.atom_name, backbone)
         chain_mask = np.asarray(struct_arr.chain_id) == protein_chain
         struct_bb = struct_arr[backbone_mask & chain_mask]
-        model_bb_chain = model_arr  # already single-chain backbone
 
-        reconciler = AtomReconciler.from_arrays(model_bb_chain, struct_bb)
+        reconciler = AtomReconciler.from_arrays(model_arr, struct_bb)
 
-        # Every common atom should pair with the correct residue.
-        # The struct atom at index s_idx should have the same seq_idx as model at m_idx.
-        m_idx = reconciler.model_indices.numpy()
-        s_idx = reconciler.struct_indices.numpy()
+        m_idx = reconciler.model_indices.numpy()  # (n_common,)
+        s_idx = reconciler.struct_indices.numpy()  # (n_common,)
 
-        model_seq_idx = model_bb_chain.seq_idx[m_idx]
-        struct_seq_idx = struct_bb.seq_idx[s_idx]
-
-        n_mispaired = int(np.sum(model_seq_idx != struct_seq_idx))
-        assert n_mispaired == 0, (
-            f"{n_mispaired}/{len(m_idx)} atoms mispaired after sequence override"
-        )
+        # Every observed backbone atom has a model counterpart.
+        assert len(s_idx) == struct_bb.array_length()
+        # Each pair is the same residue and atom.
+        np.testing.assert_array_equal(model_arr.res_id[m_idx], struct_bb.res_id[s_idx])
+        np.testing.assert_array_equal(model_arr.res_name[m_idx], struct_bb.res_name[s_idx])
+        np.testing.assert_array_equal(model_arr.atom_name[m_idx], struct_bb.atom_name[s_idx])
 
 
 # ---------------------------------------------------------------------------

@@ -6,7 +6,6 @@ import pickle
 import traceback
 from collections import Counter
 from datetime import datetime
-from importlib.resources import files
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -30,6 +29,7 @@ from sampleworks.core.losses.registry import LossBuildContext
 from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
 from sampleworks.core.scalers.fk_steering import FKSteering
 from sampleworks.core.scalers.latent_optimization import LatentOptimization  # IT-opt wiring (added)
+from sampleworks.core.scalers.protocol import StepScalerProtocol
 from sampleworks.core.scalers.pure_guidance import PureGuidance
 from sampleworks.core.scalers.step_scalers import (
     DataSpaceDPSScaler,
@@ -437,12 +437,8 @@ def get_model_and_device(
         if ProtpardelleWrapper is None:
             raise ImportError("Protpardelle dependencies not installed")
         logger.debug(f"Loading Protpardelle model from {validated_checkpoint_path}")
-        protpardelle_config_path = getattr(config, "protpardelle_config_path", None)
-        config_path = protpardelle_config_path or files("sampleworks.data").joinpath(
-            "cc89_epoch415.yaml"
-        )
         model_wrapper = ProtpardelleWrapper(
-            config_path=str(Path(config_path).expanduser().resolve()),
+            config_path=str(Path(config.protpardelle_config_path).expanduser().resolve()),
             checkpoint_path=validated_checkpoint_path,
             device=device,
             model=model,
@@ -662,6 +658,55 @@ def _three_state_resolver(value: str | bool | None, default: bool) -> bool:
     return bool(value)
 
 
+def _build_step_scaler(args: GuidanceConfig, guidance_type: str) -> StepScalerProtocol:
+    """Build the step scaler that applies gradient-based guidance at each step.
+
+    Parameters
+    ----------
+    args : GuidanceConfig
+        Run configuration. Pure guidance reads ``step_size`` and ``step_scaler_type``
+        from it, FK steering reads ``guidance_weight``.
+    guidance_type : str
+        The run's :class:`GuidanceType`.
+
+    Returns
+    -------
+    StepScalerProtocol
+        The step scaler. FK steering has no ``--step-scaler-type`` and always steers
+        in noise space. Latent optimization steers through the latents and ignores
+        the step scaler, so it gets one that applies no guidance.
+
+    Raises
+    ------
+    ValueError
+        If ``guidance_type`` is unknown, or ``step_scaler_type`` is not one of
+        ``"dataspace"``, ``"noisespace"`` or ``"none"``.
+    """
+    # TODO: unify step_size and guidance_weight, no need for both of them now
+    if guidance_type == GuidanceType.PURE_GUIDANCE:
+        step_size, step_scaler_type = args.step_size, args.step_scaler_type
+    elif guidance_type == GuidanceType.FK_STEERING:
+        step_size, step_scaler_type = args.guidance_weight, "noisespace"
+    elif guidance_type == GuidanceType.LATENT_OPT:
+        return NoScalingScaler()
+    else:
+        raise ValueError(f"Unknown guidance type: {guidance_type}")
+
+    if step_scaler_type == "dataspace":
+        return DataSpaceDPSScaler(
+            step_size=step_size,
+            gradient_normalization=args.gradient_normalization,
+        )
+    if step_scaler_type == "noisespace":
+        return NoiseSpaceDPSScaler(
+            step_size=step_size,
+            gradient_normalization=args.gradient_normalization,
+        )
+    if step_scaler_type == "none":
+        return NoScalingScaler()
+    raise ValueError(f"Invalid step_scaler_type: {step_scaler_type}")
+
+
 # "guidance_type" is also called "scaler" in many places
 def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, device):
     """Run one configured guidance trajectory and save its outputs."""
@@ -682,7 +727,7 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
     # Annotate structure with model-specific configuration (including recycling_steps)
     # See https://github.com/prism-science/sampleworks/issues/192 for a plan to organize this
     # better.
-    recycling_steps = getattr(args, "recycling_steps", None)
+    recycling_steps = args.recycling_steps
     if recycling_steps is not None and recycling_steps <= 0:
         raise ValueError("recycling_steps must be > 0")
     if args.num_diffusion_steps is not None and args.num_diffusion_steps <= 0:
@@ -694,8 +739,7 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
 
         structure = annotate_structure_for_protenix(
             structure,
-            # TODO(#404, #412): affects every Protenix run, not just latent-opt; own PR.
-            # out_dir=str(Path(args.output_dir) / "protenix_input"),
+            out_dir=Path(args.output_dir) / "protenix_input",
             recycling_steps=recycling_steps,
             # Disable diffusion shared-vars cache for LATENT_OPT so gradients can
             # flow to z_trunk; cached tensors can otherwise become stale.
@@ -754,36 +798,15 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
         config=sampler_config,
     )
 
-    # Create step scaler for gradient-based guidance.
-    # TODO: unify this arg, no need for both of them now
-    step_size = getattr(args, "step_size", None)
-    if step_size is None:
-        step_size = getattr(args, "guidance_weight", 0.01)
-
-    step_scaler_type = getattr(args, "step_scaler_type", "noisespace")
-    if step_scaler_type == "dataspace":
-        step_scaler = DataSpaceDPSScaler(
-            step_size=step_size,
-            gradient_normalization=args.gradient_normalization,
-        )
-    elif step_scaler_type == "noisespace":
-        step_scaler = NoiseSpaceDPSScaler(
-            step_size=step_size,
-            gradient_normalization=args.gradient_normalization,
-        )
-    elif step_scaler_type == "none":
-        step_scaler = NoScalingScaler()
-    else:
-        raise ValueError(f"Invalid step_scaler_type: {step_scaler_type}")
+    step_scaler = _build_step_scaler(args, guidance_type)
 
     num_steps = args.num_diffusion_steps
 
     if guidance_type == GuidanceType.PURE_GUIDANCE:
         logger.info("Initializing pure guidance")
 
-        # TODO(#246): these should be fractions in the args directly
-        guidance_t_start = args.guidance_start / num_steps if args.guidance_start > 0 else 0.0
-        t_start = args.partial_diffusion_step / num_steps if args.partial_diffusion_step else 0.0
+        guidance_t_start = args.guidance_start
+        t_start = args.partial_diffusion_start
 
         guidance = PureGuidance(
             ensemble_size=args.ensemble_size,
@@ -809,11 +832,8 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
     elif guidance_type == GuidanceType.FK_STEERING:
         logger.info("Initializing Feynman-Kac steering")
 
-        # TODO(#246): same as above
-        gs = args.guidance_start
-        guidance_start_fraction = gs / num_steps if gs > 0 else 0.0
-        pd = args.partial_diffusion_step
-        t_start = pd / num_steps if pd else 0.0
+        guidance_start_fraction = args.guidance_start
+        t_start = args.partial_diffusion_start
 
         guidance = FKSteering(
             ensemble_size=args.ensemble_size,
@@ -858,12 +878,10 @@ def _run_guidance(args: GuidanceConfig, guidance_type: str, model_wrapper, devic
             DEFAULT_SINGLE_REP_ATTR,
         )
 
-        # LatentOptimization expects guidance start as a fraction of the schedule, but the config
-        # carries it as an integer step count, so we convert it here and default to optimizing from
-        # the first step.
-        guidance_t_start = args.guidance_start / num_steps if args.guidance_start > 0 else 0.0
-        # Same conversion for partial diffusion, matching the pure-guidance branch above.
-        t_start = args.partial_diffusion_step / num_steps if args.partial_diffusion_step else 0.0
+        # The config already carries both as reverse-time fractions of the schedule, which is
+        # exactly what LatentOptimization expects; 0.0 defaults to optimizing from the first step.
+        guidance_t_start = args.guidance_start
+        t_start = args.partial_diffusion_start
         which_latent = args.which_latent  # This is "single", "pair", or "both".
         anchor_weight = args.anchor_weight
         bond_length_weight = args.bond_length_weight
@@ -999,14 +1017,18 @@ def get_job_result(
     """Build the serializable result record for a completed guidance job."""
     start_time = epoch_seconds(started_at)
     end_time = epoch_seconds(ended_at)
+    # Only Boltz2 has a sampling method, and only FK steering a guidance weight and
+    # gradient-descent steps; other runs record None and -1 in their place.
+    is_boltz2 = args.model_name == StructurePredictor.BOLTZ_2
+    is_fk_steering = args.guidance_type == GuidanceType.FK_STEERING
     result = JobResult(
         protein=args.protein,
         model_name=args.model_name,
-        method=getattr(args, "method", None),
+        method=args.method if is_boltz2 else None,
         scaler=args.guidance_type,
         ensemble_size=args.ensemble_size,
-        gradient_weight=getattr(args, "guidance_weight", -1.0),
-        gd_steps=getattr(args, "num_gd_steps", -1),
+        gradient_weight=args.guidance_weight if is_fk_steering else -1.0,
+        gd_steps=args.num_gd_steps if is_fk_steering else -1,
         status=status,
         exit_code=exit_code,
         runtime_seconds=round(end_time - start_time, 2),
@@ -1014,6 +1036,7 @@ def get_job_result(
         finished_at=ended_at.isoformat(),
         log_path=args.log_path or os.path.join(args.output_dir, "run.log"),
         output_dir=args.output_dir,
+        loss_type=args.loss_type,
     )
     return result
 

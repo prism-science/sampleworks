@@ -32,7 +32,6 @@ from typing import Any, cast
 import gemmi
 import numpy as np
 import torch
-from atomworks.io.transforms.atom_array import remove_waters
 from atomworks.io.utils.io_utils import load_any
 from biotite.structure import AtomArrayStack, stack
 from loguru import logger
@@ -46,14 +45,12 @@ from sampleworks.synthetic.synthetic_utils import (
     resolve_crystal_metadata,
     resolve_parallel_jobs,
     rfree_flags,
+    SyntheticStructureOptions,
 )
 from sampleworks.utils.atom_array_utils import (
     apply_selection,
     BLANK_ALTLOC_IDS,
-    keep_amino_acids,
-    keep_polymer,
     map_altlocs_to_stack,
-    remove_hydrogens,
 )
 from sampleworks.utils.torch_utils import try_gpu
 
@@ -109,9 +106,7 @@ def load_configurations(
     row: BatchRowForMTZ,
     occupancy_mode: str,
     *,
-    strip_hydrogens: bool = False,
-    strip_waters: bool = False,
-    strip_ligands: bool = False,
+    structure_options: SyntheticStructureOptions = SyntheticStructureOptions(),
     altlocs_as_models: bool = False,
 ) -> AtomArrayStack:
     """Load a structure as a stack of configurations.
@@ -137,8 +132,8 @@ def load_configurations(
         Batch row supplying ``selection`` and ``occupancy_values``.
     occupancy_mode
         ``'default'``, ``'uniform'`` or ``'custom'``; single-model input only.
-    strip_hydrogens, strip_waters, strip_ligands
-        Filters, applied on every path.
+    structure_options
+        Atom filters and B-factor override applied to each loaded structure.
     altlocs_as_models
         Expand alternate conformations into configurations.
 
@@ -179,9 +174,7 @@ def load_configurations(
 
         # Per-atom annotations are shared across models, so one mask filters every model.
         loaded = apply_selection(loaded, row.selection)
-        loaded = remove_hydrogens(loaded) if strip_hydrogens else loaded
-        loaded = remove_waters(loaded) if strip_waters else loaded
-        loaded = keep_polymer(keep_amino_acids(loaded)) if strip_ligands else loaded
+        loaded = structure_options.strip(loaded)
         if loaded.array_length() == 0:
             raise ValueError(f"{structure_path.name}: selection and stripping left no atoms.")
 
@@ -189,6 +182,7 @@ def load_configurations(
             f"Loaded {loaded.stack_depth()} models, {loaded.array_length()} atoms "
             f"from {structure_path.name}"
         )
+        structure_options.apply_b_factor(loaded)
         return cast(AtomArrayStack, loaded)
 
     if altlocs_as_models:
@@ -212,9 +206,7 @@ def load_configurations(
         # configurations and draw A or B independently for each uncoupled region,
         # with probability given by occupancy.
         loaded = apply_selection(loaded, row.selection)
-        loaded = remove_hydrogens(loaded) if strip_hydrogens else loaded
-        loaded = remove_waters(loaded) if strip_waters else loaded
-        loaded = keep_polymer(keep_amino_acids(loaded)) if strip_ligands else loaded
+        loaded = structure_options.strip(loaded)
         configurations, annotations = map_altlocs_to_stack(
             loaded, selection=None, return_full_array=True
         )
@@ -224,6 +216,7 @@ def load_configurations(
 
         # B-factors averaged across conformers; identical for the shared atoms.
         configurations.set_annotation("b_factor", b_factors.mean(axis=0).astype(np.float32))
+        structure_options.apply_b_factor(configurations)
 
         # An atom is an alternate if any configuration gives it a non-blank altloc.
         is_alternate = (~np.isin(altloc_ids, list(BLANK_ALTLOC_IDS))).any(axis=0)
@@ -254,9 +247,7 @@ def load_configurations(
         structure_path,
         occupancy_mode=occupancy_mode,
         occupancy_values=row.occupancy_values,
-        strip_hydrogens=strip_hydrogens,
-        strip_waters=strip_waters,
-        strip_ligands=strip_ligands,
+        structure_options=structure_options,
         selection=row.selection,
     )
     if atom_array is None:
@@ -502,9 +493,7 @@ def _process_single_row(
     test_fraction: float,
     seed: int | None,
     device: torch.device,
-    strip_hydrogens: bool = False,
-    strip_waters: bool = False,
-    strip_ligands: bool = False,
+    structure_options: SyntheticStructureOptions = SyntheticStructureOptions(),
     bulk_solvent: bool = False,
     solvent_cutoff: float | None = None,
     solvent_taper_width: float = DEFAULT_SOLVENT_TAPER_WIDTH,
@@ -534,9 +523,7 @@ def _process_single_row(
             structure_path,
             row,
             occupancy_mode,
-            strip_hydrogens=strip_hydrogens,
-            strip_waters=strip_waters,
-            strip_ligands=strip_ligands,
+            structure_options=structure_options,
             altlocs_as_models=altlocs_as_models,
         )
         unit_cell, space_group_hm = resolve_crystal_metadata(row, structure_path)
@@ -633,9 +620,7 @@ def process_batch(
     seed: int | None,
     device: torch.device,
     n_jobs: int = -1,
-    strip_hydrogens: bool = False,
-    strip_waters: bool = False,
-    strip_ligands: bool = False,
+    structure_options: SyntheticStructureOptions = SyntheticStructureOptions(),
     bulk_solvent: bool = False,
     solvent_cutoff: float | None = None,
     solvent_taper_width: float = DEFAULT_SOLVENT_TAPER_WIDTH,
@@ -668,8 +653,8 @@ def process_batch(
     n_jobs
         Worker count, clamped to 1 on CUDA by :func:`resolve_parallel_jobs` to
         avoid multiple CUDA contexts.
-    strip_hydrogens, strip_waters, strip_ligands
-        Filters applied after any per-row selection.
+    structure_options
+        Atom filters, applied after any per-row selection, and B-factor override.
     bulk_solvent
         Add a per-configuration bulk-solvent contribution and write the total set.
     solvent_cutoff
@@ -703,9 +688,7 @@ def process_batch(
             test_fraction=test_fraction,
             seed=seed,
             device=device,
-            strip_hydrogens=strip_hydrogens,
-            strip_waters=strip_waters,
-            strip_ligands=strip_ligands,
+            structure_options=structure_options,
             bulk_solvent=bulk_solvent,
             solvent_cutoff=solvent_cutoff,
             solvent_taper_width=solvent_taper_width,
@@ -754,9 +737,11 @@ def parse_args() -> argparse.Namespace:
 
     sf_group = parser.add_argument_group("Structure Factor Options")
     sf_group.add_argument("--resolution", "-r", type=float, default=1.0, help="d_min in Angstroms")
-    sf_group.add_argument("--remove-hydrogens", action="store_true", help="Single-model input only")
-    sf_group.add_argument("--remove-waters", action="store_true", help="Single-model input only")
-    sf_group.add_argument("--remove-ligands", action="store_true", help="Single-model input only")
+    sf_group.add_argument("--remove-hydrogens", action="store_true", help="Remove hydrogen atoms")
+    sf_group.add_argument("--remove-waters", action="store_true", help="Remove water molecules")
+    sf_group.add_argument(
+        "--remove-ligands", action="store_true", help="Keep only polymer amino acids"
+    )
 
     solvent_group = parser.add_argument_group("Bulk Solvent Options")
     solvent_group.add_argument(
@@ -828,6 +813,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     device = try_gpu()
+    structure_options = SyntheticStructureOptions(
+        strip_hydrogens=args.remove_hydrogens,
+        strip_waters=args.remove_waters,
+        strip_ligands=args.remove_ligands,
+    )
 
     if args.batch_csv:
         process_batch(
@@ -840,9 +830,7 @@ def main() -> None:
             seed=args.seed,
             device=device,
             n_jobs=args.n_jobs,
-            strip_hydrogens=args.remove_hydrogens,
-            strip_waters=args.remove_waters,
-            strip_ligands=args.remove_ligands,
+            structure_options=structure_options,
             bulk_solvent=args.simulate_solvent,
             solvent_cutoff=args.solvent_cutoff,
             solvent_taper_width=args.solvent_taper_width,
@@ -870,9 +858,7 @@ def main() -> None:
             test_fraction=args.test_fraction,
             seed=args.seed,
             device=device,
-            strip_hydrogens=args.remove_hydrogens,
-            strip_waters=args.remove_waters,
-            strip_ligands=args.remove_ligands,
+            structure_options=structure_options,
             bulk_solvent=args.simulate_solvent,
             solvent_cutoff=args.solvent_cutoff,
             solvent_taper_width=args.solvent_taper_width,

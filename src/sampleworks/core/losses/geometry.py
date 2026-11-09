@@ -22,8 +22,9 @@ from __future__ import annotations
 import numpy as np
 import torch
 from biotite.structure import AtomArray, connect_via_residue_names
-from sampleworks.utils.elements import covalent_radius
 from torch import Tensor
+
+from sampleworks.utils.elements import covalent_radius
 
 
 # Type hints below (": str", "-> Tensor", "| None" meaning "or None") only CLAIM what a value

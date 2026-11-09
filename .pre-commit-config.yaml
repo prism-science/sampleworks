@@ -58,7 +58,8 @@ repos:
 
       - id: ty-protenix
         name: ty (protenix environment)
-        entry: bash -c 'pixi run -e protenix-dev ty check "$@"' --
+        # protenix pins triton and CUDA wheels, so protenix-dev has no macOS build; CI covers it.
+        entry: bash -c 'if [ "$(uname)" = Darwin ]; then echo "ty-protenix skipped on macOS"; exit 0; fi; pixi run -e protenix-dev ty check "$@"' --
         language: system
         types: [python]
         pass_filenames: true

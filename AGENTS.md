@@ -10,6 +10,14 @@ Respond in a measured, clear tone. Consider alternatives carefully. Include conf
 
 Code reuse is paramount. Whenever possible, locate high-quality implementations in this codebase or high-quality open-source implementations for algorithms and use those instead of implementing something yourself. Chances are someone has already solved the problem, no need to reinvent the wheel. In particular, check whether something from atomworks, biotite, or gemmi could be used in place of a custom function.
 
+- Keep functions short and single-purpose: a function that needs section comments is typically several functions.
+- Name by role, in full. Model output is `predicted_*` and the input structure is `input_*`; avoid locals like `model`, `names`, `differ`.
+- Define domain jargon on first use (e.g. "microheterogeneity (two residue names at one position)").
+- Comment any sentinel values (`-1`, past-the-end indices) where they are produced.
+- A helper either always copies or always mutates; it never returns its input on some paths and a copy on others.
+- Don't encode structured data in strings; use tuples or structured arrays. Prefer to return a `NamedTuple` or dataclass rather than a tuple of more than three values.
+- Comments, when used, should explain *why* in one line and should be understandable without the context of the PR or conversation: no worked examples in prose, no bug narratives, no file-layout listings, no terms invented in the PR.
+
 ## Project Overview
 
 **sampleworks** is a Python framework for guiding generative biomolecular structure models with experimental data. It bridges the gap between structure prediction (single-state ML models) and experimental reality (thermodynamic ensembles).
@@ -105,7 +113,7 @@ pixi run -e boltz sampleworks-guidance \
     --density tests/resources/1vme/1vme_final_carved_edited_0.5occA_0.5occB_1.80A.ccp4 \
     --resolution 1.8 \
     --ensemble-size 4 \
-    --guidance-start 130 \
+    --guidance-start 0.65 \
     --augmentation --align-to-input
 ```
 
@@ -152,7 +160,7 @@ The `run_guidance()` function in `utils/guidance_script_utils.py` is the central
 
 ## Development Environment
 
-Dependencies are managed with [Pixi](https://pixi.sh). The model wrappers (Boltz, Protenix, RF3, Protpardelle) have mutually incompatible dependencies, so each model has its own `<model>` and `<model>-dev` environment; test in the matching `-dev` one. Other environments: `analysis[-dev]`, `boltz-analysis`, `boltz-osx`.
+Dependencies are managed with [Pixi](https://pixi.sh). The model wrappers (Boltz, Protenix, RF3, Protpardelle) have mutually incompatible dependencies, so each model has its own `<model>` and `<model>-dev` environment; test in the matching `-dev` one. Other environments: `analysis[-dev]`, `boltz-analysis`.
 
 | Command                           | Runs                                                |
 | --------------------------------- | --------------------------------------------------- |
@@ -165,7 +173,7 @@ Forward pytest options as one argument: `pixi run -e rf3-dev tests "-k integrati
 
 Mark tests that need a GPU or model checkpoint with `@pytest.mark.slow`, and tests that need CUDA with `@pytest.mark.gpu` (on CPU they crash or exhaust memory).
 
-Pre-commit hooks (ruff, ty, toml-sort, commitizen) run through [prek](https://github.com/j178/prek) and block commits on failure. `ty` is split per environment; see `.pre-commit-config.yaml` for the file routing.
+Pre-commit hooks (ruff, ty, toml-sort, commitizen) run through [prek](https://github.com/j178/prek) and block commits on failure. `ty` is split per environment; see `.pre-commit-config.yaml` for the file routing. On macOS the protenix `ty` hook is skipped (protenix has no macOS build); CI still checks it.
 
 ```bash
 pixi run -e boltz-dev prek install                          # git hook

@@ -1,6 +1,7 @@
 """Tests for guidance_script_utils saving helpers."""
 
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -11,10 +12,18 @@ from atomworks.io.transforms.atom_array import ensure_atom_array_stack
 from atomworks.io.utils.io_utils import load_any
 from biotite.structure import AtomArrayStack
 from biotite.structure.io.pdbx.cif import CIFFile
+from sampleworks.core.scalers.step_scalers import (
+    DataSpaceDPSScaler,
+    NoiseSpaceDPSScaler,
+    NoScalingScaler,
+)
+from sampleworks.utils.guidance_constants import GuidanceType
 from sampleworks.utils.guidance_script_arguments import GuidanceConfig, JobResult
 from sampleworks.utils.guidance_script_utils import (
+    _build_step_scaler,
     _three_state_resolver,
     _write_job_metadata,
+    get_job_result,
     get_model_and_device,
     load_guidance_structure,
     save_everything,
@@ -492,3 +501,168 @@ def test_write_job_metadata_remaps_job_result_paths_to_host(
     metadata = json.loads((tmp_path / "job_metadata.json").read_text())
     assert metadata["output_dir"] == expected_output
     assert metadata["log_path"] == expected_log
+
+
+def _guidance_config(model_name: str, guidance_type: str) -> GuidanceConfig:
+    """Return a configuration with the specified values for ``model_name`` and ``guidance_type``.
+
+    Parameters
+    ----------
+    model_name : str
+        The name of a structure predictor to use with guidance.
+    guidance_type : str
+        The name of the guidance type being configured.
+
+    Returns
+    -------
+    GuidanceConfig
+        The configuration.
+    """
+    config = GuidanceConfig(
+        protein="1l63",
+        structure=Path("dummy"),
+        density=Path("dummy"),
+        model_name=model_name,
+        guidance_type=guidance_type,
+        log_path="dummy",
+    )
+    # Set by from_cli() and grid search, not by the constructor.
+    config.ensemble_size = 4
+    return config
+
+
+def _job_result_for(args: GuidanceConfig) -> JobResult:
+    """Return the result record of a successful 12-second run configured by ``args``.
+
+    Parameters
+    ----------
+    args : GuidanceConfig
+        Configuration of the run.
+
+    Returns
+    -------
+    JobResult
+        The run's result record.
+    """
+    started_at = datetime(2026, 5, 5, 10, 0, 0)
+    return get_job_result(
+        args, torch.device("cpu"), started_at, started_at + timedelta(seconds=12), 0, "success"
+    )
+
+
+def test_get_job_result_records_boltz2_method_and_fk_steering_settings():
+    """A Boltz2 FK-steering run records its method, gradient weight and descent steps."""
+    args = _guidance_config("boltz2", "fk_steering")
+    args.method = "MD"
+    args.guidance_weight = 0.05
+    args.num_gd_steps = 3
+
+    result = _job_result_for(args)
+
+    assert result.method == "MD"
+    assert result.gradient_weight == 0.05
+    assert result.gd_steps == 3
+
+
+def test_get_job_result_marks_settings_the_run_does_not_have():
+    """A run with no Boltz2 method and no FK-steering settings records None and -1 for them."""
+    result = _job_result_for(_guidance_config("protenix", "pure_guidance"))
+
+    assert result.method is None
+    assert result.gradient_weight == -1.0
+    assert result.gd_steps == -1
+
+
+@pytest.mark.parametrize(
+    ("model_name", "guidance_type", "attribute"),
+    [
+        ("boltz2", "pure_guidance", "method"),
+        ("protenix", "fk_steering", "guidance_weight"),
+        ("protenix", "fk_steering", "num_gd_steps"),
+    ],
+)
+def test_get_job_result_raises_for_a_missing_argument(
+    model_name: str, guidance_type: str, attribute: str
+):
+    """If the run does not have a required argument, it should raise rather than use defaults."""
+    args = _guidance_config(model_name, guidance_type)
+    delattr(args, attribute)
+
+    with pytest.raises(AttributeError, match=attribute):
+        _job_result_for(args)
+
+
+@pytest.mark.parametrize(
+    ("step_scaler_type", "expected_type"),
+    [("dataspace", DataSpaceDPSScaler), ("noisespace", NoiseSpaceDPSScaler)],
+)
+def test_build_step_scaler_takes_pure_guidance_step_size_and_type(
+    step_scaler_type: str, expected_type: type[DataSpaceDPSScaler | NoiseSpaceDPSScaler]
+):
+    """Pure guidance steers with the scaler and step size its own flags name."""
+    args = _guidance_config("boltz2", "pure_guidance")
+    args.step_size = 0.25
+    args.step_scaler_type = step_scaler_type
+    args.gradient_normalization = True
+
+    scaler = _build_step_scaler(args, GuidanceType.PURE_GUIDANCE)
+
+    assert isinstance(scaler, expected_type)
+    assert scaler.step_size == 0.25
+    assert scaler.gradient_normalization is True
+
+
+def test_build_step_scaler_none_type_applies_no_guidance():
+    """``--step-scaler-type none`` gives pure guidance a scaler that applies none."""
+    args = _guidance_config("boltz2", "pure_guidance")
+    args.step_scaler_type = "none"
+
+    # TODO https://github.com/prism-science/sampleworks/issues/590 guidance type
+    #  should already be included in args
+    assert type(_build_step_scaler(args, GuidanceType.PURE_GUIDANCE)) is NoScalingScaler
+
+
+def test_build_step_scaler_rejects_an_unknown_step_scaler_type():
+    """An unrecognized ``step_scaler_type`` is an error, not a silent fallback."""
+    args = _guidance_config("boltz2", "pure_guidance")
+    args.step_scaler_type = "realspace"
+
+    with pytest.raises(ValueError, match="Invalid step_scaler_type"):
+        _build_step_scaler(args, GuidanceType.PURE_GUIDANCE)
+
+
+def test_build_step_scaler_steers_fk_steering_in_noise_space_by_its_guidance_weight():
+    """FK steering uses the noise-space scaler with ``--guidance-weight`` as its step size."""
+    args = _guidance_config("boltz2", "fk_steering")
+    args.guidance_weight = 0.05
+
+    scaler = _build_step_scaler(args, GuidanceType.FK_STEERING)
+
+    assert type(scaler) is NoiseSpaceDPSScaler
+    assert scaler.step_size == 0.05
+
+
+def test_build_step_scaler_gives_latent_optimization_no_guidance():
+    """Latent optimization ignores the step scaler, so it gets one that applies no guidance."""
+    args = _guidance_config("protenix", "latent_opt")
+
+    assert type(_build_step_scaler(args, GuidanceType.LATENT_OPT)) is NoScalingScaler
+
+
+@pytest.mark.parametrize(
+    ("guidance_type", "attribute"),
+    [
+        (GuidanceType.PURE_GUIDANCE, "step_size"),
+        (GuidanceType.PURE_GUIDANCE, "step_scaler_type"),
+        (GuidanceType.FK_STEERING, "guidance_weight"),
+    ],
+)
+def test_build_step_scaler_raises_for_a_missing_argument(
+    guidance_type: GuidanceType, attribute: str
+):
+    """A step-size argument the guidance type should carry but does not raises."""
+    args = _guidance_config("boltz2", guidance_type)
+    delattr(args, attribute)
+
+    with pytest.raises(AttributeError, match=attribute):
+        _build_step_scaler(args, guidance_type)

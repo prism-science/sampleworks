@@ -1,6 +1,7 @@
 # From https://github.com/sokrypton/ColabFold/blob/main/colabfold/colabfold.py
 # via the boltz module
 
+import io
 import logging
 import os
 import random
@@ -15,6 +16,7 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 TQDM_BAR_FORMAT = "{l_bar}{bar}| {n_fmt}/{total_fmt} [elapsed: {elapsed} remaining: {remaining}]"
+RETRY_WAIT_SECONDS = 5
 
 # TODO this needs a better backoff strategy.
 # TODO lots of duplicated code here w.r.t. retries that obscures what's going on.
@@ -107,7 +109,7 @@ def run_mmseqs2(  # noqa: PLR0912, D103, C901, PLR0915
                 logger.warning(f"Error: {e}")
                 if error_count > 5:
                     raise Exception("Too many failed attempts for the MSA generation request.")
-                time.sleep(5)
+                time.sleep(RETRY_WAIT_SECONDS)
             else:
                 break
 
@@ -135,7 +137,7 @@ def run_mmseqs2(  # noqa: PLR0912, D103, C901, PLR0915
                 logger.warning(f"Error: {e}")
                 if error_count > 5:
                     raise Exception("Too many failed attempts for the MSA generation request.")
-                time.sleep(5)
+                time.sleep(RETRY_WAIT_SECONDS)
             else:
                 break
         try:
@@ -146,6 +148,12 @@ def run_mmseqs2(  # noqa: PLR0912, D103, C901, PLR0915
         return out
 
     def download(ID, path):
+        """Download the result archive for job ``ID`` and write it to ``path``.
+
+        The archive's directory is created only once a valid archive has been received,
+        and the file is written atomically, so a failed download leaves nothing on disk
+        that a later call would mistake for a cached result.
+        """
         error_count = 0
         while True:
             try:
@@ -154,6 +162,9 @@ def run_mmseqs2(  # noqa: PLR0912, D103, C901, PLR0915
                     f"{host_url}/result/download/{ID}", timeout=6.02, headers=headers, auth=auth
                 )
                 logger.debug(f"MSA download response status: {res.status_code}")
+                res.raise_for_status()
+                if not tarfile.is_tarfile(io.BytesIO(res.content)):
+                    raise ValueError("MSA server response is not a tar archive")
             except Exception as e:
                 error_count += 1
                 logger.warning(
@@ -161,12 +172,17 @@ def run_mmseqs2(  # noqa: PLR0912, D103, C901, PLR0915
                 )
                 logger.warning(f"Error: {e}")
                 if error_count > 5:
-                    raise Exception("Too many failed attempts for the MSA generation request.")
-                time.sleep(5)
+                    raise Exception(
+                        "Too many failed attempts for the MSA generation request."
+                    ) from e
+                time.sleep(RETRY_WAIT_SECONDS)
             else:
                 break
-        with open(path, "wb") as out:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        partial_path = f"{path}.part"
+        with open(partial_path, "wb") as out:
             out.write(res.content)
+        os.replace(partial_path, path)
 
     # process input x
     seqs = [x] if isinstance(x, str) else x
@@ -187,13 +203,15 @@ def run_mmseqs2(  # noqa: PLR0912, D103, C901, PLR0915
         if use_env:
             mode = mode + "-env"
 
-    # define path
+    # define path; download() creates it once a valid archive has arrived
     path = f"{prefix}_{mode}"
-    if not os.path.isdir(path):
-        os.mkdir(path)
+    tar_gz_file = f"{path}/out.tar.gz"
+    if os.path.isfile(tar_gz_file) and not tarfile.is_tarfile(tar_gz_file):
+        # Left behind by a failed download before downloads were validated.
+        logger.warning(f"Discarding invalid cached MSA archive {tar_gz_file}; fetching it again.")
+        os.remove(tar_gz_file)
 
     # call mmseqs2 api
-    tar_gz_file = f"{path}/out.tar.gz"
     N, REDO = 101, True
 
     # deduplicate and keep track of order

@@ -161,22 +161,46 @@ def test_perfect_prediction_scores_one():
         )
 
 
-def test_large_error_scores_zero():
-    """All distance differences are greater than 4Å (largest threshold) -> lDDT of 0 expected""" ""
-    gt = _coords([[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]])
-    pred = gt * 10.0  # every pairwise distance off by far more than 4 Å
-    mask = torch.ones(1, 4, dtype=torch.bool)
-    tok = torch.arange(4)
+@pytest.mark.parametrize(
+    ("stretch", "expected_lddt"),
+    [
+        pytest.param(0.25, 1.0, id="passes_all_four"),
+        pytest.param(-0.75, 0.75, id="compressed_passes_1_2_4"),
+        pytest.param(1.5, 0.5, id="passes_2_4"),
+        pytest.param(3.0, 0.25, id="passes_4"),
+        pytest.param(5.0, 0.0, id="passes_none"),
+        pytest.param(0.5, 0.75, id="at_0.5_fails_0.5"),
+        pytest.param(1.0, 0.5, id="at_1_fails_1"),
+        pytest.param(2.0, 0.25, id="at_2_fails_2"),
+        pytest.param(4.0, 0.0, id="at_4_fails_4"),
+    ],
+)
+def test_score_is_fraction_of_thresholds_passed(stretch: float, expected_lddt: float):
+    """A single pair scores the fraction of the 0.5/1/2/4 Å thresholds its error is under.
+
+    The thresholds are strict, so an error equal to a cutoff fails that cutoff.
+
+    Parameters
+    ----------
+    stretch : float
+        Signed change in Å of the predicted 1 Å pair distance.
+    expected_lddt : float
+        Analytic lDDT: a quarter for each threshold that ``|stretch|`` is strictly below.
+    """
+    gt = _coords([[0, 0, 0], [1, 0, 0]])
+    pred = _coords([[0, 0, 0], [1 + stretch, 0, 0]])
+    mask = torch.ones(1, 2, dtype=torch.bool)
+    tok = torch.arange(2)
     lddt, lddt_residues = _calc_lddt(pred, gt, mask, tok)
 
     # single
-    assert torch.allclose(lddt, torch.zeros(1), atol=1e-4)
+    assert lddt.item() == pytest.approx(expected_lddt, abs=1e-6)
 
-    # token-level
-    for token_name in lddt_residues:
-        token_score = lddt_residues[token_name][0]
-        assert token_score == pytest.approx(0, abs=1e-4), (
-            f"Score mismatch for {token_name}: got {token_score}, expected 0"
+    # token-level: both atoms belong only to the one scored pair
+    assert lddt_residues.keys() == {0, 1}
+    for token_name, token_scores in lddt_residues.items():
+        assert token_scores[0] == pytest.approx(expected_lddt, abs=1e-6), (
+            f"Score mismatch for {token_name}: got {token_scores[0]}, expected {expected_lddt}"
         )
 
 

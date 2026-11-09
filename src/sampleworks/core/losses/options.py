@@ -22,6 +22,7 @@ actually built.
 from __future__ import annotations
 
 import dataclasses
+import math
 import types
 import typing
 from dataclasses import dataclass, field
@@ -66,6 +67,20 @@ def opt(
     )
 
 
+def _check_resolution(resolution: float | None):
+    # Zero, negative or non-finite values otherwise surface as a division by zero
+    # or an empty reflection set inside a worker, after the model has loaded.
+    if resolution is None:
+        return
+    # A config file can hand over a string or a bool; reject it here rather than
+    # let math.isfinite raise a TypeError that callers do not catch.
+    is_number = isinstance(resolution, (int, float)) and not isinstance(resolution, bool)
+    if not (is_number and math.isfinite(resolution) and resolution > 0):
+        raise ValueError(
+            f"resolution must be a positive, finite number of Angstroms; got {resolution}."
+        )
+
+
 @dataclass(frozen=True)
 class RealSpaceDensityOptions:
     """Options for :class:`~sampleworks.core.losses.real_space_density.RealSpaceLossFunction`."""
@@ -79,6 +94,9 @@ class RealSpaceDensityOptions:
         help="Scattering table, as in Phenix (default: electron with --em, otherwise wk1995)",
         choices=("wk1995", "it1992", "electron"),
     )
+
+    def __post_init__(self):
+        _check_resolution(self.resolution)
 
 
 @dataclass(frozen=True)
@@ -114,6 +132,9 @@ class StructureFactorOptions:
         help="Extra SFcalculator keyword arguments as JSON, e.g. '{\"n_bins\": 15}'",
         json_arg=True,
     )
+
+    def __post_init__(self):
+        _check_resolution(self.resolution)
 
 
 @dataclass(frozen=True)
@@ -166,6 +187,9 @@ class DiffuseBraggOptions:
     test_set_value: int = opt(
         1, help="Flag value marking the test set: 1 (Phenix, default) or 0 (CCP4)"
     )
+
+    def __post_init__(self):
+        _check_resolution(self.resolution)
 
 
 def option_type(options_cls: type, name: str) -> Any:

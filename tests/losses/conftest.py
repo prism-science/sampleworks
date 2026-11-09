@@ -98,7 +98,7 @@ def sf_1vme_cif_and_mtz_paths(
     Ftotal/SIGFtotal/PHIFtotal.
     """
     from sampleworks.synthetic.generate_synthetic_sf_sfc import _process_single_row
-    from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ
+    from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ, SyntheticStructureOptions
 
     source_cif = "1vme_final.cif"
     source_dir = resources_dir / "1vme"
@@ -121,8 +121,7 @@ def sf_1vme_cif_and_mtz_paths(
         test_fraction=0.1,  # needed for test_inverted_testset_value_warns
         seed=0,  # R-free flag assignment only
         device=device,
-        strip_hydrogens=True,
-        strip_waters=True,
+        structure_options=SyntheticStructureOptions(strip_hydrogens=True, strip_waters=True),
         bulk_solvent="combined",
         save_structure=True,
     )
@@ -257,7 +256,7 @@ def _generate_lunus_targets(
     returns on failure instead of raising, so the record's status is checked here.
     """
     from sampleworks.synthetic.generate_synthetic_sf_lunus import _process_single_row
-    from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ
+    from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ, SyntheticStructureOptions
 
     record = _process_single_row(
         row=BatchRowForMTZ(filename=DIFFUSE_BRAGG_SOURCE),
@@ -267,7 +266,7 @@ def _generate_lunus_targets(
         occupancy_mode="default",
         seed=0,
         device=device,
-        strip_waters=True,
+        structure_options=SyntheticStructureOptions(strip_waters=True),
         **options,
     )
     if record["status"] != "success":
@@ -282,7 +281,7 @@ def _lunus_configurations(resources_dir: Path, altlocs_as_models: bool) -> AtomA
     """1vme as the lunus generator loads it, waters stripped (guidance strips them too)."""
     pytest.importorskip("lunus.sf", reason="lunus[sf] not installed")
     from sampleworks.synthetic.generate_synthetic_sf_lunus import load_configurations
-    from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ
+    from sampleworks.synthetic.synthetic_utils import BatchRowForMTZ, SyntheticStructureOptions
 
     source = resources_dir / "1vme" / DIFFUSE_BRAGG_SOURCE
     if not source.exists():
@@ -292,7 +291,7 @@ def _lunus_configurations(resources_dir: Path, altlocs_as_models: bool) -> AtomA
         BatchRowForMTZ(filename=DIFFUSE_BRAGG_SOURCE),
         "default",
         altlocs_as_models=altlocs_as_models,
-        strip_waters=True,
+        structure_options=SyntheticStructureOptions(strip_waters=True),
     )
 
 

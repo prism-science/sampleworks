@@ -145,20 +145,20 @@ def test_set_override_at_args_inside_job(monkeypatch: pytest.MonkeyPatch) -> Non
     assert preset.job("rf3").args["gradient-weights"] == "0.0 0.01"
 
 
-def test_set_coerces_bool_and_int(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_set_coerces_bool_and_float(monkeypatch: pytest.MonkeyPatch) -> None:
     """Override values are coerced to bools and ints when unambiguous."""
     monkeypatch.setenv("HOME", "/home/test")
     preset = loader.load_preset(
         "rf3_partial",
         overrides=[
             "shared_args.gradient-normalization=false",
-            "jobs.rf3.args.partial-diffusion-step=200",
+            "jobs.rf3.args.partial-diffusion-start=0.4",
         ],
     )
     assert preset.shared_args["gradient-normalization"] is False
-    # job.args["partial-diffusion-step"] doesn't exist by default in rf3_partial,
-    # but --set should still create or override it
-    assert preset.job("rf3").args["partial-diffusion-step"] == 200
+    # job.args["partial-diffusion-start"] exists by default in rf3_partial, set to 0.6
+    # but it should be overridden above
+    assert preset.job("rf3").args["partial-diffusion-start"] == 0.4
 
 
 def test_load_preset_from_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -5,7 +5,7 @@
 /experiments/ @prism-science/sampleworks-core
 
 # The core code should require scientist approval to merge
-/src/sampleworks/ @k-chrispens @marcuscollins @DorisMai
+/src/sampleworks/ @k-chrispens @marcuscollins @DorisMai @smallfishabc
 
 /src/sampleworks/runs/ @prism-science/sampleworks-core abbas@astera.org
 /tests/ @prism-science/sampleworks-core

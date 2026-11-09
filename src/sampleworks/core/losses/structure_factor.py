@@ -11,11 +11,12 @@ import reciprocalspaceship as rs
 import torch
 from jaxtyping import Bool, Complex, Float, Int
 from loguru import logger
+from SFC_Torch import SFcalculator
+from SFC_Torch.io import PDBParser
+
 from sampleworks.core.losses.options import StructureFactorOptions
 from sampleworks.core.losses.registry import LossBuildContext
 from sampleworks.synthetic.synthetic_utils import atomarray_to_gemmi, resolve_mtz_column
-from SFC_Torch import SFcalculator
-from SFC_Torch.io import PDBParser
 
 
 if TYPE_CHECKING:
