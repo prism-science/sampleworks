@@ -48,8 +48,9 @@ def structure_1vme_density(resources_dir: Path) -> dict:
     return parse(cif_path, ccd_mirror_path=None)
 
 
-@pytest.fixture(scope="session")
-def loss_function_1vme(density_map_1vme: "XMap", device: torch.device) -> "RealSpaceLossFunction":
+def _build_loss_function_1vme(
+    density_map_1vme: "XMap", device: torch.device
+) -> "RealSpaceLossFunction":
     """Real-space density loss from the carved 1vme map, in X-ray (non-EM) mode."""
     from sampleworks.core.losses.real_space_density import (
         RealSpaceLossFunction,
@@ -57,8 +58,13 @@ def loss_function_1vme(density_map_1vme: "XMap", device: torch.device) -> "RealS
     )
 
     params = setup_scattering_params(em_mode=False, device=device)
-    rf = RealSpaceLossFunction(density_map_1vme, params, torch.tensor([1], device=device))
-    return rf
+    return RealSpaceLossFunction(density_map_1vme, params, torch.tensor([1], device=device))
+
+
+@pytest.fixture(scope="session")
+def loss_function_1vme(density_map_1vme: "XMap", device: torch.device) -> "RealSpaceLossFunction":
+    """Real-space density loss from the carved 1vme map, in X-ray (non-EM) mode."""
+    return _build_loss_function_1vme(density_map_1vme, device)
 
 
 @pytest.fixture(scope="session")

@@ -21,6 +21,7 @@ from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.volume im
     XMap,
 )
 from sampleworks.core.losses.options import RealSpaceDensityOptions
+from sampleworks.core.losses.protocol import LossInputs
 from sampleworks.core.losses.registry import LossBuildContext
 from sampleworks.utils.elements import elements_to_scattering_indices
 from sampleworks.utils.torch_utils import try_gpu
@@ -311,35 +312,33 @@ class RealSpaceLossFunction:
         else:
             raise ValueError("Invalid loss_order, must be 1 or 2")
 
-    def precompute_unique_combinations(
-        self,
-        elements: Int[torch.Tensor, "batch n_atoms"],
-        b_factors: Float[torch.Tensor, "batch n_atoms"],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Pre-compute unique (element, b_factor) combinations for vmap compatibility.
+        # Set by prepare(); None means every call finds the unique pairs itself.
+        self._unique_combinations: Float[torch.Tensor, "n_unique 2"] | None = None
+        self._inverse_indices: Int[torch.Tensor, "*batch n_atoms"] | None = None
 
-        This allows torch.unique to be called outside of vmap contexts, avoiding
-        the dynamic shapes.
+    def prepare(self, loss_inputs: LossInputs, *, device: torch.device | str = "cpu") -> None:
+        """Find the unique (element, B-factor) pairs of the loss inputs once.
+
+        An atom's density depends only on its element and B-factor, so the forward
+        model integrates each unique pair once and indexes the result back onto the
+        atoms. Finding the pairs here instead of on every call takes ``torch.unique``,
+        whose output shape depends on the data, out of ``__call__``, so a prepared
+        loss runs under ``torch.vmap``. Preparing is optional: an unprepared loss
+        finds the pairs on every call.
 
         Parameters
         ----------
-        elements: torch.Tensor
-            Atomic elements, shape [batch n_atoms]
-        b_factors: torch.Tensor
-            Per-atom B-factors, shape [batch n_atoms]
-
-        Returns
-        -------
-        tuple[torch.Tensor, torch.Tensor]
-            unique_combinations: Unique (element, b_factor) pairs
-            inverse_indices: Indices to reconstruct original from unique
+        loss_inputs
+            Inputs every later ``__call__`` is fed. Only ``elements`` and
+            ``b_factors`` are read.
+        device
+            PyTorch device the unique pairs and their inverse indices are placed on.
         """
-        device = self.device
-        elements_flat = elements.reshape(-1)
-        b_factors_flat = b_factors.reshape(-1)
-        combined = torch.stack([elements_flat, b_factors_flat], dim=1)
+        elements = loss_inputs.elements
+        combined = torch.stack([elements.reshape(-1), loss_inputs.b_factors.reshape(-1)], dim=1)
         unique_combinations, inverse_indices = torch.unique(combined, dim=0, return_inverse=True)
-        return unique_combinations.to(device), inverse_indices.to(device)
+        self._unique_combinations = unique_combinations.to(device)
+        self._inverse_indices = inverse_indices.reshape(elements.shape).to(device)
 
     def structure_to_loss_input(
         self, structure: dict
@@ -361,8 +360,6 @@ class RealSpaceLossFunction:
         elements: Int[torch.Tensor, "batch n_atoms"],
         b_factors: Float[torch.Tensor, "batch n_atoms"],
         occupancies: Float[torch.Tensor, "batch n_atoms"],
-        unique_combinations: torch.Tensor | None = None,
-        inverse_indices: torch.Tensor | None = None,
     ) -> Float[torch.Tensor, ""]:
         """Pure function for computing loss. Call .backward() on this to get gradients
         w.r.t. input.
@@ -372,28 +369,37 @@ class RealSpaceLossFunction:
         coordinates: Float[torch.Tensor, "batch n_atoms 3"]
             Atomic coordinates
         elements: Int[torch.Tensor, "batch n_atoms"]
-            Atomic elements
+            Atomic elements. After :meth:`prepare`, these and ``b_factors`` must be
+            the ones it was given; their unique pairs are not looked up again.
         b_factors: Float[torch.Tensor, "batch n_atoms"]
             Per-atom B-factor
         occupancies: Float[torch.Tensor, "batch n_atoms"]
             Per-atom occupancies
-        unique_combinations: torch.Tensor | None, optional
-            Pre-computed unique (element, b_factor) pairs for vmap compatibility
-        inverse_indices: torch.Tensor | None, optional
-            Pre-computed inverse indices for vmap compatibility
 
         Returns
         -------
         torch.Tensor
             Loss value
+
+        Raises
+        ------
+        ValueError
+            If the loss was prepared for inputs of a different shape.
         """
+        if self._inverse_indices is not None and elements.shape != self._inverse_indices.shape:
+            raise ValueError(
+                f"elements has shape {tuple(elements.shape)} but prepare() was given loss "
+                f"inputs of shape {tuple(self._inverse_indices.shape)}. Call prepare() with "
+                "the loss inputs the loss is evaluated on."
+            )
+
         density: torch.Tensor = self.transformer(
             coordinates=coordinates,
             elements=elements,
             b_factors=b_factors,
             occupancies=occupancies,
-            unique_combinations=unique_combinations,
-            inverse_indices=inverse_indices,
+            unique_combinations=self._unique_combinations,
+            inverse_indices=self._inverse_indices,
         ).sum(0)  # sum over batch dimension
 
         return self.loss(density, self.transformer.xmap.array)
