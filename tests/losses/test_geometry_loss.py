@@ -118,7 +118,7 @@ def water() -> AtomArray:
 
 @pytest.mark.parametrize(
     ["deviation", "expected"],
-    [[0.0, 0.0], [0.9 * BOND_TOLERANCE, 0.0], [-0.9 * BOND_TOLERANCE, 0.0]]
+    [[0.0, 0.0], [0.9 * BOND_TOLERANCE, 0.0], [-0.9 * BOND_TOLERANCE, 0.0]],
 )
 def test_bond_deviation_values(water, deviation, expected):
     """Bonds stretched or compressed by less than ``bond_tolerance`` cost nothing.
