@@ -23,9 +23,12 @@ from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.frame_transforms import apply_forward_transform
 from sampleworks.utils.guidance_script_arguments import GuidanceConfig
 from sampleworks.utils.guidance_script_utils import save_everything
-from sampleworks.utils.structure_utils import process_structure_to_trajectory_input
+from sampleworks.utils.structure_utils import (
+    get_valid_atom_mask,
+    process_structure_to_trajectory_input,
+)
 
-from tests.mocks import MismatchCase, MismatchCaseWrapper
+from tests.mocks import MismatchCase, MismatchCaseWrapper, MockFlowModelWrapper
 from tests.utils.atom_array_builders import build_test_atom_array
 
 
@@ -176,12 +179,10 @@ def _build_real_case(
         Real mismatch case with filtered atom arrays.
     """
     model_raw = cast(AtomArray, ensure_atom_array_stack(model_structure["asym_unit"])[0])
-    model_mask = (model_raw.occupancy > 0) & ~np.any(np.isnan(model_raw.coord), axis=-1)
-    model_atom_array = cast(AtomArray, model_raw[model_mask])
+    model_atom_array = cast(AtomArray, model_raw[get_valid_atom_mask(model_raw)])
 
     struct_raw = cast(AtomArray, ensure_atom_array_stack(struct_structure["asym_unit"])[0])
-    struct_mask = (struct_raw.occupancy > 0) & ~np.any(np.isnan(struct_raw.coord), axis=-1)
-    struct_atom_array = cast(AtomArray, struct_raw[struct_mask])
+    struct_atom_array = cast(AtomArray, struct_raw[get_valid_atom_mask(struct_raw)])
 
     return MismatchCase(
         id=id,
@@ -246,6 +247,29 @@ def _preprocess(
         ensemble_size=ensemble_size,
     )
     return processed, features
+
+
+def _preprocess_without_model_template(structure: dict[str, Any]):
+    """Run structure preprocessing for a model that exposes no model atom array.
+
+    Parameters
+    ----------
+    structure
+        Parsed structure dictionary. Copied before preprocessing, so it is not mutated.
+
+    Returns
+    -------
+    SampleworksProcessedStructure
+        Processed structure whose atom array is the filtered input structure.
+    """
+    wrapper = MockFlowModelWrapper()
+    features = wrapper.featurize(structure)
+    return process_structure_to_trajectory_input(
+        structure=_copy_structure_dict(structure),
+        coords_from_prior=wrapper.initialize_from_prior(batch_size=1, features=features),
+        features=features,
+        ensemble_size=1,
+    )
 
 
 # TODO: this should probably go elsewhere
@@ -401,34 +425,59 @@ class TestRealStructurePreprocessing:
         request: pytest.FixtureRequest,
         structure_preprocess_case: StructurePreprocessExpectation,
     ):
-        """Filtered arrays contain only finite coordinates and positive occupancy."""
-        structure = request.getfixturevalue(structure_preprocess_case.fixture_name)
-        raw_atom_array = cast(AtomArray, ensure_atom_array_stack(structure["asym_unit"])[0])
-        mask = (raw_atom_array.occupancy > 0) & ~np.any(np.isnan(raw_atom_array.coord), axis=-1)
-        filtered_atom_array = cast(AtomArray, raw_atom_array[mask])
+        """Occupied atoms with non-finite coordinates and finite atoms with zero occupancy
+        are both dropped, and nothing else is."""
+        structure = _copy_structure_dict(
+            request.getfixturevalue(structure_preprocess_case.fixture_name)
+        )
+        atom_array = cast(AtomArray, ensure_atom_array_stack(structure["asym_unit"])[0]).copy()
 
-        filtered_coords = cast(np.ndarray, filtered_atom_array.coord)
-        filtered_occupancy = cast(np.ndarray, filtered_atom_array.occupancy)
+        # In the deposited files every NaN-coordinate atom also has zero occupancy, so
+        # each criterion is exercised independently on atoms that were valid before.
+        occupied = np.flatnonzero(atom_array.occupancy > 0)
+        nan_coord, inf_coord, zero_occupancy = occupied[[0, len(occupied) // 2, -1]]
+        atom_array.coord[nan_coord] = np.nan
+        atom_array.coord[inf_coord, 1] = np.inf
+        atom_array.occupancy[zero_occupancy] = 0.0
+        injected_marker = 999.0
+        atom_array.b_factor[[nan_coord, inf_coord, zero_occupancy]] = injected_marker
+        structure["asym_unit"] = atom_array
 
-        assert len(filtered_atom_array) <= len(raw_atom_array)
-        assert np.isfinite(filtered_coords).all()
-        assert np.all(filtered_occupancy > 0)
+        processed = _preprocess_without_model_template(structure)
+        filtered = processed.atom_array
+        input_coords = processed.input_coords  # (1, n_filtered, 3)
+
+        expected_atoms = (
+            structure_preprocess_case.expected_filtered_atoms
+            - structure_preprocess_case.expected_hydrogen_atoms
+            - 3
+        )
+        assert len(filtered) == expected_atoms
+        assert not np.any(cast(np.ndarray, filtered.b_factor) == injected_marker)
+        assert np.isfinite(cast(np.ndarray, filtered.coord)).all()
+        assert np.all(cast(np.ndarray, filtered.occupancy) > 0)
+        assert input_coords.shape == (1, expected_atoms, 3)
+        assert torch.isfinite(input_coords).all()
 
     def test_preprocessing_preserves_valid_atoms(
         self,
         request: pytest.FixtureRequest,
         structure_preprocess_case: StructurePreprocessExpectation,
     ):
-        """Filtered atom counts match known."""
+        """Preprocessing keeps exactly the known number of valid deposited atoms, and the
+        reference coordinates are theirs."""
         structure = request.getfixturevalue(structure_preprocess_case.fixture_name)
-        raw = cast(AtomArray, ensure_atom_array_stack(structure["asym_unit"])[0])
-        mask = (raw.occupancy > 0) & ~np.any(np.isnan(raw.coord), axis=-1)
-        filtered_atom_array = cast(AtomArray, raw[mask])
+
+        processed = _preprocess_without_model_template(structure)
 
         expected = structure_preprocess_case.expected_filtered_atoms
         expected -= structure_preprocess_case.expected_hydrogen_atoms
 
-        assert len(filtered_atom_array) == expected
+        assert len(processed.atom_array) == expected
+        torch.testing.assert_close(
+            processed.input_coords[0],
+            torch.as_tensor(cast(np.ndarray, processed.atom_array.coord)),
+        )
 
 
 class TestReconcilerConstruction:
