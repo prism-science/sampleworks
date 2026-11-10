@@ -227,6 +227,8 @@ import pytest
 def test_boltz_full_inference(boltz_wrapper, features): ...
 ```
 
+A test of how a wrapper behaves (featurization, shapes, caching, gradients) rather than what its trained weights predict should use the `<model>_random_wrapper` fixture instead of `<model>_wrapper`. It runs the released architecture with random weights and needs no checkpoint (see `tests/random_init.py`).
+
 ## Implementation Patterns
 
 - **Immutable state**: frozen dataclasses with `with_*` functional updates (see `StepParams`).
