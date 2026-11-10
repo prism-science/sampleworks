@@ -108,6 +108,10 @@ def test_main_writes_expected_output_columns_and_derived_paths(
             f"the union belongs in the sibling file, not in {entries}"
         )
 
+    union_file = tmp_path / "output_union.csv"
+    assert union_file.exists()
+    assert set(pd.read_csv(union_file).columns) == _EXPECTED_COLS
+
 
 @pytest.mark.slow
 def test_large_min_span_yields_empty_selection(
