@@ -1,6 +1,8 @@
 """Tests for protocol compliance of model wrappers.
 
-Tests that implementations correctly implement FlowModelWrapper protocol.
+Tests that implementations correctly implement FlowModelWrapper protocol. None of these
+depend on trained weights, so they run each released architecture with random weights
+(see ``tests/random_init.py``) and need a GPU but no checkpoints.
 """
 
 import numpy as np
@@ -13,15 +15,21 @@ from tests.conftest import (
     annotate_structure_for_wrapper,
     ComponentInfo,
     get_conditioning_type,
-    get_fixture_name_for_wrapper,
+    get_random_init_fixture_name_for_wrapper,
     MODEL_WRAPPER_REGISTRY,
     STRUCTURES,
 )
 
 
-def get_slow_wrapper_infos() -> list[ComponentInfo]:
-    """Get ComponentInfo for all wrappers that require checkpoints."""
-    return [info for info in MODEL_WRAPPER_REGISTRY.values() if info.requires_checkpoint]
+def get_wrapper_infos() -> list[ComponentInfo]:
+    """Get ComponentInfo for every model wrapper.
+
+    Returns
+    -------
+    list[ComponentInfo]
+        One entry per wrapper; each has a random-weight fixture.
+    """
+    return list(MODEL_WRAPPER_REGISTRY.values())
 
 
 def test_generative_model_input_carries_only_conditioning():
@@ -37,7 +45,7 @@ def test_generative_model_input_carries_only_conditioning():
 
 @pytest.mark.gpu
 @pytest.mark.slow
-@pytest.mark.parametrize("wrapper_info", get_slow_wrapper_infos(), ids=lambda w: w.name)
+@pytest.mark.parametrize("wrapper_info", get_wrapper_infos(), ids=lambda w: w.name)
 class TestFlowModelWrapperProtocol:
     """Test that wrappers implement FlowModelWrapper protocol correctly.
 
@@ -51,7 +59,7 @@ class TestFlowModelWrapperProtocol:
         """Test wrapper implements FlowModelWrapper protocol."""
         from sampleworks.models.protocol import FlowModelWrapper
 
-        fixture_name = get_fixture_name_for_wrapper(wrapper_info)
+        fixture_name = get_random_init_fixture_name_for_wrapper(wrapper_info)
         wrapper = request.getfixturevalue(fixture_name)
         assert isinstance(wrapper, FlowModelWrapper), (
             f"{wrapper_info.name} does not implement FlowModelWrapper protocol"
@@ -66,7 +74,7 @@ class TestFlowModelWrapperProtocol:
         """Test featurize returns GenerativeModelInput with conditioning."""
         from sampleworks.models.protocol import GenerativeModelInput
 
-        fixture_name = get_fixture_name_for_wrapper(wrapper_info)
+        fixture_name = get_random_init_fixture_name_for_wrapper(wrapper_info)
         wrapper = request.getfixturevalue(fixture_name)
         structure = request.getfixturevalue(structure_fixture)
         conditioning_type = get_conditioning_type(wrapper_info)
@@ -98,7 +106,7 @@ class TestFlowModelWrapperProtocol:
         request,
     ):
         """Test step(x_t, t, features) returns coordinates tensor."""
-        fixture_name = get_fixture_name_for_wrapper(wrapper_info)
+        fixture_name = get_random_init_fixture_name_for_wrapper(wrapper_info)
         wrapper = request.getfixturevalue(fixture_name)
         structure = request.getfixturevalue(structure_fixture)
 
@@ -130,7 +138,7 @@ class TestFlowModelWrapperProtocol:
         self, wrapper_info: ComponentInfo, structure_fixture: str, temp_output_dir, request
     ):
         """Test step works with float t value."""
-        fixture_name = get_fixture_name_for_wrapper(wrapper_info)
+        fixture_name = get_random_init_fixture_name_for_wrapper(wrapper_info)
         wrapper = request.getfixturevalue(fixture_name)
         structure = request.getfixturevalue(structure_fixture)
 
@@ -150,7 +158,7 @@ class TestFlowModelWrapperProtocol:
         self, wrapper_info: ComponentInfo, structure_fixture: str, temp_output_dir, request
     ):
         """Test initialize_from_prior with features from featurize."""
-        fixture_name = get_fixture_name_for_wrapper(wrapper_info)
+        fixture_name = get_random_init_fixture_name_for_wrapper(wrapper_info)
         wrapper = request.getfixturevalue(fixture_name)
         structure = request.getfixturevalue(structure_fixture)
 
@@ -175,7 +183,7 @@ class TestFlowModelWrapperProtocol:
 
     def test_initialize_from_prior_with_shape(self, wrapper_info: ComponentInfo, request):
         """Test initialize_from_prior with explicit shape."""
-        fixture_name = get_fixture_name_for_wrapper(wrapper_info)
+        fixture_name = get_random_init_fixture_name_for_wrapper(wrapper_info)
         wrapper = request.getfixturevalue(fixture_name)
 
         batch_size = 2
@@ -194,7 +202,7 @@ class TestFlowModelWrapperProtocol:
         self, wrapper_info: ComponentInfo, request
     ):
         """Test initialize_from_prior raises ValueError without features or shape."""
-        fixture_name = get_fixture_name_for_wrapper(wrapper_info)
+        fixture_name = get_random_init_fixture_name_for_wrapper(wrapper_info)
         wrapper = request.getfixturevalue(fixture_name)
 
         with pytest.raises(ValueError, match="features|shape"):
@@ -203,13 +211,13 @@ class TestFlowModelWrapperProtocol:
 
 @pytest.mark.gpu
 @pytest.mark.slow
-@pytest.mark.parametrize("wrapper_info", get_slow_wrapper_infos(), ids=lambda w: w.name)
+@pytest.mark.parametrize("wrapper_info", get_wrapper_infos(), ids=lambda w: w.name)
 class TestStepRequiresFeatures:
     """Test that step() requires features parameter."""
 
     def test_step_raises_without_features(self, wrapper_info: ComponentInfo, request):
         """Test step raises ValueError when features is None."""
-        fixture_name = get_fixture_name_for_wrapper(wrapper_info)
+        fixture_name = get_random_init_fixture_name_for_wrapper(wrapper_info)
         wrapper = request.getfixturevalue(fixture_name)
 
         x_t = torch.randn(1, 100, 3, device=wrapper.device)
@@ -221,7 +229,7 @@ class TestStepRequiresFeatures:
 
 @pytest.mark.gpu
 @pytest.mark.slow
-@pytest.mark.parametrize("wrapper_info", get_slow_wrapper_infos(), ids=lambda w: w.name)
+@pytest.mark.parametrize("wrapper_info", get_wrapper_infos(), ids=lambda w: w.name)
 class TestFullSequenceAtomCoverage:
     """Verify that preprocessing with the real deposited sequence override produces
     features containing atoms for ALL residues and not just the observed residues.
@@ -242,7 +250,7 @@ class TestFullSequenceAtomCoverage:
     ):
         """After override with the real 386-residue deposited sequence,
         initialize_from_prior should produce more atoms than observed-only."""
-        fixture_name = get_fixture_name_for_wrapper(wrapper_info)
+        fixture_name = get_random_init_fixture_name_for_wrapper(wrapper_info)
         wrapper = request.getfixturevalue(fixture_name)
 
         overridden = apply_sequence_override(structure_5i09_density, seq_5i09_deposited)
@@ -301,7 +309,7 @@ class TestFullSequenceAtomCoverage:
             process_structure_to_trajectory_input,
         )
 
-        fixture_name = get_fixture_name_for_wrapper(wrapper_info)
+        fixture_name = get_random_init_fixture_name_for_wrapper(wrapper_info)
         wrapper = request.getfixturevalue(fixture_name)
 
         overridden = apply_sequence_override(structure_5i09_density, seq_5i09_deposited)

@@ -386,6 +386,75 @@ class PredictArgs:
     write_full_pde: bool = False
 
 
+def boltz2_inference_hparams(
+    diffusion_args: Boltz2DiffusionParams, steering_args: BoltzSteeringParams
+) -> dict[str, Any]:
+    """Hyperparameters that replace a Boltz2 checkpoint's own when the wrapper loads it.
+
+    Parameters
+    ----------
+    diffusion_args : Boltz2DiffusionParams
+        Diffusion process parameters for inference.
+    steering_args : BoltzSteeringParams
+        Steering configuration for external potentials.
+
+    Returns
+    -------
+    dict[str, Any]
+        Keyword arguments for ``Boltz2``, as passed to ``Boltz2.load_from_checkpoint``.
+        Merge them over a checkpoint's ``hyper_parameters`` to build the same model
+        without loading its weights.
+    """
+    msa_args = MSAModuleArgs(
+        subsample_msa=True,  # Default from boltz repo
+        num_subsampled_msa=1024,  # Default from boltz repo
+        use_paired_feature=True,  # Required for Boltz2
+    )
+    return {
+        "predict_args": asdict(PredictArgs()),
+        "diffusion_process_args": asdict(diffusion_args),
+        "ema": False,
+        "pairformer_args": asdict(PairformerArgsV2()),
+        "msa_args": asdict(msa_args),
+        "steering_args": asdict(steering_args),
+    }
+
+
+def boltz1_inference_hparams(
+    diffusion_args: BoltzDiffusionParams, steering_args: BoltzSteeringParams
+) -> dict[str, Any]:
+    """Hyperparameters that replace a Boltz1 checkpoint's own when the wrapper loads it.
+
+    Parameters
+    ----------
+    diffusion_args : BoltzDiffusionParams
+        Diffusion process parameters for inference.
+    steering_args : BoltzSteeringParams
+        Steering configuration for external potentials.
+
+    Returns
+    -------
+    dict[str, Any]
+        Keyword arguments for ``Boltz1``, as passed to ``Boltz1.load_from_checkpoint``.
+        Merge them over a checkpoint's ``hyper_parameters`` to build the same model
+        without loading its weights.
+    """
+    msa_args = MSAModuleArgs(
+        subsample_msa=True,
+        num_subsampled_msa=1024,
+        use_paired_feature=False,
+    )
+    return {
+        "predict_args": asdict(PredictArgs()),
+        "diffusion_process_args": asdict(diffusion_args),
+        "ema": False,
+        "use_kernels": True,
+        "pairformer_args": asdict(PairformerArgs()),
+        "msa_args": asdict(msa_args),
+        "steering_args": asdict(steering_args),
+    }
+
+
 # TODO move this so that it can be imported without requiring a Boltz installation
 def create_boltz_input_from_structure(
     structure: dict,
@@ -536,13 +605,6 @@ class Boltz2Wrapper:
         self.cache_path = Path(checkpoint_path).parent.expanduser().resolve()
         self.cache_path.mkdir(parents=True, exist_ok=True)
 
-        pairformer_args = PairformerArgsV2()
-
-        msa_args = MSAModuleArgs(
-            subsample_msa=True,  # Default from boltz repo
-            num_subsampled_msa=1024,  # Default from boltz repo
-            use_paired_feature=True,  # Required for Boltz2
-        )
         self.msa_manager = MSAManager() if use_msa_manager else None
         self.msa_pairing_strategy = "greedy"
 
@@ -551,13 +613,8 @@ class Boltz2Wrapper:
                 Boltz2.load_from_checkpoint(
                     checkpoint_path=checkpoint_path,
                     strict=True,
-                    predict_args=asdict(PredictArgs()),
                     map_location="cpu",
-                    diffusion_process_args=asdict(diffusion_args),
-                    ema=False,
-                    pairformer_args=asdict(pairformer_args),
-                    msa_args=asdict(msa_args),
-                    steering_args=asdict(steering_args),
+                    **boltz2_inference_hparams(diffusion_args, steering_args),
                 )
                 .to(self.device)
                 .eval()
@@ -1028,13 +1085,6 @@ class Boltz1Wrapper:
         self.cache_path = Path(checkpoint_path).parent.expanduser().resolve()
         self.cache_path.mkdir(parents=True, exist_ok=True)
 
-        pairformer_args = PairformerArgs()
-
-        msa_args = MSAModuleArgs(
-            subsample_msa=True,
-            num_subsampled_msa=1024,
-            use_paired_feature=False,
-        )
         self.msa_manager = MSAManager() if self.use_msa_manager else None
         self.msa_pairing_strategy = "greedy"
 
@@ -1043,14 +1093,8 @@ class Boltz1Wrapper:
                 Boltz1.load_from_checkpoint(
                     checkpoint_path,
                     strict=True,
-                    predict_args=asdict(PredictArgs()),
                     map_location="cpu",
-                    diffusion_process_args=asdict(diffusion_args),
-                    ema=False,
-                    use_kernels=True,
-                    pairformer_args=asdict(pairformer_args),
-                    msa_args=asdict(msa_args),
-                    steering_args=asdict(steering_args),
+                    **boltz1_inference_hparams(diffusion_args, steering_args),
                 )
                 .to(self.device)
                 .eval()
