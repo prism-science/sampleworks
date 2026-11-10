@@ -526,6 +526,60 @@ class StructureFactorLossFunction:
             If any input's atom count differs from the SFcalculator topology built by `prepare`
             or if ``b_factors`` / ``occupancies`` are not broadcast-identical across batch dim.
         """
+        fcalc = self.calc_fmodel(coordinates, b_factors, occupancies)
+        assert self.sfc is not None  # calc_fmodel raised otherwise
+
+        mask = self._reflection_mask
+        if self.normalize_amplitude:
+            calc = self.sfc.calc_Ec(fcalc).abs()
+            obs = self.sfc.Eo
+        else:
+            calc = torch.abs(fcalc)
+            obs = self.sfc.Fo
+        return self.loss(calc[mask], obs[mask])
+
+    def calc_fmodel(
+        self,
+        coordinates: Float[torch.Tensor, "batch n_atoms 3"],
+        b_factors: Float[torch.Tensor, "batch n_atoms"],
+        occupancies: Float[torch.Tensor, "batch n_atoms"],
+    ) -> Complex[torch.Tensor, "n_hkl"]:  # noqa: F821, UP037
+        """Compute the ensemble's complex model structure factors on the observed HKL set.
+
+        This is what :meth:`__call__` scores: ``Fprotein`` summed over the ensemble, plus
+        bulk solvent per :attr:`bulk_solvent`. It is indexed like ``sfc.Fo``,
+        ``sfc.free_flag`` and ``sfc.Outlier``, so an R factor can be taken against it
+        without recomputing.
+
+        Parameters
+        ----------
+        coordinates
+            Atomic coordinates ``[batch, n_atoms, 3]`` in model atom space.
+        b_factors
+            Per-atom isotropic B-factors ``[batch, n_atoms]``, identical across the batch.
+        occupancies
+            Per-atom occupancies ``[batch, n_atoms]``, identical across the batch; ``1/batch``
+            makes the complex sum the ensemble total.
+
+        Returns
+        -------
+        torch.Tensor
+            Complex ``Fprotein`` (``bulk_solvent="off"``) or ``Ftotal``, ``[n_hkl]``.
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`prepare` has not been called.
+        ValueError
+            If any input's atom count differs from the prepared topology, or ``b_factors`` /
+            ``occupancies`` differ across the batch.
+
+        Notes
+        -----
+        Side effect: overwrites ``sfc.atom_b_iso`` and ``sfc.atom_occ``, and SFcalculator's
+        cached structure factors (``Fprotein_asu_batch`` and, with bulk solvent, the
+        ``Fmask`` / ``Ftotal`` caches).
+        """
         if self.sfc is None or self._reflection_mask is None:
             raise RuntimeError(
                 "StructureFactorLossFunction.prepare() must be called with the loss "
@@ -566,16 +620,7 @@ class StructureFactorLossFunction:
         )
         Fprotein = Fprotein_batch.sum(dim=0)
 
-        fcalc = Fprotein if self.bulk_solvent == "off" else self._compute_ensemble_ftotal(Fprotein)
-
-        mask = self._reflection_mask
-        if self.normalize_amplitude:
-            calc = self.sfc.calc_Ec(fcalc).abs()
-            obs = self.sfc.Eo
-        else:
-            calc = torch.abs(fcalc)
-            obs = self.sfc.Fo
-        return self.loss(calc[mask], obs[mask])
+        return Fprotein if self.bulk_solvent == "off" else self._compute_ensemble_ftotal(Fprotein)
 
     def _compute_ensemble_ftotal(
         self,
