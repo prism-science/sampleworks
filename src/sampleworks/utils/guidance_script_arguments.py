@@ -33,6 +33,7 @@ _CHECKPOINT_ENV_VARS = {
     "boltz2": "BOLTZ2_CHECKPOINT",
     "rf3": "RF3_CHECKPOINT",
     "protenix": "PROTENIX_CHECKPOINT",
+    "bioemu2": "BIOEMU2_CHECKPOINT",
 }
 
 _CHECKPOINT_CANDIDATES = {
@@ -56,7 +57,14 @@ _CHECKPOINT_CANDIDATES = {
         "/mnt/diffuse-shared/raw/checkpoints/protenix_base_default_v0.5.0.pt",
         ".pixi/envs/protenix-dev/lib/python3.12/site-packages/release_data/checkpoint/protenix_base_default_v0.5.0.pt",
     ],
+    "bioemu2": [
+        "/checkpoints/bioemu2-preview/checkpoint.ckpt",
+        "/mnt/diffuse-shared/raw/checkpoints/bioemu2-preview/checkpoint.ckpt",
+    ],
 }
+
+# Files a checkpoint needs in its own directory; a candidate without them is skipped.
+_CHECKPOINT_SIDECARS = {"bioemu2": ("config.yaml",)}
 
 
 def _resolve_checkpoint(model_key: str) -> str:
@@ -65,33 +73,46 @@ def _resolve_checkpoint(model_key: str) -> str:
     Model-specific environment variables from :data:`_CHECKPOINT_ENV_VARS` win
     when set. Otherwise, candidates from :data:`_CHECKPOINT_CANDIDATES` are
     tried in order, starting with baked-in ``/checkpoints/`` paths and then
-    ACTL shared-storage and legacy development locations.
+    ACTL shared-storage and legacy development locations. A candidate counts only
+    if the files in :data:`_CHECKPOINT_SIDECARS` sit beside it.
+
+    Parameters
+    ----------
+    model_key : str
+        Model name, e.g. ``"boltz2"`` or ``"bioemu2"``.
+
+    Returns
+    -------
+    str
+        Path to the checkpoint.
+
+    Raises
+    ------
+    ValueError
+        If the model has no candidates or none of them exists with its sidecar files.
     """
     env_var = _CHECKPOINT_ENV_VARS.get(model_key)
     candidates = []
     if env_var and os.environ.get(env_var):
         candidates.append(os.environ[env_var])
     candidates.extend(_CHECKPOINT_CANDIDATES.get(model_key, []))
-    for candidate in candidates:
-        resolved = Path(candidate).expanduser()
-        if resolved.exists():
-            return str(resolved)
-    # Nothing found – return the primary (baked-in) path so the error message
-    # points the user to the expected location.
-    resolved = candidates[0] if candidates else ""
-    if not resolved:
+    if not candidates:
         raise ValueError(
             f"Running guidance requires a model checkpoint for '{model_key}'. "
             f"Provide --model-checkpoint or bake checkpoints into /checkpoints/."
         )
-    if not Path(resolved).exists():
-        env_hint = _CHECKPOINT_ENV_VARS.get(model_key, "a checkpoint env var")
-        raise ValueError(
-            f"Model checkpoint for '{model_key}' was not found. Checked: {candidates}. "
-            f"Provide --model-checkpoint or set {env_hint}."
-        )
+    sidecars = _CHECKPOINT_SIDECARS.get(model_key, ())
+    for candidate in candidates:
+        resolved = Path(candidate).expanduser()
+        if resolved.exists() and all(resolved.with_name(name).exists() for name in sidecars):
+            return str(resolved)
 
-    return resolved
+    beside = f" with {', '.join(sidecars)} beside it" if sidecars else ""
+    env_hint = _CHECKPOINT_ENV_VARS.get(model_key, "a checkpoint env var")
+    raise ValueError(
+        f"Model checkpoint for '{model_key}'{beside} was not found. Checked: {candidates}. "
+        f"Provide --model-checkpoint or set {env_hint}."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +251,8 @@ _DYNAMIC_ATTRS = [
     "disable_chiral_features",
     "track_chiral_features",
     "protpardelle_config_path",
+    "bioemu2_mode",
+    "bioemu2_no_msa_server",
     # generic (overridable)
     "ensemble_size",
     "recycling_steps",
@@ -556,6 +579,10 @@ class GuidanceConfig:
         if job.model_name == StructurePredictor.RF3:
             self.disable_chiral_features = getattr(args, "disable_chiral_features", False)
             self.track_chiral_features = getattr(args, "track_chiral_features", False)
+
+        if job.model_name == StructurePredictor.BIOEMU2:
+            self.bioemu2_mode = getattr(args, "bioemu2_mode", "equilibrium")
+            self.bioemu2_no_msa_server = getattr(args, "bioemu2_no_msa_server", False)
 
         if job.scaler == GuidanceType.FK_STEERING:
             self.guidance_weight = job.gradient_weight
@@ -977,12 +1004,44 @@ def add_protpardelle_specific_args(parser: argparse.ArgumentParser | GuidanceCon
     )
 
 
+def add_bioemu2_specific_args(parser: argparse.ArgumentParser | GuidanceConfig):
+    """Add CLI arguments specific to BioEmu2 guidance runs."""
+    parser.add_argument(
+        "--model-checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Path to the BioEmu2 checkpoint.ckpt, with config.yaml beside it "
+            "(default: $BIOEMU2_CHECKPOINT or auto-resolved from /checkpoints/)"
+        ),
+    )
+    parser.add_argument(
+        "--bioemu2-mode",
+        type=str,
+        default="equilibrium",
+        choices=["equilibrium", "structure"],
+        help="BioEmu2 sampling mode: equilibrium ensemble or single folded structure",
+    )
+    parser.add_argument(
+        "--msa-path",
+        type=str,
+        default=None,
+        help="A3M file, JSON {chain_id: a3m}, or none to query the ColabFold server",
+    )
+    parser.add_argument(
+        "--bioemu2-no-msa-server",
+        action="store_true",
+        help="Without --msa-path, use single-sequence MSAs instead of querying ColabFold",
+    )
+
+
 _MODEL_ARG_ADDERS: dict[str, Any] = {
     "boltz1": add_boltz1_specific_args,
     "boltz2": add_boltz2_specific_args,
     "protenix": add_protenix_specific_args,
     "rf3": add_rf3_specific_args,
     "protpardelle": add_protpardelle_specific_args,
+    "bioemu2": add_bioemu2_specific_args,
 }
 
 

@@ -1,5 +1,6 @@
 import re
 import warnings
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast, Literal, overload
@@ -738,11 +739,22 @@ def make_atom_id(arr: AtomArray | AtomArrayStack) -> np.ndarray:
     )
 
 
-def make_normalized_atom_id(arr: AtomArray | AtomArrayStack) -> np.ndarray:
+def make_normalized_atom_id(
+    arr: AtomArray | AtomArrayStack, chain_ids: Collection[str] | None = None
+) -> np.ndarray:
     """Like ``make_atom_id`` but with sequential 0-based residue numbering per chain.
 
     Handles numbering differences between representations (Boltz 0-based,
     PDB author numbering, etc.).
+
+    Parameters
+    ----------
+    arr
+        Atoms to label.
+    chain_ids
+        Chain IDs to rank chains over, a superset of ``arr``'s. Defaults to ``arr``'s own
+        chain IDs. Arrays compared against each other must share it when one of them lacks
+        some of the other's chains, or their chain ranks disagree.
 
     Returns
     -------
@@ -755,7 +767,7 @@ def make_normalized_atom_id(arr: AtomArray | AtomArrayStack) -> np.ndarray:
 
     # Sorted so the index assignment is stable regardless of input ordering.
     unique_chains = sorted(set(chain_id))
-    chain_to_idx = {c: i for i, c in enumerate(unique_chains)}
+    chain_to_idx = {c: i for i, c in enumerate(sorted(chain_ids or unique_chains))}
 
     # Assign sequential 0-based seq_pos per chain.
     seq_pos = np.empty(len(res_id), dtype=np.int64)
@@ -856,8 +868,16 @@ def filter_to_common_atoms(
             )
 
     # Find common atom IDs across all structures
-    id_fn = make_normalized_atom_id if normalize_ids else make_atom_id
-    all_ids = [id_fn(array) for array in arrays]
+    if normalize_ids:
+        # Arrays whose chains are all named in the largest array's chains (e.g. a model that
+        # leaves out ligands or waters) rank chains over that set; otherwise chains may have
+        # been renamed and each array ranks its own.
+        chain_sets = [set(cast(np.ndarray, array.chain_id)) for array in arrays]
+        largest = max(chain_sets, key=len)
+        shared = largest if all(chains <= largest for chains in chain_sets) else None
+        all_ids = [make_normalized_atom_id(array, shared) for array in arrays]
+    else:
+        all_ids = [make_atom_id(array) for array in arrays]
 
     common_ids = all_ids[0]
     for ids in all_ids[1:]:
