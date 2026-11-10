@@ -1,4 +1,4 @@
-description = "Analyze grid-search outputs with RSCC, LDDT clustering, and bond geometry."
+description = "Analyze grid-search outputs with RSCC, LDDT clustering, min-altloc RMSD, and bond geometry."
 
 [defaults]
 GRID_SEARCH_RESULTS_DIR = "/data/results/grid_search_results"
@@ -45,6 +45,14 @@ gpus = "none"
 script = "scripts/eval/lddt_evaluation_script.py"
 output_arg = ""
 output_subdir = "analysis/lddt"
+
+[[jobs]]
+name = "rmsd"
+env = "analysis"
+gpus = "none"
+script = "scripts/eval/rmsd_evaluation_script.py"
+output_arg = ""
+output_subdir = "analysis/rmsd"
 
 [[jobs]]
 name = "bond_geometry"

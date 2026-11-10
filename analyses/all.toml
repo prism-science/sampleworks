@@ -47,6 +47,14 @@ output_arg = ""
 output_subdir = "analysis/lddt"
 
 [[jobs]]
+name = "rmsd"
+env = "analysis"
+gpus = "none"
+script = "scripts/eval/rmsd_evaluation_script.py"
+output_arg = ""
+output_subdir = "analysis/rmsd"
+
+[[jobs]]
 name = "bond_geometry"
 env = "analysis"
 gpus = "none"
