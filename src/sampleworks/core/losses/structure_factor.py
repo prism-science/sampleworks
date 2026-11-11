@@ -14,7 +14,7 @@ from loguru import logger
 from SFC_Torch import SFcalculator
 from SFC_Torch.io import PDBParser
 
-from sampleworks.core.losses.options import StructureFactorOptions
+from sampleworks.core.losses.options import SFC_BULK_SOLVENT_MODES, StructureFactorOptions
 from sampleworks.core.losses.registry import LossBuildContext
 from sampleworks.synthetic.synthetic_utils import atomarray_to_gemmi, resolve_mtz_column
 
@@ -25,11 +25,6 @@ if TYPE_CHECKING:
 
 # Loss callable: maps (|Fcalc|, |Fobs|) over the masked reflections to a scalar.
 AmplitudeLoss = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
-
-# Bulk-solvent treatment for the scored amplitude. "off": |Fprotein|. "combined":
-# |Ftotal| with one mask from the combined density. "per_conformer": |Ftotal| with
-# the mean of per-conformer masks (see the class docstring / _compute_ensemble_ftotal).
-_BULK_SOLVENT_MODES = ("off", "combined", "per_conformer")
 
 # SFcalculator init kwargs owned by this class (derived from other constructor
 # arguments or injected in prepare()). They must not be overridden via
@@ -208,9 +203,9 @@ class StructureFactorLossFunction:
         self.mtzfile = str(mtzfile)
         self.resolution = resolution
         self.scattering_factor_mode = scattering_factor_mode
-        if bulk_solvent not in _BULK_SOLVENT_MODES:
+        if bulk_solvent not in SFC_BULK_SOLVENT_MODES:
             raise ValueError(
-                f"bulk_solvent must be one of {_BULK_SOLVENT_MODES}, got {bulk_solvent!r}."
+                f"bulk_solvent must be one of {SFC_BULK_SOLVENT_MODES}, got {bulk_solvent!r}."
             )
         self.bulk_solvent = bulk_solvent
         self.exclude_free_reflections = exclude_free_reflections
