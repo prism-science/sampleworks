@@ -57,14 +57,12 @@ def _make_args(
     output_file: Path,
     min_span: int = 5,
     altloc_label: str = "label_alt_id",
-    include_all_altlocs: bool = True,
 ) -> argparse.Namespace:
     return argparse.Namespace(
         input_csv=input_csv,
         output_file=output_file,
         min_span=min_span,
         altloc_label=altloc_label,
-        include_all_altlocs=include_all_altlocs,
     )
 
 
@@ -83,7 +81,7 @@ def test_main_writes_expected_output_columns_and_derived_paths(
     tmp_path: Path, resources_dir: Path, find_altloc_script
 ):
     """Two-row happy path: verifies output schema, derived path columns, and
-    that both old- and new-style selections appear with default flags."""
+    that only span selections appear in the ``selection`` column."""
     input_csv = _altloc_input_csv(tmp_path, resources_dir, n_rows=2)
     output_file = tmp_path / "output.csv"
 
@@ -106,53 +104,32 @@ def test_main_writes_expected_output_columns_and_derived_paths(
         assert any(s.startswith("chain ") and " and resi " in s for s in entries), (
             f"expected at least one old-style selection in {entries}"
         )
-        assert any("chain_id == " in s for s in entries), (
-            f"expected at least one new-style selection in {entries} "
-            "(include_all_altlocs default is True)"
+        assert not any("chain_id == " in s for s in entries), (
+            f"the union belongs in the sibling file, not in {entries}"
         )
+
+    union_file = tmp_path / "output_union.csv"
+    assert union_file.exists()
+    union_df = pd.read_csv(union_file)
+    assert set(union_df.columns) == _EXPECTED_COLS
+    pd.testing.assert_frame_equal(union_df.drop(columns="selection"), df.drop(columns="selection"))
+    cif_path = resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
+    _, unions = find_altloc_script.find_altloc_selections(cif_path)
+    assert unions
+    assert union_df["selection"].tolist() == [";".join(unions)] * len(df)
 
 
 @pytest.mark.slow
-def test_no_all_altlocs_flag_omits_per_chain_selection(
+def test_large_min_span_yields_empty_selection(
     tmp_path: Path, resources_dir: Path, find_altloc_script
 ):
-    """``include_all_altlocs=False`` (CLI ``--no-all-altlocs``) suppresses the
-    per-chain new-style selection; only old-style entries (if any) remain."""
+    """An impossibly large ``min_span`` drops every span. The row is still written with
+    derived columns populated and an empty ``selection`` cell."""
     input_csv = _altloc_input_csv(tmp_path, resources_dir, n_rows=1)
     output_file = tmp_path / "output.csv"
 
     find_altloc_script.main(
-        _make_args(input_csv=input_csv, output_file=output_file, include_all_altlocs=False)
-    )
-
-    df = pd.read_csv(output_file)
-    selection = df.iloc[0]["selection"]
-    selection_str = "" if pd.isna(selection) else selection
-    assert "chain_id == " not in selection_str
-    if selection_str:
-        entries = selection_str.split(";")
-        assert all(s.startswith("chain ") and " and resi " in s for s in entries), (
-            f"only old-style entries should remain; got {entries}"
-        )
-
-
-@pytest.mark.slow
-def test_large_min_span_with_no_all_altlocs_yields_empty_selection(
-    tmp_path: Path, resources_dir: Path, find_altloc_script
-):
-    """An impossibly large ``min_span`` paired with ``include_all_altlocs=False``
-    drops every selection. The row is still written with derived columns
-    populated and an empty ``selection`` cell."""
-    input_csv = _altloc_input_csv(tmp_path, resources_dir, n_rows=1)
-    output_file = tmp_path / "output.csv"
-
-    find_altloc_script.main(
-        _make_args(
-            input_csv=input_csv,
-            output_file=output_file,
-            min_span=10**6,
-            include_all_altlocs=False,
-        )
+        _make_args(input_csv=input_csv, output_file=output_file, min_span=10**6)
     )
 
     df = pd.read_csv(output_file)
