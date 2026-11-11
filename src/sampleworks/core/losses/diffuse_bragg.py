@@ -56,7 +56,7 @@ from lunus.sf import mean_and_diffuse
 from lunus.sf.symmetry_torch import supercell_factors
 
 from sampleworks.core.forward_models.xray import lunus_sf
-from sampleworks.core.losses.options import DiffuseBraggOptions
+from sampleworks.core.losses.options import DiffuseBraggOptions, LUNUS_BULK_SOLVENT_MODES
 from sampleworks.core.losses.protocol import LossInputs
 from sampleworks.core.losses.registry import LossBuildContext
 from sampleworks.synthetic.synthetic_utils import resolve_mtz_column
@@ -66,9 +66,6 @@ if TYPE_CHECKING:
     from lunus.sf import IsotropicBackground
 
 
-# Bulk-solvent treatment, named as in StructureFactorLossFunction. lunus builds
-# its mask per configuration, so there is no "combined" mode here.
-_BULK_SOLVENT_MODES = ("off", "per_conformer")
 # Taper width for an explicit solvent cutoff, in the cutoff's own units (e/A^3; the
 # mask thresholds blurred density), as in generate_synthetic_sf_lunus. The cutoff
 # itself is calibrated by default; see prepare().
@@ -185,9 +182,9 @@ class DiffuseBraggLossFunction:
         self.free_flag_column = free_flag_column
         self.test_set_value = test_set_value
 
-        if bulk_solvent not in _BULK_SOLVENT_MODES:
+        if bulk_solvent not in LUNUS_BULK_SOLVENT_MODES:
             raise ValueError(
-                f"bulk_solvent must be one of {_BULK_SOLVENT_MODES}, got {bulk_solvent!r}."
+                f"bulk_solvent must be one of {LUNUS_BULK_SOLVENT_MODES}, got {bulk_solvent!r}."
             )
         self.bulk_solvent = bulk_solvent
         self.solvent_cutoff = solvent_cutoff

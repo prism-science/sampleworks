@@ -29,6 +29,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+SFC_BULK_SOLVENT_MODES = ("off", "combined", "per_conformer")
+LUNUS_BULK_SOLVENT_MODES = ("off", "per_conformer")
+
+
 def opt(
     default: Any,
     *,
@@ -126,7 +130,7 @@ class StructureFactorOptions:
         "off",
         help="Bulk-solvent treatment: off (score |Fprotein|), combined (one mask from "
         "the combined density), or per_conformer (mean of per-conformer masks)",
-        choices=("off", "combined", "per_conformer"),
+        choices=SFC_BULK_SOLVENT_MODES,
     )
     normalize_amplitude: bool = opt(False, help="Score normalized amplitudes (|E|) instead of |F|")
     exclude_free_reflections: bool = opt(False, help="Score the working set only, dropping R-free")
@@ -176,7 +180,7 @@ class DiffuseBraggOptions:
         "off",
         help="Bulk-solvent treatment: off (score |Fprotein|) or per_conformer (a mask from "
         "each configuration's own density)",
-        choices=("off", "per_conformer"),
+        choices=LUNUS_BULK_SOLVENT_MODES,
     )
     solvent_cutoff: float | None = opt(
         None,
