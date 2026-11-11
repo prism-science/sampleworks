@@ -112,9 +112,7 @@ def test_main_writes_expected_output_columns_and_derived_paths(
     assert union_file.exists()
     union_df = pd.read_csv(union_file)
     assert set(union_df.columns) == _EXPECTED_COLS
-    pd.testing.assert_frame_equal(
-        union_df.drop(columns="selection"), df.drop(columns="selection")
-    )
+    pd.testing.assert_frame_equal(union_df.drop(columns="selection"), df.drop(columns="selection"))
     cif_path = resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
     _, unions = find_altloc_script.find_altloc_selections(cif_path)
     assert unions
