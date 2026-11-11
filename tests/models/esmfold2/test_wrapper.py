@@ -243,3 +243,76 @@ def test_featurize_is_reproducible_with_fixed_seed(
     assert repeated.features.keys() == saved.features.keys()
     for name in saved.features:
         torch.testing.assert_close(repeated.features[name], saved.features[name], rtol=0, atol=0)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("noise_levels", [10.0, torch.tensor([10.0, 1.0])], ids=["scalar", "batch"])
+def test_step_matches_native_denoising(
+    esmfold2_cpu_wrapper: ESMFold2Wrapper,
+    short_structure: dict[str, Any],
+    noise_levels: float | torch.Tensor,
+):
+    """Unpadded predictions match native denoising for each sample and noise level."""
+    features = esmfold2_cpu_wrapper.featurize(short_structure, seed=0, num_loops=1)
+    conditioning = features.conditioning
+    assert conditioning is not None
+    native_features = conditioning.features
+    levels = torch.as_tensor(noise_levels).reshape(-1)
+    coords = torch.randn(len(levels), conditioning.num_atoms, 3)
+    original_coords = coords.clone()
+
+    with torch.no_grad():
+        prediction = esmfold2_cpu_wrapper.step(coords, noise_levels, features=features)
+        assert prediction.shape == coords.shape
+        assert torch.isfinite(prediction).all()
+        torch.testing.assert_close(coords, original_coords, rtol=0, atol=0)
+
+        # Compare with native denoising using the same batch and explicitly padded inputs.
+        padded_coords = torch.zeros(len(levels), native_features["ref_pos"].shape[1], 3)
+        padded_coords[:, : conditioning.num_atoms] = coords
+        native = esmfold2_cpu_wrapper.model.structure_head.diffusion_module(
+            x_noisy=padded_coords,
+            t_hat=levels,
+            s_inputs=conditioning.s_inputs,
+            s_trunk=None,
+            z_trunk=conditioning.z_trunk,
+            relative_position_encoding=conditioning.relative_position_encoding,
+            ref_pos=native_features["ref_pos"],
+            ref_charge=native_features["ref_charge"],
+            ref_mask=native_features["atom_attention_mask"],
+            ref_element=native_features["ref_element"],
+            ref_atom_name_chars=native_features["ref_atom_name_chars"],
+            ref_space_uid=native_features["ref_space_uid"],
+            tok_idx=native_features["atom_to_token"],
+            asym_id=native_features["asym_id"],
+            residue_index=native_features["residue_index"],
+            entity_id=native_features["entity_id"],
+            token_index=native_features["token_index"],
+            sym_id=native_features["sym_id"],
+            token_attention_mask=native_features["token_attention_mask"],
+            num_diffusion_samples=len(levels),
+        )["x_denoised"]
+        assert native is not None
+        torch.testing.assert_close(prediction, native[:, : conditioning.num_atoms], rtol=0, atol=0)
+
+
+@pytest.mark.slow
+def test_step_allows_coordinate_gradients_with_reused_conditioning(
+    esmfold2_cpu_wrapper: ESMFold2Wrapper, short_structure: dict[str, Any]
+):
+    """Reusing conditioning allows successive backward passes through predicted coordinates."""
+    features = esmfold2_cpu_wrapper.featurize(short_structure, seed=0, num_loops=1)
+    conditioning = features.conditioning
+    assert conditioning is not None
+
+    # Each call must build a fresh graph while using the same cached trunk outputs.
+    for noise_level in (10.0, 1.0):
+        coords = torch.randn(2, conditioning.num_atoms, 3, requires_grad=True)
+        prediction = esmfold2_cpu_wrapper.step(coords, noise_level, features=features)
+        assert prediction.shape == coords.shape
+        assert torch.isfinite(prediction).all()
+
+        # A scalar objective must have finite, nonzero gradients for both samples.
+        (gradient,) = torch.autograd.grad(prediction.square().sum(), coords)
+        assert torch.isfinite(gradient).all()
+        assert (gradient.abs().sum(dim=(1, 2)) > 0).all()

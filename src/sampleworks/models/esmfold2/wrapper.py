@@ -13,6 +13,7 @@ from esm.models.esmfold2.layers import (
 )
 from esm.models.esmfold2.model import EsmFold2Model
 from esm.models.esmfold2.processor import _seed_context
+from jaxtyping import Float
 
 from sampleworks.models.esmfold2.structure_processing import (
     esmfold2_features_to_atom_array,
@@ -314,3 +315,89 @@ class ESMFold2Wrapper:
                 true_atom_array=atoms.copy(),
             )
         )
+
+    def step(
+        self,
+        x_t: Float[torch.Tensor, "batch atoms 3"],
+        t: Float[torch.Tensor, "*batch"] | float,
+        *,
+        features: GenerativeModelInput[ESMFold2Conditioning] | None = None,
+    ) -> Float[torch.Tensor, "batch atoms 3"]:
+        """Predict clean coordinates from noisy coordinates and conditioning.
+
+        Parameters
+        ----------
+        x_t
+            Noisy coordinates in unpadded model atom order, shape (batch, atoms, 3).
+        t
+            EDM noise level, as a scalar or one value per sample.
+        features
+            Conditioning returned by ``featurize()``, shared across samples.
+
+        Returns
+        -------
+        torch.Tensor
+            Predicted clean coordinates in the same atom order and shape as x_t.
+
+        Raises
+        ------
+        ValueError
+            Conditioning is missing, or coordinate or noise-level shapes are incompatible.
+
+        Notes
+        -----
+        Preserves gradients through coordinates and conditioning. The sampler handles
+        alignment and updates to the noisy state.
+        """
+        if features is None or features.conditioning is None:
+            raise ValueError("features with conditioning required for step()")
+
+        conditioning = features.conditioning
+        if x_t.ndim != 3 or x_t.shape[1:] != (conditioning.num_atoms, 3) or x_t.shape[0] == 0:
+            raise ValueError("x_t must have shape (batch, num_atoms, 3) with a nonempty batch")
+
+        # t is the EDM noise level passed by the sampler, not a normalized trajectory time.
+        # The native denoiser broadcasts a scalar noise level across the coordinate batch.
+        coords = x_t.to(device=self.model.device, dtype=torch.float32)
+        noise_levels = torch.as_tensor(t, device=coords.device, dtype=coords.dtype)
+        if noise_levels.ndim > 1 or noise_levels.numel() not in (1, coords.shape[0]):
+            raise ValueError("t must be a scalar or have one noise level per sample")
+
+        native_features = conditioning.features
+        # SampleWorks supplies real atoms only, but native attention needs trailing padding.
+        # Features stay at batch=1; coordinates have shape (samples, padded atoms, 3).
+        padding = native_features["ref_pos"].shape[1] - conditioning.num_atoms
+        padded_coords = F.pad(coords, (0, 0, 0, padding))
+        # Call the denoiser directly so SampleWorks owns the sampling loop and autograd
+        # stays available. The native module already applies EDM preconditioning to x_denoised.
+        output = self.model.structure_head.diffusion_module(
+            x_noisy=padded_coords,
+            t_hat=noise_levels.reshape(-1),
+            s_inputs=conditioning.s_inputs,
+            s_trunk=None,  # ESMFold2's trunk produces pair embeddings, with no single embedding.
+            z_trunk=conditioning.z_trunk,
+            relative_position_encoding=conditioning.relative_position_encoding,
+            ref_pos=native_features["ref_pos"],
+            ref_charge=native_features["ref_charge"],
+            ref_mask=native_features["atom_attention_mask"],
+            ref_element=native_features["ref_element"],
+            ref_atom_name_chars=native_features["ref_atom_name_chars"],
+            ref_space_uid=native_features["ref_space_uid"],
+            tok_idx=native_features["atom_to_token"],
+            asym_id=native_features["asym_id"],
+            residue_index=native_features["residue_index"],
+            entity_id=native_features["entity_id"],
+            token_index=native_features["token_index"],
+            sym_id=native_features["sym_id"],
+            token_attention_mask=native_features["token_attention_mask"],
+            # Let the native module expand one structure's conditioning across samples.
+            num_diffusion_samples=coords.shape[0],
+            # Recompute diffusion-specific tensors each call, trading speed for a fresh graph
+            # and avoiding stale derived values if ITO later replaces the trunk embeddings.
+            inference_cache=None,
+        )
+        prediction = output["x_denoised"]
+        if prediction is None:
+            raise RuntimeError("ESMFold2 returned no denoised coordinates")
+        # Remove trailing padding without changing model atom order or breaking gradients.
+        return prediction[:, : conditioning.num_atoms]
