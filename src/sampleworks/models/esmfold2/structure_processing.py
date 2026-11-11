@@ -62,6 +62,7 @@ def esmfold2_features_to_atom_array(
         Unpadded model atoms with sequential, one-based residue IDs per chain.
         Coordinates are local CCD reference positions, not an assembled structure
         or the experimental reference. Use atom identities for reconciliation.
+        B-factors default to 20.0 and occupancies to 1.0.
     """
     if features["ref_pos"].shape[0] != 1:
         raise ValueError("Expected ESMFold2 features for exactly one input structure.")
@@ -89,6 +90,9 @@ def esmfold2_features_to_atom_array(
         atoms.chain_id[start:stop] = molecular_complex.metadata.chain_lookup[chain_id]
         atoms.res_id[start:stop] = residue_counts[chain_id]
         atoms.res_name[start:stop] = molecular_complex.sequence[i]
+
+    atoms.set_annotation("b_factor", np.full(len(atoms), 20.0, dtype=np.float32))
+    atoms.set_annotation("occupancy", np.ones(len(atoms), dtype=np.float32))
 
     return atoms
 

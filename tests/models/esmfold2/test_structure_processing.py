@@ -12,6 +12,7 @@ import numpy as np
 import torch
 from biotite.structure import array, Atom, get_residue_starts
 from esm.models.esmfold2.types import ProteinInput, StructurePredictionInput
+from sampleworks.core.losses.protocol import LossInputs
 from sampleworks.models.esmfold2.structure_processing import (
     esmfold2_features_to_atom_array,
     ESMFold2InputBuilderBlockLogs,
@@ -166,6 +167,8 @@ def test_atoms_retain_coordinates_through_conversion_and_reconciliation():
                 res_name=res_name,
                 atom_name=atom_name,
                 element=element,
+                b_factor=20.0,
+                occupancy=1.0,
             )
             for i, (res_id, res_name, atom_name, element) in enumerate(expected_atoms)
         ]
@@ -181,6 +184,22 @@ def test_atoms_retain_coordinates_through_conversion_and_reconciliation():
         model_atoms.coord[reconciler.model_indices.numpy()],
         reference.coord[reconciler.struct_indices.numpy()],
     )
+
+
+def test_model_atoms_support_loss_inputs():
+    """Model atoms provide finite B-factors and occupancies for loss preparation."""
+    model_input = StructurePredictionInput(sequences=[ProteinInput(id="A", sequence="AG")])
+    builder = ESMFold2InputBuilderBlockLogs()
+    features, chains = builder.prepare_input(model_input, seed=0)
+
+    model_atoms = esmfold2_features_to_atom_array(features, chains)
+
+    # Defaults should be 20 for b-factor and 1 for occupancy
+    np.testing.assert_array_equal(model_atoms.b_factor, np.full(len(model_atoms), 20.0))
+    np.testing.assert_array_equal(model_atoms.occupancy, np.ones(len(model_atoms)))
+
+    # Ensure LossInputs can be initialized.
+    LossInputs.from_atom_array(model_atoms, ensemble_size=1, device="cpu")
 
 
 def test_malformed_asym_unit_raises_error(single_chain_structure: dict[str, Any]):
