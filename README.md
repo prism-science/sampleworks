@@ -49,9 +49,10 @@ pixi install -a
 Alternatively, install only what you need:
 
 ```bash
-pixi install -e boltz      # Boltz-1 / Boltz-2
-pixi install -e protenix   # Protenix
-pixi install -e rf3        # RosettaFold3
+pixi install -e boltz         # Boltz-1 / Boltz-2
+pixi install -e protenix      # Protenix
+pixi install -e rf3           # RosettaFold3
+pixi install -e protpardelle  # Protpardelle
 ```
 
 ### 3. Download model checkpoints
@@ -71,6 +72,8 @@ download_boltz2(cache)
 **Protenix**: checkpoint is downloaded automatically on first use.
 
 **RosettaFold3** (RF3): see the [RC-Foundry repository](https://github.com/RosettaCommons/foundry) for instructions. Default path: `~/.foundry/checkpoints/rf3_foundry_01_24_latest.ckpt`
+
+**Protpardelle**: the checkpoint is not auto-resolved, so pass `--model-checkpoint` explicitly. The model config YAML defaults to the bundled `cc89_epoch415.yaml`; override it with `--protpardelle-config-path`. If the wrapper fails to import, set `PROTPARDELLE_MODEL_PARAMS` to the model-params directory.
 
 ## Quick Start
 
@@ -103,7 +106,7 @@ Output files appear in `output/boltz2_pure_guidance/`: `refined.cif` (final ense
 
 | Argument          | Description                                                               |
 | ----------------- | ------------------------------------------------------------------------- |
-| `--model`         | `boltz1`, `boltz2`, `protenix`, or `rf3`                                  |
+| `--model`         | `boltz1`, `boltz2`, `protenix`, `rf3`, or `protpardelle`                  |
 | `--guidance-type` | `pure_guidance`, `fk_steering`, or `latent_opt`                           |
 | `--protein`       | Protein identifier (should match naming used in grid search / evaluation) |
 | `--structure`     | Path to input structure file (CIF)                                        |
@@ -111,6 +114,43 @@ Output files appear in `output/boltz2_pure_guidance/`: `refined.cif` (final ense
 | `--resolution`    | Map resolution in Angstroms — required by the default loss                |
 
 Model-specific arguments (e.g. `--method` for boltz2, `--msa-path` for rf3) and guidance-type-specific arguments (e.g. `--num-particles` for fk_steering) are included automatically. Run `sampleworks-guidance --model <model> --guidance-type <type> --help` to see all available options.
+
+#### Selecting a model
+
+The `--model` flag chooses which generative model guides the run. The value also decides
+which Pixi environment you must run in, since each model's dependencies are isolated. Pass
+the name exactly as shown below:
+
+| `--model`      | Model          | Pixi environment | Checkpoint                                                                   |
+| -------------- | -------------- | ---------------- | --------------------------------------------------------------------------- |
+| `boltz1`       | Boltz-1        | `boltz`          | `~/.boltz/boltz1_conf.ckpt`                                                  |
+| `boltz2`       | Boltz-2        | `boltz`          | `~/.boltz/boltz2_conf.ckpt`                                                  |
+| `protenix`     | Protenix       | `protenix`       | auto-downloaded on first use                                                |
+| `rf3`          | RosettaFold3   | `rf3`            | `~/.foundry/checkpoints/rf3_foundry_01_24_latest.ckpt`                       |
+| `protpardelle` | Protpardelle   | `protpardelle`   | pass `--model-checkpoint` explicitly (not auto-resolved)                     |
+
+Run with `pixi run -e <environment>`, matching the environment column to your chosen model. For
+example, to guide with Protenix instead of Boltz-2, swap both the environment and the model name:
+
+```bash
+pixi run -e protenix sampleworks-guidance \
+    --model protenix \
+    --guidance-type pure_guidance \
+    --protein 1VME \
+    --structure tests/resources/1vme/1vme_final_carved_edited_0.5occA_0.5occB.cif \
+    --density tests/resources/1vme/1vme_final_carved_edited_0.5occA_0.5occB_1.80A.ccp4 \
+    --resolution 1.8 \
+    --output-dir output/protenix_pure_guidance \
+    --guidance-start 0.65 \
+    --ensemble-size 4 \
+    --gradient-normalization \
+    --augmentation \
+    --align-to-input
+```
+
+`boltz1` and `boltz2` share the `boltz` environment, so switching between them only changes
+`--model` (and their checkpoint). Not every model supports every `--guidance-type`; latent
+optimization (`latent_opt`), for instance, is available for `protenix`, `rf3`, and `boltz1`.
 
 MSAs fetched from the MSA server are cached in `~/.sampleworks/msa`; set `MSA_CACHE_DIR` to cache them elsewhere.
 
@@ -188,7 +228,7 @@ guidance step size intact.
 ```bash
 pixi run -e boltz python run_grid_search.py \
     --proteins proteins.csv \
-    --models boltz2 \                # options: boltz1, boltz2, protenix, rf3 (make sure env aligns!)
+    --models boltz2 \                # options: boltz1, boltz2, protenix, rf3, protpardelle (make sure env aligns!)
     --methods "X-RAY DIFFRACTION" \  # only useful for Boltz-2, ignored otherwise
     --scalers pure_guidance \        # options: pure_guidance, fk_steering, or both as space-separated list
     --ensemble-sizes "1 4" \
@@ -229,7 +269,7 @@ win over the CSV. A protein missing a required option fails the grid before any 
 | `--proteins`         | CSV of name/structure(/sequence) plus loss-option columns | required                    |
 | `--loss-type`      | Loss to guide with; its option flags become available    | `real_space_density`        |
 | `--loss-config`    | Loss configuration file, to combine losses              | none                        |
-| `--models`           | Model to run. One of `boltz1`, `boltz2`, `protenix`, `rf3` | required                    |
+| `--models`           | Model to run. One of `boltz1`, `boltz2`, `protenix`, `rf3`, `protpardelle` | required    |
 | `--scalers`          | Guidance method(s) to sweep                                | `pure_guidance fk_steering` |
 | `--ensemble-sizes`   | Space-separated values, e.g. `"1 4"`                       | `"1 2 4 8"`                 |
 | `--gradient-weights` | Space-separated values, e.g. `"0.1 0.2"`                   | `"0.01 0.1 0.2"`            |
