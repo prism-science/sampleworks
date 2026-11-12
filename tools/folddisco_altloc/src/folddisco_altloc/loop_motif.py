@@ -11,30 +11,30 @@ conformers (altlocs), this script
        (residues with no altlocs, outside the chosen set) whose distances to them
        change most,
     3. writes a FoldDisco batch query file with one line per conformer, both using
-       the same motif, ready for ``scripts/folddisco.py``.
+       the same motif, ready for ``folddisco-altloc search``.
 
 Residues are scored with the geometry FoldDisco hashes: Ca-Ca and Cb-Cb distances
 between motif residues, with a virtual Cb for glycine. FoldDisco ignores altloc
 labels and keeps the last conformer it reads for each residue, so anchors are
 restricted to residues without altlocs.
 
-Usage:
-    python scripts/folddisco_loop_motif.py 6B8X_single_001.pdb --chain A --residues 178-193
+Command line: ``folddisco-altloc motif 6B8X_single_001.pdb --chain A --residues 178-193``.
 """
 
-import argparse
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
 import gemmi
 import numpy as np
-from folddisco import parse_query_file
 from jaxtyping import Float
 
 
 ATOM_RECORDS = ("ATOM  ", "HETATM", "ANISOU")
+
+
+class MotifError(ValueError):
+    """The residue set cannot be split into two conformers or yields no motif."""
 
 
 class ResidueId(NamedTuple):
@@ -47,6 +47,34 @@ class ResidueId(NamedTuple):
     def label(self) -> str:
         """FoldDisco motif syntax for this residue, e.g. ``A181``."""
         return f"{self.chain}{self.number}"
+
+
+@dataclass(frozen=True)
+class AltlocSegment:
+    """A run of consecutive residues in one chain that all carry altlocs.
+
+    Attributes
+    ----------
+    chain : str
+        Chain ID.
+    start, end : int
+        First and last residue number (inclusive).
+    altlocs : tuple of str
+        Altloc labels used anywhere in the segment, sorted.
+    incomplete : tuple of ResidueId
+        Residues lacking at least one of ``altlocs``.
+    """
+
+    chain: str
+    start: int
+    end: int
+    altlocs: tuple[str, ...]
+    incomplete: tuple[ResidueId, ...]
+
+    @property
+    def residues(self) -> str:
+        """Residue range in ``--residues`` syntax, e.g. ``178-193``."""
+        return f"{self.start}-{self.end}" if self.end > self.start else str(self.start)
 
 
 @dataclass(frozen=True)
@@ -349,146 +377,97 @@ def output_stem(pdb: Path, chain: str, numbers: list[int]) -> str:
 
 
 def choose_altlocs(altlocs: dict[ResidueId, set[str]], requested: list[str] | None) -> list[str]:
-    """Pick the two altlocs to compare, exiting with a message if that is impossible.
+    """Pick the two altlocs to compare.
 
     Parameters
     ----------
     altlocs : dict of ResidueId to set of str
         Output of :func:`find_altlocs` for the user's residue set.
     requested : list of str or None
-        Altlocs passed with ``--altlocs``; None to use the only two present.
+        Two altlocs chosen by the user; None to use the only two present.
 
     Returns
     -------
     list of str
         The two altloc labels, in the order given (or sorted).
+
+    Raises
+    ------
+    MotifError
+        If the residues do not have exactly two usable altlocs, or some residue
+        lacks one of them and would be deleted from a conformer file.
     """
     present = sorted(set().union(*altlocs.values()))
     if requested is None and len(present) != 2:
-        sys.exit(
+        raise MotifError(
             f"need exactly two altlocs, found {present or 'none'} on these residues"
-            + ("; choose two with --altlocs" if len(present) > 2 else "")
+            + ("; choose two of them" if len(present) > 2 else "")
         )
-    chosen = requested or present
+    chosen = list(requested or present)
     if len(set(chosen)) != 2 or not set(chosen) <= set(present):
-        sys.exit(f"--altlocs must be two different labels from {present}")
+        raise MotifError(f"altlocs must be two different labels from {present}")
 
     missing = residues_missing_altloc(altlocs, chosen)
     if missing:
-        sys.exit(
+        raise MotifError(
             f"these residues lack altloc {' or '.join(chosen)} and would be deleted from "
             f"one conformer file: {', '.join(r.label for r in missing)}. "
-            "Narrow --residues to exclude them."
+            "Narrow the residue range to exclude them."
         )
     return chosen
 
 
-def describe(
-    choice: MotifChoice,
-    points_a: dict[ResidueId, Float[np.ndarray, "2 3"]],
-    points_b: dict[ResidueId, Float[np.ndarray, "2 3"]],
-    altlocs: list[str],
-) -> str:
-    """Human-readable table of the chosen residues' Cb-Cb distances in each conformer.
+def find_altloc_segments(lines: list[str]) -> list[AltlocSegment]:
+    """List runs of consecutive amino acids that carry altlocs.
 
     Parameters
     ----------
-    choice : MotifChoice
-        Chosen motif.
-    points_a, points_b : dict of ResidueId to ndarray
-        :func:`backbone_points` of the two single-conformer structures.
-    altlocs : list of str
-        The two altloc labels, for column headers.
+    lines : list of str
+        Lines of a PDB file.
 
     Returns
     -------
-    str
-        Multi-line report.
+    list of AltlocSegment
+        Segments in file order; a residue without altlocs or a numbering gap ends
+        a segment. Non-amino-acid residues (waters, ions, ligands) and residues with
+        insertion codes are ignored.
     """
-    lines = [f"motif: {choice.motif}", "", "loop residue scores (summed Å change to anchors):"]
-    lines += [f"  {r.label:>8s}  {choice.loop_scores[r]:6.1f}" for r in choice.loop]
-    lines += ["", "anchor scores (summed Å change to chosen loop residues):"]
-    lines += [f"  {r.label:>8s}  {choice.anchor_scores[r]:6.1f}" for r in choice.anchors]
-    lines += ["", f"Cb-Cb distances (Å), conformer {altlocs[0]} / {altlocs[1]}:"]
-    lines.append("          " + "".join(f"{a.label:>14s}" for a in choice.anchors))
-    for loop_residue in choice.loop:
-        cells = "".join(
-            f"{np.linalg.norm(points_a[loop_residue][1] - points_a[a][1]):6.1f} /"
-            f"{np.linalg.norm(points_b[loop_residue][1] - points_b[a][1]):5.1f} "
-            for a in choice.anchors
+    labels: dict[ResidueId, set[str]] = {}
+    for line in lines:
+        if not line.startswith(("ATOM  ", "HETATM")) or line[26] != " ":
+            continue
+        info = gemmi.find_tabulated_residue(line[17:20].strip())
+        if info is None or not info.is_amino_acid():
+            continue
+        residue = ResidueId(line[21], int(line[22:26]))
+        labels.setdefault(residue, set())
+        if line[16] != " ":
+            labels[residue].add(line[16])
+
+    runs: list[list[ResidueId]] = []
+    previous: ResidueId | None = None
+    for residue, residue_labels in labels.items():
+        if not residue_labels:
+            previous = None
+            continue
+        contiguous = (
+            previous is not None
+            and residue.chain == previous.chain
+            and residue.number == previous.number + 1
         )
-        lines.append(f"  {loop_residue.label:>8s}" + cells)
-    return "\n".join(lines)
+        if contiguous:
+            runs[-1].append(residue)
+        else:
+            runs.append([residue])
+        previous = residue
 
-
-def main() -> None:
-    """Command-line entry point."""
-    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
-    parser.add_argument("pdb", type=Path, help="PDB file with two altlocs on the residues")
-    parser.add_argument("--chain", required=True, help="chain of the residues")
-    parser.add_argument(
-        "--residues", required=True, help="residue numbers and ranges, e.g. 178-193 or 50,52-55"
-    )
-    parser.add_argument(
-        "--altlocs", nargs=2, metavar=("ALT1", "ALT2"), help="altlocs to compare (default: auto)"
-    )
-    parser.add_argument(
-        "--max-residues", type=int, default=4, help="max loop residues, and anchors (default 4)"
-    )
-    parser.add_argument(
-        "--cutoff", type=float, default=12.0, help="loop-anchor distance cutoff in Å (default 12)"
-    )
-    parser.add_argument(
-        "--min-separation",
-        type=int,
-        default=3,
-        help="min sequence distance from anchors to the residue set (default 3)",
-    )
-    parser.add_argument(
-        "--output-dir", type=Path, help="where to write files (default: the PDB's directory)"
-    )
-    parser.add_argument("--overwrite", action="store_true", help="replace existing outputs")
-    args = parser.parse_args()
-
-    try:
-        numbers = parse_residue_spec(args.residues)
-    except ValueError as error:
-        parser.error(f"--residues: {error}")
-    pdb = args.pdb.expanduser().resolve()
-    loop = [ResidueId(args.chain, number) for number in numbers]
-    lines = pdb.read_text().splitlines(keepends=True)
-    altlocs = choose_altlocs(find_altlocs(lines, set(loop)), args.altlocs)
-
-    output_dir = (args.output_dir or pdb.parent).expanduser().resolve()
-    stem = output_stem(pdb, args.chain, numbers)
-    conformer_paths = [output_dir / f"{stem}_alt{altloc}.pdb" for altloc in altlocs]
-    query_path = output_dir / f"{stem}.folddisco_query.txt"
-    existing = [p for p in [*conformer_paths, query_path] if p.exists()]
-    if existing and not args.overwrite:
-        sys.exit(f"already exists (pass --overwrite to replace): {', '.join(map(str, existing))}")
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for altloc, path in zip(altlocs, conformer_paths, strict=True):
-        path.write_text("".join(select_altloc(lines, set(loop), altloc)))
-        print(f"wrote {path}")
-
-    points_a, points_b = (backbone_points(gemmi.read_structure(str(p))) for p in conformer_paths)
-    choice = choose_motif(
-        points_a, points_b, loop, args.max_residues, args.cutoff, args.min_separation
-    )
-    if not choice.loop or not choice.anchors:
-        sys.exit("no loop residue changes position relative to any altloc-free residue")
-
-    query_lines = [
-        f"{path}\t{choice.motif}\t{output_dir / f'{stem}_alt{altloc}.folddisco.json'}\n"
-        for altloc, path in zip(altlocs, conformer_paths, strict=True)
-    ]
-    query_path.write_text("".join(query_lines))
-    parse_query_file(query_path)
-    print(f"wrote {query_path}\n")
-    print(describe(choice, points_a, points_b, altlocs))
-    print(f"\nrun: python {Path(__file__).with_name('folddisco.py')} {query_path}")
-
-
-if __name__ == "__main__":
-    main()
+    segments = []
+    for run in runs:
+        union = set().union(*(labels[r] for r in run))
+        incomplete = tuple(r for r in run if labels[r] != union)
+        segments.append(
+            AltlocSegment(
+                run[0].chain, run[0].number, run[-1].number, tuple(sorted(union)), incomplete
+            )
+        )
+    return segments

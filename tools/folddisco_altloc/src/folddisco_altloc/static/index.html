@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FoldDisco Altloc Contexts</title>
+<style>
+  :root {
+    --surface-0: #f4f3f0; --surface-1: #fcfcfb; --surface-2: #efeee9; --border: #dcdad3;
+    --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #77756f;
+    --accent: #2a78d6; --accent-ink: #ffffff; --accent-soft: #e3eefb;
+    --series-a: #2a78d6; --series-b: #eb6834;
+    --warn-bg: #fff4d6; --warn-ink: #6b4a00; --error-bg: #fde7e7; --error-ink: #8a1c1c;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --surface-0: #121211; --surface-1: #1a1a19; --surface-2: #242422; --border: #3a3936;
+      --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #96958c;
+      --accent: #3987e5; --accent-ink: #ffffff; --accent-soft: #1d2f45;
+      --series-a: #3987e5; --series-b: #d95926;
+      --warn-bg: #3a2f10; --warn-ink: #f3d68a; --error-bg: #3d1717; --error-ink: #f4b4b4;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--surface-0); color: var(--text-primary);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { background: var(--surface-1); border-bottom: 1px solid var(--border); }
+  header .bar { max-width: 1080px; margin: 0 auto; padding: 14px 16px; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0; font-weight: 650; }
+  header span { color: var(--text-secondary); font-size: 13px; }
+  main { max-width: 1080px; margin: 0 auto; padding: 20px 16px 48px; display: grid; gap: 16px; }
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 18px; min-width: 0; }
+  .card h2 { font-size: 15px; margin: 0 0 12px; font-weight: 650; }
+  .card h3 { font-size: 13px; margin: 16px 0 8px; color: var(--text-secondary); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  .drop { border: 1.5px dashed var(--border); border-radius: 8px; padding: 18px; text-align: center; color: var(--text-secondary); cursor: pointer; }
+  .drop.over, .drop:hover { border-color: var(--accent); background: var(--accent-soft); }
+  .drop strong { color: var(--text-primary); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px 16px; }
+  label.field { display: grid; gap: 4px; font-size: 13px; color: var(--text-secondary); }
+  input[type=text], input[type=number], select {
+    font: inherit; color: var(--text-primary); background: var(--surface-1);
+    border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; width: 100%; min-width: 0; }
+  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .checks { display: flex; flex-wrap: wrap; gap: 8px 18px; }
+  .checks label, .toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; cursor: pointer; }
+  .hint { font-size: 12px; color: var(--text-muted); }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip { font: 13px var(--mono); border: 1px solid var(--border); background: var(--surface-2); color: var(--text-primary);
+          border-radius: 999px; padding: 4px 10px; cursor: pointer; }
+  .chip:hover, .chip.active { border-color: var(--accent); background: var(--accent-soft); }
+  .chip small { font-family: system-ui, sans-serif; color: var(--text-muted); }
+  details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; margin-top: 14px; }
+  .actions { display: flex; align-items: center; gap: 14px; margin-top: 18px; flex-wrap: wrap; }
+  button.primary { font: inherit; font-weight: 600; background: var(--accent); color: var(--accent-ink); border: 0;
+                   border-radius: 7px; padding: 9px 22px; cursor: pointer; }
+  button.primary:disabled { opacity: .5; cursor: default; }
+  .notice { border-radius: 7px; padding: 9px 12px; font-size: 14px; margin-top: 12px; }
+  .notice.error { background: var(--error-bg); color: var(--error-ink); }
+  .notice.warn { background: var(--warn-bg); color: var(--warn-ink); }
+  .log { font: 12px/1.6 var(--mono); color: var(--text-secondary); background: var(--surface-2); border-radius: 6px;
+         padding: 8px 10px; max-height: 140px; overflow: auto; white-space: pre-wrap; margin-top: 12px; }
+  .motif { font: 15px var(--mono); background: var(--surface-2); border-radius: 6px; padding: 8px 10px; overflow-wrap: anywhere; }
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { padding: 7px 10px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  thead th { color: var(--text-secondary); font-weight: 600; font-size: 13px; }
+  tfoot td { font-weight: 650; border-bottom: 0; }
+  td .sub { color: var(--text-muted); }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: 0; }
+  .bar { display: inline-block; height: 8px; border-radius: 4px; vertical-align: middle; margin-left: 8px; min-width: 2px; }
+  .flag { color: var(--warn-ink); font-weight: 700; cursor: help; }
+  .links { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 14px; font-size: 14px; }
+  a { color: var(--accent); }
+  .muted { color: var(--text-secondary); font-size: 13px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header><div class="bar">
+  <h1>FoldDisco altloc contexts</h1>
+  <span>How well is each conformer of a loop, in its structural context, represented in FoldDisco's databases?</span>
+</div></header>
+
+<main>
+  <section class="card" id="query">
+    <h2>Query</h2>
+    <div class="drop" id="drop" tabindex="0" role="button" aria-label="Upload a PDB file">
+      <strong>Drop a PDB file here</strong> or click to choose · PDB format with altlocs (.pdb, .ent)
+      <input type="file" id="file" accept=".pdb,.ent" hidden>
+    </div>
+    <div id="uploaded" class="muted" style="margin-top:8px"></div>
+
+    <div id="selection" hidden>
+      <h3>Residues with two conformers</h3>
+      <div class="chips" id="segments"></div>
+      <p class="hint" id="segment-hint">Click a segment to use it, or type a chain and residue range.</p>
+      <div class="grid">
+        <label class="field">Chain <select id="chain"></select></label>
+        <label class="field">Residues <input type="text" id="residues" placeholder="e.g. 158-167"></label>
+        <label class="field">Altlocs to compare
+          <select id="altlocs"><option value="">automatic (the two present)</option></select></label>
+      </div>
+    </div>
+
+    <h3>Databases</h3>
+    <div class="checks" id="databases"></div>
+
+    <h3>Options</h3>
+    <div class="grid">
+      <label class="field">Motif residues
+        <select id="motif_size"><option>2</option><option selected>4</option><option>6</option><option>8</option></select>
+        <span class="hint">half moving residues, half anchors without altlocs</span></label>
+      <label class="field">Count hits matching at least
+        <select id="min_matched"></select>
+        <span class="hint">motif residues</span></label>
+      <label class="field">RMSD threshold (Å)
+        <input type="number" id="rmsd_max" value="0.5" min="0.05" step="0.05">
+        <span class="hint">count hits below this RMSD</span></label>
+      <label class="field">Amino acid substitution
+        <select id="aa_subst">
+          <option value="">none (exact residues)</option>
+          <option value="group">group: RHK, DE, NQST, FWY, AVLIMC, GP</option>
+          <option value="size">size: GAS, CDPNT, QEHV, MILKR, FWY</option>
+          <option value="blosum62">blosum62: positive BLOSUM62 score</option>
+        </select><span class="hint">as folddisco --aa-subst</span></label>
+    </div>
+    <div style="margin-top:12px">
+      <label class="toggle"><input type="checkbox" id="confident"> Confident hits only
+        <span class="hint">(as folddisco --confident: ≥80% of motif residues within 1 Å)</span></label>
+    </div>
+    <details>
+      <summary>Advanced motif choice</summary>
+      <div class="grid" style="margin-top:10px">
+        <label class="field">Distance cutoff (Å) <input type="number" id="cutoff" value="12" min="4" step="1">
+          <span class="hint">ignore moving–anchor pairs farther apart in both conformers</span></label>
+        <label class="field">Min. sequence separation <input type="number" id="min_separation" value="3" min="1" step="1">
+          <span class="hint">anchors at least this far from the residue set</span></label>
+      </div>
+    </details>
+
+    <div class="actions">
+      <button class="primary" id="search" disabled>Search</button>
+      <span class="muted" id="status">Upload a structure to start.</span>
+    </div>
+    <div id="query-error" class="notice error" hidden></div>
+  </section>
+
+  <section class="card" id="motif-card" hidden>
+    <h2>Motif</h2>
+    <div class="motif" id="motif"></div>
+    <p class="muted" id="motif-note"></p>
+    <div class="table-wrap"><table id="distances"></table></div>
+    <div class="log" id="log"></div>
+  </section>
+
+  <section class="card" id="results-card" hidden>
+    <h2>Results</h2>
+    <p class="muted" id="filter"></p>
+    <div class="table-wrap"><table id="summary"></table></div>
+    <div id="truncation" class="notice warn" hidden></div>
+    <div class="links" id="links"></div>
+    <p class="hint">Targets are unique structures with a counted hit; the number in parentheses counts distinct
+      matched residue numberings, a rough proxy for distinct proteins. FoldDisco indexes only the last-listed
+      conformer of each deposited structure, so other entries' alternate conformers are not searched.</p>
+  </section>
+</main>
+
+<script>
+const DATABASES = [
+  ["pdb_folddisco", "PDB"], ["afdb50_folddisco", "AlphaFold DB 50"],
+  ["afdb-proteome_folddisco", "AlphaFold DB proteomes"], ["esm30_folddisco", "ESM Atlas 30"],
+  ["BFVD_folddisco", "BFVD (viral)"],
+];
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+let upload = null, segments = [], pollTimer = null;
+
+$("databases").innerHTML = DATABASES.map(([id, name]) =>
+  `<label><input type="checkbox" value="${id}" checked> ${esc(name)}</label>`).join("");
+
+function updateMinMatched() {
+  const size = Number($("motif_size").value), keep = $("min_matched").value;
+  $("min_matched").innerHTML = [`<option value="">all ${size}</option>`]
+    .concat(Array.from({length: size - 1}, (_, i) => size - 1 - i).filter((n) => n >= 2)
+      .map((n) => `<option value="${n}">${n} of ${size}</option>`)).join("");
+  if (keep && Number(keep) < size) $("min_matched").value = keep;
+}
+$("motif_size").addEventListener("change", updateMinMatched);
+updateMinMatched();
+
+async function api(path, body) {
+  const response = await fetch(path, body ? {method: "POST", headers: {"Content-Type": "application/json"},
+                                              body: JSON.stringify(body)} : {});
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || response.statusText);
+  return data;
+}
+function showError(message) { $("query-error").textContent = message; $("query-error").hidden = !message; }
+
+async function handleFile(file) {
+  showError("");
+  $("status").textContent = `Reading ${file.name}…`;
+  try {
+    upload = await api("/api/upload", {filename: file.name, content: await file.text()});
+  } catch (error) { upload = null; showError(error.message); $("status").textContent = ""; return; }
+  segments = upload.segments;
+  $("uploaded").textContent = `${upload.filename} · chains ${upload.chains.join(", ")} · ${segments.length} altloc segment${segments.length === 1 ? "" : "s"}`;
+  $("chain").innerHTML = upload.chains.map((c) => `<option>${esc(c)}</option>`).join("");
+  $("segments").innerHTML = segments.length ? segments.map((s, i) =>
+    `<button type="button" class="chip" data-i="${i}">${esc(s.chain)}${esc(s.residues)}
+       <small>${s.length} res · ${esc(s.altlocs.join("/"))}${s.incomplete.length ? " · incomplete" : ""}</small></button>`).join("")
+    : `<span class="muted">No residues with altlocs found.</span>`;
+  $("selection").hidden = false;
+  // Preselect the longest segment with exactly two complete conformers.
+  const usable = segments.map((s, i) => [s, i]).filter(([s]) => s.altlocs.length === 2 && !s.incomplete.length);
+  if (usable.length) chooseSegment(usable.reduce((best, cur) => (cur[0].length > best[0].length ? cur : best))[1]);
+  $("search").disabled = false;
+  $("status").textContent = "Choose residues and options, then Search.";
+}
+function chooseSegment(i) {
+  const s = segments[i];
+  document.querySelectorAll(".chip").forEach((chip) => chip.classList.toggle("active", Number(chip.dataset.i) === i));
+  $("chain").value = s.chain; $("residues").value = s.residues;
+  $("altlocs").innerHTML = `<option value="">automatic (the two present)</option>` +
+    pairs(s.altlocs).map(([a, b]) => `<option value="${a}${b}">${a} vs ${b}</option>`).join("");
+  $("segment-hint").textContent = s.incomplete.length
+    ? `Some residues lack a conformer (${s.incomplete.slice(0, 6).join(", ")}${s.incomplete.length > 6 ? "…" : ""}); narrow the range to exclude them.`
+    : "Click a segment to use it, or type a chain and residue range.";
+}
+function pairs(labels) {
+  const out = [];
+  for (let i = 0; i < labels.length; i++) for (let j = i + 1; j < labels.length; j++) out.push([labels[i], labels[j]]);
+  return out;
+}
+$("segments").addEventListener("click", (e) => { const chip = e.target.closest(".chip"); if (chip) chooseSegment(Number(chip.dataset.i)); });
+$("drop").addEventListener("click", () => $("file").click());
+$("drop").addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("file").click(); } });
+$("file").addEventListener("change", () => $("file").files[0] && handleFile($("file").files[0]));
+["dragenter", "dragover"].forEach((t) => $("drop").addEventListener(t, (e) => { e.preventDefault(); $("drop").classList.add("over"); }));
+["dragleave", "drop"].forEach((t) => $("drop").addEventListener(t, (e) => { e.preventDefault(); $("drop").classList.remove("over"); }));
+$("drop").addEventListener("drop", (e) => e.dataTransfer.files[0] && handleFile(e.dataTransfer.files[0]));
+
+$("search").addEventListener("click", async () => {
+  showError("");
+  const altlocs = $("altlocs").value;
+  const body = {
+    upload_id: upload.upload_id, chain: $("chain").value, residues: $("residues").value,
+    altlocs: altlocs ? altlocs.split("") : null,
+    motif_size: Number($("motif_size").value), min_matched: $("min_matched").value ? Number($("min_matched").value) : null,
+    rmsd_max: Number($("rmsd_max").value), aa_subst: $("aa_subst").value || null, confident: $("confident").checked,
+    cutoff: Number($("cutoff").value), min_separation: Number($("min_separation").value),
+    databases: [...document.querySelectorAll("#databases input:checked")].map((c) => c.value),
+  };
+  if (!body.databases.length) { showError("Choose at least one database."); return; }
+  let job;
+  try { job = await api("/api/run", body); } catch (error) { showError(error.message); return; }
+  $("search").disabled = true; $("status").textContent = "Choosing motif…";
+  $("motif-card").hidden = true; $("results-card").hidden = true;
+  clearInterval(pollTimer);
+  pollTimer = setInterval(() => poll(job.job_id), 1500);
+  poll(job.job_id);
+});
+
+async function poll(jobId) {
+  let view;
+  try { view = await api(`/api/jobs/${jobId}`); } catch (error) { return; }
+  if (view.motif) renderMotif(view);
+  $("log").textContent = view.messages.join("\n"); $("log").scrollTop = $("log").scrollHeight;
+  if (view.state === "searching") $("status").textContent = "Searching FoldDisco… (usually under a minute)";
+  if (view.state === "error") {
+    clearInterval(pollTimer); $("search").disabled = false; $("status").textContent = ""; showError(view.error);
+  }
+  if (view.state === "done") {
+    clearInterval(pollTimer); $("search").disabled = false;
+    $("status").textContent = `Done · files in ${view.run_dir}`;
+    renderResults(view, jobId);
+  }
+}
+
+function renderMotif(view) {
+  const m = view.motif, [a, b] = m.altlocs;
+  $("motif-card").hidden = false;
+  $("motif").textContent = view.search ? view.search.submitted_motif : m.motif;
+  $("motif-note").innerHTML = `Moving residues ${m.moving.map((r) => `<b>${esc(r.label)}</b> (${r.score} Å)`).join(", ")} ·
+    anchors ${m.anchors.map((r) => `<b>${esc(r.label)}</b> (${r.score} Å)`).join(", ")}. Scores are summed changes in
+    Cα–Cα + Cβ–Cβ distance between conformers ${esc(a)} and ${esc(b)}.`;
+  $("distances").innerHTML = `<thead><tr><th>Cβ–Cβ (Å), ${esc(a)} / ${esc(b)}</th>${m.anchors.map((r) => `<th>${esc(r.label)}</th>`).join("")}</tr></thead>
+    <tbody>${m.moving.map((r, i) => `<tr><td>${esc(r.label)}</td>${m.distances[i].map((d) => `<td>${d[0]} / ${d[1]}</td>`).join("")}</tr>`).join("")}</tbody>`;
+}
+
+function renderResults(view, jobId) {
+  const s = view.search, [a, b] = view.motif.altlocs, f = s.filter;
+  $("results-card").hidden = false;
+  $("filter").textContent = `Hits matching at least ${f.min_matched} of ${f.motif_size} motif residues with RMSD below ${f.rmsd_max} Å` +
+    `${f.confident ? ", confident only" : ""}. Each cell: targets (distinct residue numberings).`;
+  const max = Math.max(1, ...s.rows.flatMap((r) => [r.counts[a].targets, r.counts[b].targets]));
+  const cell = (c, color) => {
+    const flag = c.possibly_truncated
+      ? ` <span class="flag" title="Counted hits reach rank ${c.last_rank + 1} of ${c.returned}; more may have been cut off by the ${c.returned}-hit limit">*</span>` : "";
+    return `<td>${c.targets} <span class="sub">(${c.numberings})</span>${flag}<span class="bar" style="width:${Math.round(60 * c.targets / max)}px;background:${color}"></span></td>`;
+  };
+  const name = (db) => (DATABASES.find(([id]) => id === db) || [db, db])[1];
+  $("summary").innerHTML = `<thead><tr><th>Database</th>
+      <th><span class="swatch" style="background:var(--series-a)"></span>Conformer ${esc(a)}</th>
+      <th><span class="swatch" style="background:var(--series-b)"></span>Conformer ${esc(b)}</th><th>In both</th></tr></thead>
+    <tbody>${s.rows.map((r) => `<tr><td>${esc(name(r.database))}</td>${cell(r.counts[a], "var(--series-a)")}${cell(r.counts[b], "var(--series-b)")}<td>${r.shared}</td></tr>`).join("")}</tbody>
+    <tfoot><tr><td>Total</td><td>${s.totals[a]}</td><td>${s.totals[b]}</td><td>${s.totals.shared}</td></tr></tfoot>`;
+  const truncated = s.rows.some((r) => r.counts[a].possibly_truncated || r.counts[b].possibly_truncated);
+  $("truncation").hidden = !truncated;
+  $("truncation").textContent = "* Counted hits reach the last 20% of a 1,000-hit list for this database, so more close matches " +
+    "were probably cut off by the server's hit limit. Treat these counts as lower bounds.";
+  $("links").innerHTML = `<a href="${esc(s.pages[a])}" target="_blank" rel="noopener">FoldDisco results, conformer ${esc(a)}</a>
+    <a href="${esc(s.pages[b])}" target="_blank" rel="noopener">FoldDisco results, conformer ${esc(b)}</a>
+    <a href="/api/jobs/${jobId}/summary.csv">Summary CSV</a><a href="/api/jobs/${jobId}/files.zip">All files (.zip)</a>`;
+}
+</script>
+</body>
+</html>

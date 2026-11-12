@@ -1,0 +1,25 @@
+[build-system]
+build-backend = "hatchling.build"
+requires = ["hatchling"]
+
+[project]
+dependencies = [
+  "gemmi>=0.6",
+  "jaxtyping>=0.2",
+  "numpy>=1.24",
+  "requests>=2.28",
+]
+description = "Find structural contexts like each altloc conformer of a loop with the FoldDisco webserver"
+name = "folddisco-altloc"
+readme = "README.md"
+requires-python = ">=3.10"
+version = "0.1.0"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+folddisco-altloc = "folddisco_altloc.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/folddisco_altloc"]

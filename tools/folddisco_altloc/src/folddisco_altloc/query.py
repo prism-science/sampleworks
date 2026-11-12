@@ -23,16 +23,14 @@ so two CLI options are reproduced client side:
     --confident       hits are filtered after download to those matching at least
                       80% of the motif residues within 1 Å RMSD
 
-Usage:
-    python scripts/folddisco.py query/zinc_finger.txt
-    python scripts/folddisco.py query/zinc_finger.txt --aa-subst group --confident
+Command line: ``folddisco-altloc search QUERY_FILE [--aa-subst group] [--confident]``.
 """
 
-import argparse
 import csv
 import json
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -433,6 +431,7 @@ def wait_for_ticket(
     poll_interval: float = 5.0,
     max_wait: float = 1800.0,
     timeout: float = 60.0,
+    on_status: Callable[[str], None] | None = None,
 ) -> None:
     """Poll a FoldDisco ticket until its search is complete.
 
@@ -446,6 +445,8 @@ def wait_for_ticket(
         Seconds to wait in total before giving up.
     timeout : float, optional
         Per-request timeout in seconds.
+    on_status : callable, optional
+        Called with the ticket status (``PENDING``, ``RUNNING``, ...) after each check.
 
     Raises
     ------
@@ -458,6 +459,8 @@ def wait_for_ticket(
         response = requests.get(f"{API_URL}/ticket/{ticket_id}", timeout=timeout)
         response.raise_for_status()
         status = response.json()["status"]
+        if on_status is not None:
+            on_status(status)
         if status == "COMPLETE":
             return
         if status not in ("PENDING", "RUNNING"):
@@ -636,59 +639,3 @@ def run_folddisco(
         write_results(results, output)
         runs.append(FolddiscoRun(query, ticket_id, output))
     return runs
-
-
-def main() -> None:
-    """Command-line entry point: validate a query file, run it and save the results."""
-    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
-    parser.add_argument("query_file", type=Path, help="FoldDisco batch query file (.txt)")
-    parser.add_argument(
-        "--database",
-        action="append",
-        dest="databases",
-        help=f"database to search; repeatable (default: {', '.join(DEFAULT_DATABASES)})",
-    )
-    parser.add_argument(
-        "--validate-only", action="store_true", help="check the query file and exit"
-    )
-    parser.add_argument(
-        "--poll-interval", type=float, default=5.0, help="seconds between status checks"
-    )
-    parser.add_argument(
-        "--max-wait", type=float, default=1800.0, help="seconds to wait for each search"
-    )
-    parser.add_argument(
-        "--aa-subst",
-        choices=AA_SUBST_MODES,
-        help="let motif residues match their substitution class, as in folddisco --aa-subst",
-    )
-    parser.add_argument(
-        "--confident",
-        action="store_true",
-        help="keep hits matching >=80%% of the motif within 1 Å, as in folddisco --confident",
-    )
-    args = parser.parse_args()
-
-    if args.validate_only:
-        for query in prepare_queries(args.query_file, args.aa_subst):
-            print(f"line {query.line_number}: {query.structure}\t{query.motif}")
-        print("query file is valid")
-        return
-
-    databases = args.databases or DEFAULT_DATABASES
-    runs = run_folddisco(
-        args.query_file,
-        databases,
-        args.poll_interval,
-        args.max_wait,
-        args.aa_subst,
-        args.confident,
-    )
-    for run in runs:
-        print(f"line {run.query.line_number} ({run.query.structure.name} {run.query.motif})")
-        print(f"  results: {run.output}")
-        print(f"  page:    {RESULT_PAGE_URL}/{run.ticket_id}")
-
-
-if __name__ == "__main__":
-    main()
