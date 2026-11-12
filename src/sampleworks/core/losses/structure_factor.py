@@ -14,7 +14,11 @@ from loguru import logger
 from SFC_Torch import SFcalculator
 from SFC_Torch.io import PDBParser
 
-from sampleworks.core.losses.options import SFC_BULK_SOLVENT_MODES, StructureFactorOptions
+from sampleworks.core.losses.options import (
+    SFC_BULK_SOLVENT_MODES,
+    SFC_SCALE_FIT_MODES,
+    StructureFactorOptions,
+)
 from sampleworks.core.losses.registry import LossBuildContext
 from sampleworks.synthetic.synthetic_utils import atomarray_to_gemmi, resolve_mtz_column
 
@@ -43,6 +47,11 @@ _RESERVED_SFC_KWARGS = frozenset(
 # data, so 5e3 is a safe threshold.
 _MIN_RETAINED_REFLECTION_FRACTION = 0.75
 _MIN_RETAINED_REFLECTIONS = 5_000
+
+# Optimization steps of each warm-started scale refit, taken from ROCKET. All other scale-fit
+# settings follow ROCKET/SFC's default. See commit e5e2d15 rocket/xtal/structurefactors.py and
+# targets.py.
+_SCALE_UPDATE_STEPS = 10
 
 
 def _resolve_expcolumns(expcolumns: list[str] | None, ds: rs.DataSet) -> tuple[str, str]:
@@ -103,6 +112,7 @@ class StructureFactorLossFunction:
         normalize_amplitude: bool = False,
         exclude_free_reflections: bool = False,
         batch_partition: int = 10,
+        scale_fit: str = "off",
         sfcalculator_kwargs: dict | None = None,
     ):
         """Loss for fitting structure-factor amplitudes via SFcalculator.
@@ -132,8 +142,12 @@ class StructureFactorLossFunction:
 
         ``"combined"`` and ``"per_conformer"`` differ only for a real ensemble
         (batch > 1); the mask operator is nonlinear, so ``mask(<rho>) != <mask(rho)>``.
-        Both use the default, *unrefined* scales ``kiso=1``, ``kmask=0.35``, small
-        ``uaniso``; refining them during sampling is left for a later revision.
+        
+        With ``scale_fit="off"``, both non-"off" bulk solvent modes use the default SFC
+        scales ``kiso=1``, ``kmask=0.35``, small ``uaniso``. With non-"off" ``scale_fit``
+        these parameters are refined per resolution bin against ``|Fobs|``, and it applies
+        to ``bulk_solvent="off"`` as well, where ``Fmask = 0`` only leaves out ``kmask``.
+
         ``normalize_amplitude`` (``|F|`` vs ``|E|``) is orthogonal and composes with
         any ``bulk_solvent`` choice.
 
@@ -195,6 +209,11 @@ class StructureFactorLossFunction:
             Ensemble chunk size forwarded to ``SFcalculator.calc_fprotein_batch`` as its
             ``PARTITION`` parameter. SFC's own default (20) can still lead to OOM.
             Must be a positive integer.
+        scale_fit
+            Treatment of the per-resolution-bin scales ``kiso`` / ``kmask`` / ``uaniso``:
+            ``"off"`` (default; SFcalculator's default values) or ``"adam"`` (least-squares
+            refit against ``|Fobs|`` on every call). SFC always fits them on the working set
+            only and ignores our ``exclude_free_reflections`` flag.
         sfcalculator_kwargs
             Extra keyword arguments forwarded verbatim to ``SFcalculator(...)`` in
             :meth:`prepare` (e.g. ``n_bins``, ``freeflag``, ``testset_value``). Reserved
@@ -215,6 +234,9 @@ class StructureFactorLossFunction:
                 f"batch_partition must be a positive integer, got {batch_partition!r}."
             )
         self.batch_partition = batch_partition
+        if scale_fit not in SFC_SCALE_FIT_MODES:
+            raise ValueError(f"scale_fit must be one of {SFC_SCALE_FIT_MODES}, got {scale_fit!r}.")
+        self.scale_fit = scale_fit
         self.loss: AmplitudeLoss = loss if loss is not None else torch.nn.MSELoss()
         self.normalize_amplitude = normalize_amplitude  # |F| vs resolution-bin normalized |E|
 
@@ -244,6 +266,7 @@ class StructureFactorLossFunction:
         # Populated by prepare(); None until then.
         self.sfc: SFcalculator | None = None
         self._reflection_mask: torch.Tensor | None = None
+        self._scales_initialized = False
 
     def _resolve_mtz_metadata(self, expcolumns: list[str] | None) -> None:
         """Set ``self.unit_cell`` / ``space_group`` / ``expcolumns`` from the MTZ.
@@ -365,12 +388,16 @@ class StructureFactorLossFunction:
         # and vdW radii, independent of occupancy / B-factor.
         self.sfc.inspect_data()
 
-        # Ftotal uses the default (unrefined) scales kiso=1, kmask=0.35, small uaniso,
-        # matching generate_synthetic_sf_sfc's Ftotal. They don't depend on coordinates, so
-        # set them once here. _set_scales only needs atom_pos_frac (set at construction)
-        # and n_bins (set by the experiment init) for dtype/device and bin count.
-        if self.bulk_solvent != "off":
+        # Without a scale fit, Ftotal uses the default constant scales matching synthetic
+        # generation script. With fitting, the scales are initialized in the first __call__
+        # because the initialization depends on the coordinates. An alternative way to
+        # implement is to initialize here in prepare() using coordinates from LossInputs.
+        # That would be more similar to how ROCKET initializes scales in initial_SFC.
+        # The concern is that model-only atoms placed at arbitrary positions (e.g. origin,
+        # COM) would affect the scale, unclear to what extent though.
+        if self.bulk_solvent != "off" and self.scale_fit == "off":
             self.sfc._set_scales(requires_grad=False)
+        self._scales_initialized = False
 
         # |Eo|, epsilon, and Outlier all come from one bare try/except inside SFC's experiment
         # init. A missing Eo means that block raised; a non-finite Eo means a resolution bin
@@ -554,7 +581,10 @@ class StructureFactorLossFunction:
         )
         Fprotein = Fprotein_batch.sum(dim=0)
 
-        fcalc = Fprotein if self.bulk_solvent == "off" else self._compute_ensemble_ftotal(Fprotein)
+        if self.bulk_solvent == "off" and self.scale_fit == "off":
+            fcalc = Fprotein
+        else:
+            fcalc = self._compute_ensemble_ftotal(Fprotein)
 
         mask = self._reflection_mask
         if self.normalize_amplitude:
@@ -569,13 +599,17 @@ class StructureFactorLossFunction:
         self,
         Fprotein_HKL: Complex[torch.Tensor, "n_hkl"],  # noqa: F821, UP037
     ) -> Complex[torch.Tensor, "n_hkl"]:  # noqa: F821, UP037
-        """Add default-scaled bulk solvent to the ensemble Fprotein to form Ftotal.
+        """Add bulk solvent and scaling to the ensemble Fprotein to form Ftotal.
 
-        ``Ftotal(h) = kiso * aniso(h) * (Fprotein(h) + kmask * Fmask(h))`` with the
-        default (unrefined) scales set in :meth:`prepare`, evaluated on the
-        experimental HKL set. ``Fprotein`` is the ensemble complex sum; the
-        bulk-solvent ``Fmask`` is combined per :attr:`bulk_solvent`. The two
-        ``|Ftotal|`` modes are identical for a single conformer.
+        ``Ftotal(h) = kiso * aniso(h) * (Fprotein(h) + kmask * Fmask(h))``, evaluated
+        on the experimental HKL set. The scales are the default constants set in
+        :meth:`prepare`, or, with :attr:`scale_fit` on, refitted here by
+        :meth:`_fit_scales`. ``Fprotein`` is the ensemble complex sum; the bulk-solvent
+        ``Fmask`` is combined per :attr:`bulk_solvent`. The two ``|Ftotal|`` modes are
+        identical for a single conformer.
+
+        ``bulk_solvent="off"``
+            ``Fmask = 0``, so ``Ftotal`` is the scaled ``Fprotein``.
 
         ``bulk_solvent="combined"`` (``mask(<rho>)``)
             One mask built from the combined protein density. ``calc_fsolvent``
@@ -610,7 +644,9 @@ class StructureFactorLossFunction:
         """
         assert self.sfc is not None  # prepare() built it; __call__ guards before dispatching here
         self.sfc.Fprotein_HKL = Fprotein_HKL  # drives calc_ftotal on the HKL set
-        if self.bulk_solvent == "per_conformer":
+        if self.bulk_solvent == "off":
+            self.sfc.Fmask_HKL = torch.zeros_like(Fprotein_HKL)
+        elif self.bulk_solvent == "per_conformer":
             # calc_fsolvent_batch masks each conformer (from Fprotein_asu_batch, set by
             # calc_fprotein_batch); the mean applies the 1/batch_size weight -> <mask(rho)>.
             Fmask_HKL_batch = self.sfc.calc_fsolvent_batch(
@@ -622,7 +658,43 @@ class StructureFactorLossFunction:
             # having the Fprotein_asu set, but batch mode only sets Fprotein_asu_batch.
             self.sfc.Fprotein_asu = self.sfc.Fprotein_asu_batch.sum(dim=0)
             self.sfc.calc_fsolvent()  # sets Fmask_HKL
-        return self.sfc.calc_ftotal()  # default scales set in prepare()
+        if self.scale_fit != "off":
+            self._fit_scales()
+        # At this point the scaling parameters are either constants (defaults) or frozen, so
+        # the gradient of Ftotal reaches the coordinates only.
+        return self.sfc.calc_ftotal()
+
+    def _fit_scales(self) -> None:
+        """Least-squares fit of the per-resolution-bin scales to ``|Fobs|``.
+
+        Delegates to ``SFcalculator.get_scales_adam``, which fits ``kiso`` / ``kmask`` /
+        ``uaniso`` of each resolution bin with Adam while holding ``sfc.Fprotein_HKL``
+        and ``sfc.Fmask_HKL`` fixed, so both must be set before the call. The first call
+        after :meth:`prepare` runs ``get_scales_adam`` with SFC's defaults, which start
+        from Phenix-style analytic initialization; later calls warm-start from the scales
+        the previous call left and run ``_SCALE_UPDATE_STEPS`` steps.
+        
+        SFC adam details to be aware of: 
+        - Always fitted on the working set, ignores our `exclude_free_reflections` here.
+        - It randomly (NumPy's global random state) subsamples reflections of each bin at
+        every fit step.
+        - After fitting, it sets the parameters ``requires_grad=False``.
+        - It sets ``sfc.r_work`` / ``sfc.r_free`` for logging.
+        """
+        assert self.sfc is not None  # prepare() built it; __call__ guards before dispatching here
+        # The loss may be evaluated under no_grad (e.g. with latent optimization during the final
+        # denoising trajectory).
+        with torch.enable_grad():
+            if self._scales_initialized:
+                self.sfc.get_scales_adam(n_steps=_SCALE_UPDATE_STEPS, initialize=False)
+            else:
+                self.sfc.get_scales_adam()
+        self._scales_initialized = True
+        logger.opt(lazy=True).debug(
+            "Scale fit: r_work={:.4f}, r_free={:.4f}",
+            lambda: float(self.sfc.r_work),
+            lambda: float(self.sfc.r_free),
+        )
 
 
 def build_structure_factor_loss(
@@ -671,5 +743,6 @@ def build_structure_factor_loss(
         normalize_amplitude=options.normalize_amplitude,
         exclude_free_reflections=options.exclude_free_reflections,
         batch_partition=options.batch_partition,
+        scale_fit=options.scale_fit,
         sfcalculator_kwargs=options.sfcalculator_kwargs,
     )

@@ -30,6 +30,7 @@ from typing import Any
 
 
 SFC_BULK_SOLVENT_MODES = ("off", "combined", "per_conformer")
+SFC_SCALE_FIT_MODES = ("off", "adam")
 LUNUS_BULK_SOLVENT_MODES = ("off", "per_conformer")
 
 
@@ -147,6 +148,13 @@ class StructureFactorOptions:
     normalize_amplitude: bool = opt(False, help="Score normalized amplitudes (|E|) instead of |F|")
     exclude_free_reflections: bool = opt(False, help="Score the working set only, dropping R-free")
     batch_partition: int = opt(10, help="Ensemble chunk size for the SFcalculator batch")
+    scale_fit: str = opt(
+        "off",
+        help="Per-resolution-bin scale (kiso, kmask, uaniso) treatment: off (SFcalculator's "
+        "default values) or adam (least-squares refit against |Fo| on every loss call; "
+        "always on the working set, ignoring exclude_free_reflections)",
+        choices=SFC_SCALE_FIT_MODES,
+    )
     sfcalculator_kwargs: dict | None = opt(
         None,
         help="Extra SFcalculator keyword arguments as JSON, e.g. '{\"n_bins\": 15}'",
