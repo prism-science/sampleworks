@@ -56,8 +56,8 @@ class TestFromCliUnified:
         config = GuidanceConfig.from_cli(argv)
         assert config.model_name == "rf3"
         assert config.guidance_type == "fk_steering"
-        assert hasattr(config, "num_particles")
-        assert hasattr(config, "fk_lambda")
+        assert config.num_particles == 3
+        assert config.fk_lambda == 1.0
 
     def test_model_specific_args_boltz2_method(self):
         argv = [
@@ -102,19 +102,36 @@ class TestFromCliUnified:
         assert config.num_diffusion_steps == 64
 
     def test_guidance_specific_args_fk(self):
+        """Every FK steering flag lands on the config with the value passed.
+
+        Each value differs from the flag's default, so a flag that is parsed
+        but never copied onto the config cannot pass by falling back to it.
+        """
         argv = [
             "--model",
             "boltz1",
             "--guidance-type",
             "fk_steering",
             "--num-particles",
-            "5",
+            "5",  # default 3
             "--fk-lambda",
-            "2.0",
+            "2.0",  # default 1.0
+            "--fk-resampling-interval",
+            "4",  # default 1
+            "--num-gd-steps",
+            "3",  # default 1
+            "--guidance-weight",
+            "0.25",  # default 0.01
+            "--guidance-interval",
+            "2",  # default 1
         ] + COMMON_ARGS
         config = GuidanceConfig.from_cli(argv)
         assert config.num_particles == 5
         assert config.fk_lambda == 2.0
+        assert config.fk_resampling_interval == 4
+        assert config.num_gd_steps == 3
+        assert config.guidance_weight == 0.25
+        assert config.guidance_interval == 2
 
     def test_guidance_specific_args_pure(self):
         argv = [
