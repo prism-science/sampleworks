@@ -26,4 +26,4 @@ name = "protenix"
 env = "protenix"
 gpu_count = 4
 output_subdir = "protenix"
-args = { model = "protenix", partial-diffusion-step = 120, gradient-weights = "0.0 0.1 0.2 0.5" }
+args = { model = "protenix", partial-diffusion-start = 0.6, gradient-weights = "0.0 0.1 0.2 0.5" }

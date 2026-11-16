@@ -7,6 +7,8 @@ structure-factor loss being unreachable from the CLI.
 
 from pathlib import Path
 
+import gemmi
+import numpy as np
 import pytest
 import torch
 from sampleworks.core.losses.config import build_loss
@@ -50,9 +52,10 @@ def build_from_argv(argv: list[str], structure_path: Path, device: torch.device)
     )
 
 
-def test_density_loss_is_reachable_from_the_command_line(resources_dir: Path, device):
+def test_density_loss_is_reachable_from_the_command_line(
+    resources_dir: Path, density_path_1vme: Path, device
+):
     structure_path = resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
-    density_path = resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB_1.80A.ccp4"
 
     loss = build_from_argv(
         BASE_ARGV
@@ -60,7 +63,7 @@ def test_density_loss_is_reachable_from_the_command_line(resources_dir: Path, de
             "--structure",
             str(structure_path),
             "--density",
-            str(density_path),
+            str(density_path_1vme),
             "--resolution",
             "1.8",
             "--loss-order",
@@ -72,6 +75,28 @@ def test_density_loss_is_reachable_from_the_command_line(resources_dir: Path, de
 
     assert isinstance(loss, RealSpaceLossFunction)
     assert isinstance(loss.loss, torch.nn.L1Loss)
+
+
+def test_density_loss_target_does_not_depend_on_map_units(resources_dir: Path, device, tmp_path):
+    """Experimental maps come in arbitrary units. The built loss should rescale them to the input
+    structure's computed density, so the same map stored in any positive units is the same
+    target."""
+    structure_path = resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
+    density_path = resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB_1.80A.ccp4"
+    targets = []
+    for factor in (1e-3, 1 / 30, 1, 30, 1e3):
+        ccp4 = gemmi.read_ccp4_map(str(density_path))
+        grid = np.asarray(ccp4.grid)  # view: scaling it scales the map in place
+        grid *= factor
+        ccp4.update_ccp4_header()
+        scaled_path = tmp_path / f"scaled_{factor:g}.ccp4"
+        ccp4.write_ccp4_map(str(scaled_path))
+        argv = ["--structure", str(structure_path), "--density", str(scaled_path)]
+        loss = build_from_argv(BASE_ARGV + argv + ["--resolution", "1.8"], structure_path, device)
+        targets.append(loss.transformer.xmap.array)
+
+    for target in targets[1:]:
+        torch.testing.assert_close(target, targets[0], rtol=1e-4, atol=1e-6)
 
 
 def test_structure_factor_loss_scores_a_structure_end_to_end(
@@ -130,18 +155,17 @@ def test_structure_factor_loss_scores_a_structure_end_to_end(
 
 def test_a_configuration_file_composes_two_losses(
     tmp_path: Path,
-    resources_dir: Path,
+    density_path_1vme: Path,
     sf_1vme_cif_and_mtz_paths: tuple[Path, Path],
     device: torch.device,
 ):
     """The two losses score different data about the same structure, and combine."""
     structure_path, mtz_path = sf_1vme_cif_and_mtz_paths
-    density_path = resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB_1.80A.ccp4"
     config_file = tmp_path / "losses.yaml"
     config_file.write_text(
         "real_space_density:\n"
         "  weight: 0.4\n"
-        f"  loss_options: {{density: {density_path}, resolution: 1.8}}\n"
+        f"  loss_options: {{density: {density_path_1vme}, resolution: 1.8}}\n"
         "structure_factor:\n"
         "  weight: 0.6\n"
         f"  loss_options: {{mtzfile: {mtz_path}, expcolumns: [Fprotein, SIGFprotein]}}\n"

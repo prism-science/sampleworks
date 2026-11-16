@@ -16,3 +16,9 @@ release_data/
 *.tar
 output/
 .jj/
+
+# Protenix ModelWrapper.featurize() writes these input/MSA cache files as a
+# side effect into a dir named after the structure id (relative to cwd), not
+# a fixed path -- ignore by filename instead of directory name.
+protenix_input.json
+protenix_input-add-msa.json

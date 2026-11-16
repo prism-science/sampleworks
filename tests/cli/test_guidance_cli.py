@@ -205,9 +205,9 @@ class TestFromCliDefaults:
         argv = ["--model", "boltz1", "--guidance-type", "pure_guidance"] + COMMON_ARGS
         config = GuidanceConfig.from_cli(argv)
         assert config.output_dir == "output"
-        assert config.partial_diffusion_step == 0
+        assert config.partial_diffusion_start == 0.0
         assert config.loss_order == 2
-        assert config.guidance_start == -1
+        assert config.guidance_start == 0.0
         assert config.augmentation is False
         assert config.align_to_input is False
         assert config.ensemble_size == 4
@@ -388,17 +388,17 @@ class TestArgPassthrough:
         config = GuidanceConfig.from_cli(argv)
         assert config.output_dir == "/custom/output"
 
-    def test_partial_diffusion_step(self):
+    def test_partial_diffusion_start(self):
         argv = [
             "--model",
             "boltz1",
             "--guidance-type",
             "pure_guidance",
-            "--partial-diffusion-step",
-            "50",
+            "--partial-diffusion-start",
+            "0.25",
         ] + COMMON_ARGS
         config = GuidanceConfig.from_cli(argv)
-        assert config.partial_diffusion_step == 50
+        assert config.partial_diffusion_start == 0.25
 
     def test_log_path(self):
         argv = [
@@ -456,10 +456,10 @@ class TestArgPassthrough:
             "--guidance-type",
             "pure_guidance",
             "--guidance-start",
-            "10",
+            "0.5",
         ] + COMMON_ARGS
         config = GuidanceConfig.from_cli(argv)
-        assert config.guidance_start == 10
+        assert config.guidance_start == 0.5
 
     def test_recycling_steps(self):
         argv = [
@@ -557,6 +557,68 @@ class TestValidationEdgeCases:
             "invalid",
         ] + COMMON_ARGS
         with pytest.raises(SystemExit):
+            GuidanceConfig.from_cli(argv)
+
+
+def _config(**overrides):
+    """Build a minimal valid GuidanceConfig, overriding the fields under test.
+
+    Parameters
+    ----------
+    **overrides
+        Field values to set in place of the defaults.
+
+    Returns
+    -------
+    GuidanceConfig
+        A configuration whose required inputs are satisfied.
+    """
+    kwargs = dict(
+        protein="1VME",
+        structure="test.cif",
+        density="test.ccp4",
+        model_name="boltz1",
+        guidance_type="pure_guidance",
+        log_path="",
+        resolution=1.8,
+    )
+    kwargs.update(overrides)
+    return GuidanceConfig(**kwargs)
+
+
+class TestStepFractionValidation:
+    """partial_diffusion_start / guidance_start are validated as [0, 1] fractions (#246, #411)."""
+
+    @pytest.mark.parametrize("value", [0.0, 0.5, 0.999])
+    def test_partial_diffusion_start_accepts_in_range(self, value):
+        assert _config(partial_diffusion_start=value).partial_diffusion_start == value
+
+    @pytest.mark.parametrize("value", [-0.1, 1.0, 1.5])
+    def test_partial_diffusion_start_rejects_out_of_range(self, value):
+        # 1.0 maps to the final step, leaving an empty sampling loop; negatives index backwards.
+        with pytest.raises(ValueError, match="partial_diffusion_start"):
+            _config(partial_diffusion_start=value)
+
+    @pytest.mark.parametrize("value", [0.0, 0.5, 1.0])
+    def test_guidance_start_accepts_in_range(self, value):
+        # 1.0 is allowed here: it simply means guidance is never applied.
+        assert _config(guidance_start=value).guidance_start == value
+
+    @pytest.mark.parametrize("value", [-0.5, 1.5])
+    def test_guidance_start_rejects_out_of_range(self, value):
+        with pytest.raises(ValueError, match="guidance_start"):
+            _config(guidance_start=value)
+
+    def test_from_cli_rejects_out_of_range_partial_diffusion_start(self):
+        argv = [
+            "--model",
+            "boltz1",
+            "--guidance-type",
+            "pure_guidance",
+            "--partial-diffusion-start",
+            "1.5",
+        ] + COMMON_ARGS
+        with pytest.raises(ValueError, match="partial_diffusion_start"):
             GuidanceConfig.from_cli(argv)
 
 
@@ -755,6 +817,8 @@ class TestLossConfigFile:
         "--structure",
         "test.cif",
     ]
+    # Complete on its own, so a rejection can only come from the check under test.
+    VALID_DENSITY = "real_space_density:\n  loss_options: {density: test.ccp4, resolution: 1.8}\n"
 
     def write_config(self, tmp_path, text: str) -> str:
         config_file = tmp_path / "losses.yaml"
@@ -802,33 +866,51 @@ class TestLossConfigFile:
         assert config.resolved_loss_config().resolved_weights() == (0.4, 0.6)
         assert config.density == "test.ccp4"  # the density term still mirrors out
 
-    def test_a_config_file_and_a_loss_type_together_are_rejected(self, tmp_path):
-        argv = self.BASE + [
-            "--loss-config",
-            self.write_config(tmp_path, "real_space_density: {}\n"),
-            "--loss-type",
-            "real_space_density",
-        ]
+    @pytest.mark.parametrize(
+        "loss_type_args",
+        [["--loss-type", "real_space_density"], ["--loss-type=real_space_density"]],
+    )
+    def test_a_config_file_and_a_loss_type_together_are_rejected(
+        self, tmp_path, capsys, loss_type_args
+    ):
+        argv = (
+            self.BASE
+            + ["--loss-config", self.write_config(tmp_path, self.VALID_DENSITY)]
+            + loss_type_args
+        )
 
-        with pytest.raises(SystemExit):
+        with pytest.raises(SystemExit) as excinfo:
             GuidanceConfig.from_cli(argv)
 
-    def test_per_loss_flags_are_not_accepted_alongside_a_config_file(self, tmp_path):
+        assert excinfo.value.code == 2
+        assert "--loss-type and --loss-config are alternatives" in capsys.readouterr().err
+
+    def test_per_loss_flags_are_not_accepted_alongside_a_config_file(self, tmp_path, capsys):
         argv = self.BASE + [
             "--loss-config",
-            self.write_config(tmp_path, "real_space_density: {}\n"),
+            self.write_config(tmp_path, self.VALID_DENSITY),
             "--loss-order",
             "1",
         ]
 
-        with pytest.raises(SystemExit):
+        with pytest.raises(SystemExit) as excinfo:
             GuidanceConfig.from_cli(argv)
 
-    def test_a_broken_config_file_is_a_usage_error(self, tmp_path):
+        assert excinfo.value.code == 2
+        assert "unrecognized arguments: --loss-order 1" in capsys.readouterr().err
+
+    def test_a_broken_config_file_is_a_usage_error(self, tmp_path, capsys):
         argv = self.BASE + [
             "--loss-config",
-            self.write_config(tmp_path, "real_space_density:\n  loss_options: {looss: 1}\n"),
+            self.write_config(
+                tmp_path,
+                "real_space_density:\n"
+                "  loss_options: {density: test.ccp4, resolution: 1.8, looss: 1}\n",
+            ),
         ]
 
-        with pytest.raises(SystemExit):
+        with pytest.raises(SystemExit) as excinfo:
             GuidanceConfig.from_cli(argv)
+
+        assert excinfo.value.code == 2
+        assert "Unknown option(s) ['looss']" in capsys.readouterr().err

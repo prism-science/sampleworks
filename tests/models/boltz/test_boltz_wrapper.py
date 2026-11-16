@@ -14,6 +14,7 @@ import torch
 
 pytest.importorskip("boltz", reason="Boltz not installed")
 
+from boltz.data.types import AtomV2, Chain, Residue
 from sampleworks.models.boltz.wrapper import (
     _atom_array_from_boltz_npz,
     _load_model_atom_array_from_structures_dir,
@@ -188,28 +189,63 @@ class TestBoltzConfig:
 class TestBoltzNpzAtomArrayHelpers:
     """Unit tests for Boltz NPZ parsing and loading helpers."""
 
+    # Per-atom ground truth for the NPZ written by ``_write_npz``. Chain A holds GLY (4 atoms)
+    # and SER (6 atoms); chain B holds CYS (6 atoms). Chain B starts at residue 2 but atom 10,
+    # and Boltz numbers residues from 0 within each chain.
+    CHAIN_IDS = ["A"] * 10 + ["B"] * 6
+    RES_IDS = [0] * 4 + [1] * 6 + [0] * 6
+    RES_NAMES = ["GLY"] * 4 + ["SER"] * 6 + ["CYS"] * 6
+    ATOM_NAMES = (
+        ["N", "CA", "C", "O"]
+        + ["N", "CA", "C", "O", "CB", "OG"]
+        + ["N", "CA", "C", "O", "CB", "SG"]
+    )
+    ELEMENTS = (
+        ["N", "C", "C", "O"] + ["N", "C", "C", "O", "C", "O"] + ["N", "C", "C", "O", "C", "S"]
+    )
+    COORDS = np.arange(16 * 3, dtype=np.float32).reshape(16, 3) / 4  # (n_atoms, 3)
+
     def _write_npz(
         self,
         out_path: Path,
         *,
         include_chains: bool = True,
     ) -> Path:
-        atoms_dtype = np.dtype([("coords", np.float32, (3,)), ("name", "U4")])
-        residues_dtype = np.dtype([("atom_idx", np.int32), ("res_idx", np.int32), ("name", "U4")])
-        chains_dtype = np.dtype([("res_idx", np.int32), ("name", "U2")])
+        """Write a Boltz-2 processed structure NPZ holding the atoms described above.
 
-        atoms = np.zeros(2, dtype=atoms_dtype)
-        atoms["coords"] = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], dtype=np.float32)
-        atoms["name"] = np.array(["N", "CA"])
+        Parameters
+        ----------
+        out_path : Path
+            Destination ``.npz`` path.
+        include_chains : bool
+            If False, omit the ``chains`` table to produce a malformed file.
 
-        residues = np.zeros(1, dtype=residues_dtype)
-        residues["atom_idx"] = np.array([0], dtype=np.int32)
-        residues["res_idx"] = np.array([7], dtype=np.int32)
-        residues["name"] = np.array(["ALA"])
+        Returns
+        -------
+        Path
+            ``out_path``.
+        """
+        atoms = np.zeros(len(self.ATOM_NAMES), dtype=AtomV2)
+        atoms["name"] = self.ATOM_NAMES
+        atoms["coords"] = self.COORDS
+        atoms["is_present"] = True
 
-        chains = np.zeros(1, dtype=chains_dtype)
-        chains["res_idx"] = np.array([0], dtype=np.int32)
-        chains["name"] = np.array(["A"])
+        residues = np.zeros(3, dtype=Residue)
+        residues["name"] = ["GLY", "SER", "CYS"]
+        residues["res_idx"] = [0, 1, 0]
+        residues["atom_idx"] = [0, 4, 10]
+        residues["atom_num"] = [4, 6, 6]
+        residues["is_standard"] = True
+        residues["is_present"] = True
+
+        chains = np.zeros(2, dtype=Chain)
+        chains["name"] = ["A", "B"]
+        chains["asym_id"] = [0, 1]
+        chains["entity_id"] = [0, 1]
+        chains["atom_idx"] = [0, 10]
+        chains["atom_num"] = [10, 6]
+        chains["res_idx"] = [0, 2]
+        chains["res_num"] = [2, 1]
 
         if include_chains:
             np.savez(out_path, atoms=atoms, residues=residues, chains=chains)
@@ -218,13 +254,16 @@ class TestBoltzNpzAtomArrayHelpers:
         return out_path
 
     def test_atom_array_from_npz(self, temp_output_dir: Path):
-        npz_path = self._write_npz(temp_output_dir / "single.npz")
+        """Each atom carries its own chain, residue, name, element and coordinates."""
+        npz_path = self._write_npz(temp_output_dir / "two_chains.npz")
 
         arr = _atom_array_from_boltz_npz(npz_path)
-        assert len(arr) == 2
-        assert cast(np.ndarray, arr.chain_id).tolist() == ["A", "A"]
-        assert cast(np.ndarray, arr.res_id).tolist() == [7, 7]
-        assert cast(np.ndarray, arr.atom_name).tolist() == ["N", "CA"]
+        assert cast(np.ndarray, arr.chain_id).tolist() == self.CHAIN_IDS
+        assert cast(np.ndarray, arr.res_id).tolist() == self.RES_IDS
+        assert cast(np.ndarray, arr.res_name).tolist() == self.RES_NAMES
+        assert cast(np.ndarray, arr.atom_name).tolist() == self.ATOM_NAMES
+        assert cast(np.ndarray, arr.element).tolist() == self.ELEMENTS
+        np.testing.assert_array_equal(arr.coord, self.COORDS)
         assert arr.occupancy is not None
         assert arr.b_factor is not None
 
@@ -240,7 +279,7 @@ class TestBoltzNpzAtomArrayHelpers:
 
         arr = _load_model_atom_array_from_structures_dir(structures_dir)
         assert arr is not None
-        assert len(arr) == 2
+        assert len(arr) == len(self.ATOM_NAMES)
 
 
 @pytest.mark.gpu

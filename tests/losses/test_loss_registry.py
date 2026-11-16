@@ -9,12 +9,16 @@ from sampleworks.core.losses.options import (
     RealSpaceDensityOptions,
 )
 from sampleworks.core.losses.registry import (
+    bool_from_text,
     build_single_loss,
     coerce_options,
     get_loss_spec,
+    is_path_option,
+    loss_option_names,
     LOSS_SPECS,
     loss_type_names,
     LossBuildContext,
+    option_from_text,
 )
 from sampleworks.utils.guidance_constants import Losses
 
@@ -30,14 +34,18 @@ class TestRegistryEntries:
     def test_spec_is_keyed_by_its_own_name(self, loss: Losses):
         assert LOSS_SPECS[loss].name is loss
 
-    def test_declared_data_and_resolution_options_exist(self, loss: Losses):
-        """The grid-search injection points must name real options."""
-        spec = LOSS_SPECS[loss]
-        option_names = {f.name for f in dataclasses.fields(spec.options_cls)}
-
-        for declared in (spec.data_path_option, spec.resolution_option):
-            if declared is not None:
-                assert declared in option_names
+    def test_shared_option_names_share_a_declaration(self, loss: Losses):
+        """A proteins-CSV column is parsed by option name alone, for every loss that has it."""
+        for option in dataclasses.fields(LOSS_SPECS[loss].options_cls):
+            for other in LOSS_SPECS.values():
+                for other_option in dataclasses.fields(other.options_cls):
+                    if other_option.name != option.name:
+                        continue
+                    assert option_type(other.options_cls, option.name) == option_type(
+                        LOSS_SPECS[loss].options_cls, option.name
+                    )
+                    assert other_option.metadata["path"] == option.metadata["path"]
+                    assert other_option.metadata["json_arg"] == option.metadata["json_arg"]
 
     def test_file_valued_options_are_declared_as_paths(self, loss: Losses):
         """A path option that forgets ``path=True`` silently escapes path remapping."""
@@ -121,3 +129,58 @@ class TestBuilderValidation:
     def test_structure_factor_loss_requires_an_mtz(self):
         with pytest.raises(ValueError, match="needs a target MTZ"):
             build_single_loss(Losses.STRUCTURE_FACTOR, {}, LossBuildContext(structure={}))
+
+
+class TestOptionsFromText:
+    """Proteins-CSV cells are parsed to each option's declared type."""
+
+    @pytest.mark.parametrize(
+        ("name", "text", "expected"),
+        [
+            ("resolution", "1.8", 1.8),
+            ("loss_order", "1", 1),
+            ("em", "true", True),
+            ("normalize_amplitude", "No", False),
+            ("expcolumns", "FP SIGFP", ["FP", "SIGFP"]),
+            ("sfcalculator_kwargs", '{"n_bins": 15}', {"n_bins": 15}),
+            ("bulk_solvent", "combined", "combined"),
+        ],
+    )
+    def test_parses_to_the_declared_type(self, name, text, expected):
+        assert option_from_text(name, text) == expected
+
+    @pytest.mark.parametrize(
+        "text", ["true", "True", "TRUE", "t", "T", "yes", "Yes", "y", "on", "ON", "1", " true "]
+    )
+    def test_truthy_text_is_true(self, text):
+        assert bool_from_text(text) is True
+
+    @pytest.mark.parametrize(
+        "text", ["false", "False", "FALSE", "f", "F", "no", "No", "n", "off", "OFF", "0", " no "]
+    )
+    def test_falsy_text_is_false(self, text):
+        assert bool_from_text(text) is False
+
+    @pytest.mark.parametrize("text", ["maybe", "", "2", "-1", "truee", "none"])
+    def test_other_text_is_not_a_boolean(self, text):
+        with pytest.raises(ValueError, match="Expected true or false"):
+            bool_from_text(text)
+
+    def test_rejects_a_value_that_is_not_a_boolean(self):
+        with pytest.raises(ValueError, match="Expected true or false"):
+            option_from_text("em", "maybe")
+
+    def test_rejects_an_option_no_loss_declares(self):
+        with pytest.raises(ValueError, match="No registered loss has an option named 'mtz_file'"):
+            option_from_text("mtz_file", "x.mtz")
+
+    def test_knows_which_options_are_paths(self):
+        assert is_path_option("mtzfile")
+        assert is_path_option("diffuse_target")
+        assert not is_path_option("resolution")
+
+    def test_option_names_span_every_loss(self):
+        names = loss_option_names()
+
+        assert {"density", "mtzfile", "bragg_target", "diffuse_target", "resolution"} <= set(names)
+        assert len(names) == len(set(names))

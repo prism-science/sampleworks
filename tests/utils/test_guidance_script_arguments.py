@@ -116,8 +116,11 @@ def _build_job(model: StructurePredictor) -> JobConfig:
     return JobConfig(
         protein="protein",
         structure_path="/tmp/structure.cif",
-        density_path="/tmp/density.mrc",
-        resolution=2.0,
+        loss_config={
+            "real_space_density": {
+                "loss_options": {"density": "/tmp/density.mrc", "resolution": 2.0}
+            }
+        },
         model_name=model,
         scaler=GuidanceType.PURE_GUIDANCE,
         ensemble_size=1,
@@ -450,8 +453,8 @@ def test_latent_opt_cli_flags_reach_the_config():
 
     Regression guard: these attribute names have to be listed in
     ``_DYNAMIC_ATTRS`` or ``from_cli`` silently drops the parsed values and
-    ``_run_guidance``'s ``getattr(args, ...)`` falls back to the defaults, making
-    every flag a no-op. Passing *non-default* values here catches that.
+    ``_run_guidance`` reads the defaults instead, making every flag a no-op.
+    Passing *non-default* values here catches that.
     """
     config = GuidanceConfig.from_cli(
         argv=[

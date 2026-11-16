@@ -30,7 +30,7 @@ evolving latents.
 ## 2. The as-built loop
 
 ```
-extract (s, z) from the trunk once  ->  clone into optimizable leaves (requires_grad=True)
+extract (s, z) from the trunk once  ->  clone into optimizable copies (requires_grad=True)
 for each outer round (a round = one full traversal of the schedule, fresh prior noise each):
     optimizer = Adam([s, z])                      # ONE persistent Adam per round
     for each diffusion step:
@@ -58,7 +58,7 @@ detaches each step, and a true unroll is O(steps·N²·d) memory.)
 | `AttrLatentIO` / `LatentIO` | [models/latent_adapter.py](../src/sampleworks/models/latent_adapter.py) | Reads/writes `s`/`z` by attribute name; writes via `dataclasses.replace` (honors `frozen=True, slots=True`). The only model-specific knowledge is a pair of attribute names. |
 | CLI wiring | [utils/guidance_script_utils.py](../src/sampleworks/utils/guidance_script_utils.py) (`_run_guidance`), [utils/guidance_script_arguments.py](../src/sampleworks/utils/guidance_script_arguments.py) (`add_latent_opt_args`), [utils/guidance_constants.py](../src/sampleworks/utils/guidance_constants.py) (`GuidanceType.LATENT_OPT`) | Builds the scaler from CLI flags. |
 
-Private helpers, for orientation: `_leaf_latents` (promote s/z to leaves), `_optimize_one_round`
+Private helpers, for orientation: `_leaf_latents` (promote s/z to optimizable copies), `_optimize_one_round`
 (one outer round), `_latent_optimizer_step` (score → backward → clip → step), `_sample_with_frozen_latents`
 (final clean pass).
 
@@ -74,7 +74,7 @@ LatentOptimization(
 )
 ```
 
-- `ensemble_size` structures are sampled in parallel, each with its **own** `s`/`z` leaf, so members
+- `ensemble_size` structures are sampled in parallel, each with its **own** `s`/`z` copy, so members
   can diverge under the loss instead of collapsing onto one solution.
 - `guidance_t_start` is a fraction in `[0,1]`; stored as `guidance_start = int(guidance_t_start*num_steps)`.
   Everything before it is plain frozen-latent diffusion.
@@ -91,7 +91,7 @@ LatentOptimization(
 
 The load-bearing mechanism. `AF3EDMSampler.step` reads `getattr(scaler, "requires_gradients", False)`;
 if true it runs the denoiser under `torch.set_grad_enabled(True)` and returns a `denoised` (`x̂₀`)
-that still carries a graph back to the latent leaves. `_GradEnablingScaler` is defined in
+that still carries a graph back to the latent copies. `_GradEnablingScaler` is defined in
 [core/scalers/latent_optimization.py](../src/sampleworks/core/scalers/latent_optimization.py):
 
 ```python
@@ -118,10 +118,10 @@ attributes are `s`/`z` for Boltz and `s_trunk`/`z_trunk` for Protenix/RF3
 
 | Model | Status | Note |
 |---|---|---|
-| **Boltz1** | Clean | Trunk latents reach the diffusion module directly. |
-| **RF3** | Clean | Same. |
-| **Protenix** | Works, with two conditions | (a) `step()` keeps an injected leaf attached automatically via the `detach_unless_leaf` helper — a cached latent detaches under grad (avoids double-backward), but a leaf with `requires_grad=True` is kept attached. No manual edit needed. (b) For `z`, the diffusion shared-vars cache must be **off** (`pair_z`/`p_lm`/`c_l` are z-derived; a stale cache silently zeroes / corrupts the `z` gradient). `_run_guidance` disables it for `LATENT_OPT`. |
-| **Boltz2** | Not yet | `z` (and part of `s`) are baked into a cached `diffusion_conditioning` at featurize time; needs the conditioning recomputed from the live latents. |
+| **Boltz1** | Works, lightly tested | Trunk latents reach the diffusion module directly. Level 0 passes in tests/models/test_latent_gradient.py; one K=2 run on 1VME completed end to end. |
+| **RF3** | Works | Trunk latents reach the diffusion module directly. The trunk runs under bfloat16 autocast, so `_pairformer_pass` hands `s_inputs`/`s_trunk`/`z_trunk` out in float32: bfloat16 copies round most Adam updates away (spacing 0.25 at \|z\| ~ 40, 4 at \|s\| ~ 800) and the optimization stalls. |
+| **Protenix** | Works, with two conditions | (a) `step()` keeps an injected copy attached automatically via the `detach_unless_leaf` helper — a cached latent detaches under grad (avoids double-backward), but a copy with `requires_grad=True` is kept attached. No manual edit needed. (b) For `z`, the diffusion shared-vars cache must be **off** (`pair_z`/`p_lm`/`c_l` are z-derived; a stale cache silently zeroes / corrupts the `z` gradient). `_run_guidance` disables it for `LATENT_OPT`. |
+| **Boltz2** | Works | `z` (and part of `s`) enter the diffusion module only through the cached `diffusion_conditioning` bundle built at featurize time. `step()` rebuilds the bundle whenever the `s`/`z` tensors it receives are not the ones the cached bundle was built from (an identity check, not a grad gate), so optimized latents reach every pass including the final frozen-latent one. Rebuilt once per round; no measurable cost. |
 
 All four models' conditioning is a `@dataclass(frozen=True, slots=True)`, swapped via
 `dataclasses.replace` — hence `AttrLatentIO`.
@@ -164,7 +164,7 @@ than the reference's Frobenius norm (shape-agnostic, so `w_s`/`w_z` are comparab
 
 ## 7. Running it
 
-CLI: `sampleworks-guidance --model <protenix|rf3|boltz1> --guidance-type latent_opt …` with
+CLI: `sampleworks-guidance --model <protenix|rf3|boltz1|boltz2> --guidance-type latent_opt …` with
 `--which-latent {single,pair,both}` (default `pair`), `--learning-rate` (0.05), `--outer-steps` (2),
 `--anchor-weight` (0.0), `--max-grad-norm` (1.0), `--bond-length-weight` (5e-5). Also reachable
 programmatically through `run_guidance`. `_run_guidance` resolves the model name to the latent

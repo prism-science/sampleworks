@@ -47,6 +47,9 @@ computed for every combination of altloc pairs and the span is classified by the
 *worst* pair score, as defined by the selected scorer (the minimum for lDDT, the
 maximum for RMSD).
 
+A multi-model ensemble reference is scored with one conformer per model, so its pairs are
+labelled ``model_<i>-model_<j>`` instead of altloc IDs.
+
 Use ``find_altloc_selections.py --min-span 1`` to ensure single-residue side chain only
 selections.
 """
@@ -71,10 +74,8 @@ from sampleworks.utils.atom_array_utils import (
     ATOMWORKS_COMPARISON_OPS,
     BACKBONE_ATOM_TYPES,
     BLANK_ALTLOC_IDS,
-    build_pairwise_altloc_arrays,
-    detect_altlocs,
     get_mask_from_old_selection_string,
-    load_structure_with_altlocs,
+    load_conformer_pairs,
     parse_selection_string,
 )
 from sampleworks.utils.structure_utils import selection_to_residues
@@ -415,15 +416,10 @@ def _process_structure(
         return []
 
     logger.info(f"[{protein}] loading {cif_path}")
-    atom_array = load_structure_with_altlocs(cif_path)
-    altloc_info = detect_altlocs(atom_array)
-    if len(altloc_info.altloc_ids) < 2:
-        logger.warning(
-            f"[{protein}] structure has <2 altloc IDs ({altloc_info.altloc_ids}); skipping"
-        )
+    atom_array, conformer_ids, pair_arrays = load_conformer_pairs(cif_path)
+    if len(conformer_ids) < 2:
+        logger.warning(f"[{protein}] structure has <2 conformers ({conformer_ids}); skipping")
         return []
-
-    pair_arrays = build_pairwise_altloc_arrays(atom_array, altloc_info.altloc_ids)
 
     structure_altloc_mask = ~np.isin(atom_array.altloc_id, list(BLANK_ALTLOC_IDS))
     structure_backbone_mask = np.isin(atom_array.atom_name, BACKBONE_ATOM_TYPES)
@@ -447,12 +443,15 @@ def _process_structure(
         # classified
         covered_res_ids = selection_to_residues(atom_array, selection_str)
         if covered_res_ids and covered_res_ids == all_altloc_res_ids:
-            continue
+            # A single span can cover every altloc residue too (7DMS residue 5). Only the
+            # union carries "((" (see cif_utils.find_altloc_selections), so skip on that mark alone.
+            if "((" in selection_str:
+                continue
         try:
             out = _classify_selection(
                 atom_array=atom_array,
                 pair_arrays=pair_arrays,
-                altloc_ids=altloc_info.altloc_ids,
+                altloc_ids=conformer_ids,
                 selection_str=selection_str,
                 protein=protein,
                 structure_altloc_mask=structure_altloc_mask,

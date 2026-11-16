@@ -161,32 +161,67 @@ def test_perfect_prediction_scores_one():
         )
 
 
-def test_large_error_scores_zero():
-    """All distance differences are greater than 4Å (largest threshold) -> lDDT of 0 expected""" ""
-    gt = _coords([[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]])
-    pred = gt * 10.0  # every pairwise distance off by far more than 4 Å
-    mask = torch.ones(1, 4, dtype=torch.bool)
-    tok = torch.arange(4)
+@pytest.mark.parametrize(
+    ("stretch", "expected_lddt"),
+    [
+        pytest.param(0.25, 1.0, id="passes_all_four"),
+        pytest.param(-0.75, 0.75, id="compressed_passes_1_2_4"),
+        pytest.param(1.5, 0.5, id="passes_2_4"),
+        pytest.param(3.0, 0.25, id="passes_4"),
+        pytest.param(5.0, 0.0, id="passes_none"),
+        pytest.param(0.5, 0.75, id="at_0.5_fails_0.5"),
+        pytest.param(1.0, 0.5, id="at_1_fails_1"),
+        pytest.param(2.0, 0.25, id="at_2_fails_2"),
+        pytest.param(4.0, 0.0, id="at_4_fails_4"),
+    ],
+)
+def test_score_is_fraction_of_thresholds_passed(stretch: float, expected_lddt: float):
+    """A single pair scores the fraction of the 0.5/1/2/4 Å thresholds its error is under.
+
+    The thresholds are strict, so an error equal to a cutoff fails that cutoff.
+
+    Parameters
+    ----------
+    stretch : float
+        Signed change in Å of the predicted 1 Å pair distance.
+    expected_lddt : float
+        Analytic lDDT: a quarter for each threshold that ``|stretch|`` is strictly below.
+    """
+    gt = _coords([[0, 0, 0], [1, 0, 0]])
+    pred = _coords([[0, 0, 0], [1 + stretch, 0, 0]])
+    mask = torch.ones(1, 2, dtype=torch.bool)
+    tok = torch.arange(2)
     lddt, lddt_residues = _calc_lddt(pred, gt, mask, tok)
 
     # single
-    assert torch.allclose(lddt, torch.zeros(1), atol=1e-4)
+    assert lddt.item() == pytest.approx(expected_lddt, abs=1e-6)
 
-    # token-level
-    for token_name in lddt_residues:
-        token_score = lddt_residues[token_name][0]
-        assert token_score == pytest.approx(0, abs=1e-4), (
-            f"Score mismatch for {token_name}: got {token_score}, expected 0"
+    # token-level: both atoms belong only to the one scored pair
+    assert lddt_residues.keys() == {0, 1}
+    for token_name, token_scores in lddt_residues.items():
+        assert token_scores[0] == pytest.approx(expected_lddt, abs=1e-6), (
+            f"Score mismatch for {token_name}: got {token_scores[0]}, expected {expected_lddt}"
         )
 
 
-def test_unresolved_atoms_are_masked_out():
-    """Test whether unresolved atoms are correctly masked out"""
+@pytest.mark.parametrize("masked_atom", [0, 3], ids=["first_atom", "last_atom"])
+def test_unresolved_atoms_are_masked_out(masked_atom: int):
+    """An unresolved atom's pairs are dropped wherever the atom sits in a pair.
+
+    Pairs are scored once as (i, j) with i < j, so atom 0 is only ever the first atom of
+    a pair and atom 3 only ever the second. The two cases cover both halves of the mask.
+
+    Parameters
+    ----------
+    masked_atom : int
+        Index of the unresolved atom, which is also badly placed in the prediction.
+    """
     gt = _coords([[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]])
     pred = gt.clone()
-    pred[0, 3] = torch.tensor([100.0, 0, 0])  # atom 3 badly placed...
-    # ...but atom 3 is unresolved, so all of its pairs are dropped from scoring.
-    mask = torch.tensor([[True, True, True, False]])
+    pred[0, masked_atom] = torch.tensor([100.0, 0, 0])  # badly placed...
+    # ...but unresolved, so all of its pairs are dropped from scoring.
+    mask = torch.ones(1, 4, dtype=torch.bool)
+    mask[0, masked_atom] = False
     tok = torch.arange(4)
     lddt, lddt_residues = _calc_lddt(pred, gt, mask, tok)
 
@@ -198,11 +233,12 @@ def test_unresolved_atoms_are_masked_out():
     # all atoms are invalid, which may(?) happen since crd_mask_L and selected_token_ids
     # do not check against each other. In this case, we output NaN to differentiate from a
     # true measured lDDT of 0.
-    for token_name in lddt_residues:
-        token_score = lddt_residues[token_name][0]
+    assert lddt_residues.keys() == {0, 1, 2, 3}
+    for token_name, token_scores in lddt_residues.items():
+        token_score = token_scores[0]
 
-        # atom 3 should score 0
-        if token_name == 3:
+        # the unresolved atom has no scored pairs
+        if token_name == masked_atom:
             assert np.isnan(token_score), (
                 f"Score mismatch for {token_name}: got {token_score}, expected NaN"
             )
@@ -269,41 +305,35 @@ def test_distance_cutoff_excludes_far_pairs():
 
 
 def test_batched_models():
-    """Test where batch dimension size > 1"""
-    gt = _coords([[0, 0, 0], [1, 0, 0], [2, 0, 0]]).expand(2, 3, 3).contiguous()
+    """Each model is scored against its own "ground truth" with its mask.
+
+    Model 0 is 3 atoms with 1 Å spacing with every atom resolved: 3 pairs,
+    all passing. Model 1's ground truth has 2 Å spacing and atom 0 unresolved, leaving
+    only pair (1, 2), predicted 0.75 Å too long: it passes the 1/2/4 Å thresholds, so
+    gets lddt score of 0.75. Model 1 has fewer scored pairs than model 0, so its pair list is padded
+    """
+    gt = torch.tensor(
+        [
+            [[0, 0, 0], [1, 0, 0], [2, 0, 0]],
+            [[0, 0, 0], [2, 0, 0], [4, 0, 0]],
+        ],
+        dtype=torch.float32,
+    )  # (2, 3, 3)
     pred = gt.clone()
-    # changing this test example to make the corruption different per-token
-    pred[1] = _coords([[0, 0, 0], [1, 0, 0], [20, 0, 0]])[0]  # second model is bad
-    mask = torch.ones(2, 3, dtype=torch.bool)
+    pred[1, 0] = torch.tensor([50.0, 0, 0])  # unresolved, so its misplacement is ignored
+    pred[1, 2] = torch.tensor([4.75, 0, 0])  # pair (1, 2) is 2.75 Å, 0.75 Å off
+    mask = torch.tensor([[True, True, True], [False, True, True]])
     tok = torch.arange(3)
     lddt, lddt_residues = _calc_lddt(pred, gt, mask, tok)
 
     # single
-    assert lddt.shape == (2,)
-    assert torch.allclose(lddt[0], torch.tensor(1.0), atol=1e-4)
-    assert torch.allclose(lddt[1], torch.tensor(1 / 3), atol=1e-4)
+    torch.testing.assert_close(lddt, torch.tensor([1.0, 0.75]))
 
-    # token-level
-    assert len(lddt_residues) == 3  # n tokens
-    for token_name in lddt_residues:
-        token_scores = lddt_residues[token_name]
-        assert len(token_scores) == 2  # batch size
-
-        for i, token_score in enumerate(token_scores):
-            # First model is perfect
-            if i == 0:
-                assert token_score == pytest.approx(1, abs=1e-4), (
-                    f"Score mismatch for {token_name}: got {token_score}, expected 1"
-                )
-
-            # Second model, first two tokens have one bad pair, one perfect pair
-            elif token_name in (0, 1):
-                assert token_score == pytest.approx(0.5, abs=1e-4), (
-                    f"Score mismatch for {token_name}: got {token_score}, expected 0.5"
-                )
-
-            # Second model, last token is bad
-            else:
-                assert token_score == pytest.approx(0, abs=1e-4), (
-                    f"Score mismatch for {token_name}: got {token_score}, expected 0"
-                )
+    # Per-token scores, one entry per model. Atom 0 is unresolved in model 1, so it
+    # appears in no scored pair there and its score is NaN.
+    expected_residues = {0: [1.0, np.nan], 1: [1.0, 0.75], 2: [1.0, 0.75]}
+    assert lddt_residues.keys() == expected_residues.keys()
+    for token_name, expected_scores in expected_residues.items():
+        np.testing.assert_allclose(
+            lddt_residues[token_name], expected_scores, atol=1e-6, err_msg=f"token {token_name}"
+        )

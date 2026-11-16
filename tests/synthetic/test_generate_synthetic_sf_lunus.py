@@ -405,7 +405,7 @@ class TestSolvent:
     def test_calibrated_cutoff_reproduces_the_geometric_fraction(
         self, polymer_6b8x, crystal_6b8x, cpu_device
     ):
-        from lunus.sf import mask_occupancy, splat_density, symmetrize_sum
+        from lunus.sf import compute_density, mask_occupancy, symmetrize_sum
 
         atom_array = polymer_6b8x
         cell, spacegroup = crystal_6b8x
@@ -419,7 +419,7 @@ class TestSolvent:
         solvent = lunus_sf.calibrate_solvent(setup, coords, occupancies, target)
 
         density = symmetrize_sum(
-            splat_density(
+            compute_density(
                 coords @ setup.frac_matrix.T,
                 setup.element_idx,
                 occupancies,

@@ -1,12 +1,17 @@
 """Tests for weighted loss combination."""
 
+from pathlib import Path
+
 import pytest
 import torch
 from sampleworks.core.losses.composite import CompositeLoss
-from sampleworks.core.losses.config import build_loss, LossConfig
+from sampleworks.core.losses.config import build_loss, LossConfig, LossEntry
 from sampleworks.core.losses.protocol import LossFunctionProtocol, LossInputs
+from sampleworks.core.losses.real_space_density import RealSpaceLossFunction
 from sampleworks.core.losses.registry import LossBuildContext
 from sampleworks.utils.guidance_constants import Losses
+
+from tests.losses.loss_input_helpers import build_loss_input_tensors_without_coords
 
 
 class QuadraticLoss:
@@ -50,18 +55,48 @@ def per_atom(n_atoms: int = 3) -> dict:
     )
 
 
+def density_options(density_path: Path, loss_order: int = 1) -> dict:
+    return {"density": str(density_path), "resolution": 1.8, "loss_order": loss_order}
+
+
+def batched_inputs(test_coordinates_1vme, device) -> dict:
+    """The 1vme occupied-atom coordinates and their per-atom inputs, as a batch of one."""
+    coords_1vme, atom_array = test_coordinates_1vme
+    elements, b_factors, occupancies = build_loss_input_tensors_without_coords(atom_array, device)
+    return dict(
+        coordinates=coords_1vme.unsqueeze(0),
+        elements=elements.unsqueeze(0),
+        b_factors=b_factors.unsqueeze(0),
+        occupancies=occupancies.unsqueeze(0),
+    )
+
+
 class TestCompositeValue:
     def test_is_a_loss_function(self):
         assert isinstance(CompositeLoss([QuadraticLoss()]), LossFunctionProtocol)
 
     def test_value_is_the_weighted_sum_of_its_terms(self):
+        """The composite value is each term's value scaled by its weight, then summed.
+
+        The weights here sum to one, so this checks the weighted sum itself, not the
+        normalization covered by ``test_a_single_term_keeps_its_weight``.
+        """
         terms = [QuadraticLoss(1.0), QuadraticLoss(3.0)]
         composite = CompositeLoss(terms, [0.25, 0.75])
+        x = coords()
 
-        combined = composite(coords(), **per_atom())
+        combined = composite(x, **per_atom())
 
-        expected = 0.25 * terms[0](coords()) + 0.75 * terms[1](coords())
+        expected = 0.25 * terms[0](x) + 0.75 * terms[1](x)
         assert torch.isclose(combined, expected)
+
+    def test_a_single_term_keeps_its_weight(self):
+        """Weights are used as given, not renormalized to sum to one."""
+        term = QuadraticLoss(2.0)
+        composite = CompositeLoss([term], [0.5])
+        x = coords()
+
+        assert torch.equal(composite(x, **per_atom()), 0.5 * term(x))
 
     def test_default_weights_average_the_terms(self):
         composite = CompositeLoss([QuadraticLoss(1.0), QuadraticLoss(3.0)])
@@ -117,32 +152,57 @@ def test_prepare_is_forwarded_only_to_terms_that_need_it():
 class TestBuildLoss:
     """build_loss turns a configuration into the loss a run scores against."""
 
-    def test_a_single_loss_at_full_weight_is_not_wrapped(self, monkeypatch):
-        monkeypatch.setattr(
-            "sampleworks.core.losses.config.build_single_loss",
-            lambda loss, options, context: QuadraticLoss(),
+    def test_a_single_loss_at_full_weight_is_not_wrapped(
+        self, density_path_1vme, device, structure_1vme_density
+    ):
+        config = LossConfig.single(Losses.REAL_SPACE_DENSITY, **density_options(density_path_1vme))
+
+        loss = build_loss(config, LossBuildContext(structure=structure_1vme_density, device=device))
+
+        assert isinstance(loss, RealSpaceLossFunction)
+
+    @pytest.mark.gpu
+    def test_a_single_loss_scores_at_its_configured_weight(
+        self, density_path_1vme, device, structure_1vme_density, test_coordinates_1vme
+    ):
+        context = LossBuildContext(structure=structure_1vme_density, device=device)
+        full_weight = build_loss(
+            LossConfig.single(Losses.REAL_SPACE_DENSITY, **density_options(density_path_1vme)),
+            context,
         )
-        config = LossConfig.single(Losses.REAL_SPACE_DENSITY, density="m.ccp4", resolution=1.8)
-
-        loss = build_loss(config, LossBuildContext(structure={}))
-
-        assert isinstance(loss, QuadraticLoss)
-
-    def test_several_losses_are_combined_with_their_weights(self, monkeypatch):
-        scales = {Losses.REAL_SPACE_DENSITY: 1.0, Losses.STRUCTURE_FACTOR: 3.0}
-        monkeypatch.setattr(
-            "sampleworks.core.losses.config.build_single_loss",
-            lambda loss, options, context: QuadraticLoss(scales[loss]),
+        half_weight = build_loss(
+            LossConfig(
+                entries=(
+                    LossEntry(
+                        loss=Losses.REAL_SPACE_DENSITY,
+                        weight=0.5,
+                        options=density_options(density_path_1vme),
+                    ),
+                )
+            ),
+            context,
         )
-        config = LossConfig.from_mapping(
-            {
-                "real_space_density": {"weight": 0.25},
-                "structure_factor": {"weight": 0.75},
-            }
+        inputs = batched_inputs(test_coordinates_1vme, device)
+
+        assert torch.equal(half_weight(**inputs), 0.5 * full_weight(**inputs))
+
+    @pytest.mark.gpu
+    def test_several_losses_are_combined_with_their_weights(
+        self, density_path_1vme, device, structure_1vme_density, test_coordinates_1vme
+    ):
+        context = LossBuildContext(structure=structure_1vme_density, device=device)
+        first_order = build_loss(
+            LossConfig.single(Losses.REAL_SPACE_DENSITY, **density_options(density_path_1vme, 1)),
+            context,
         )
+        second_order = build_loss(
+            LossConfig.single(Losses.REAL_SPACE_DENSITY, **density_options(density_path_1vme, 2)),
+            context,
+        )
+        combined = CompositeLoss([first_order, second_order], weights=[0.25, 0.75])
+        inputs = batched_inputs(test_coordinates_1vme, device)
 
-        loss = build_loss(config, LossBuildContext(structure={}))
-
-        assert isinstance(loss, CompositeLoss)
-        assert loss.weights == [0.25, 0.75]
-        assert torch.isclose(loss(coords(), **per_atom()), QuadraticLoss(2.5)(coords()))
+        assert combined.weights == [0.25, 0.75]
+        assert torch.isclose(
+            combined(**inputs), 0.25 * first_order(**inputs) + 0.75 * second_order(**inputs)
+        )

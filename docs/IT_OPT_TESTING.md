@@ -16,8 +16,8 @@ outputs when gradients are on (to avoid double-backward across the denoising ste
 coordinate guidance, but it would make a *latent* gradient **exactly zero**, silently. The
 `detach_unless_leaf` helper in [models/protenix/wrapper.py](../src/sampleworks/models/protenix/wrapper.py)
 handles both paths automatically: a cached latent detaches, but a latent IT-opt injected as an
-optimizable leaf (`requires_grad=True`) is kept attached. No manual edit is needed — if the §2 Level-0
-check fails, confirm the leaf actually has `requires_grad=True` and that `single_attr`/`pair_attr` are
+optimizable copy (`requires_grad=True`) is kept attached. No manual edit is needed — if the §2 Level-0
+check fails, confirm the copy actually has `requires_grad=True` and that `single_attr`/`pair_attr` are
 `s_trunk`/`z_trunk`.
 
 **(b) For `z` optimization, disable the diffusion shared-vars cache.** `pair_z`, `p_lm`, `c_l` are
@@ -41,10 +41,12 @@ pixi run -e protenix-dev python -m pytest tests/models/test_latent_adapter.py -q
 
 ### Level 0 — Does the gradient reach the latent? (the #1 failure mode)
 
-<!-- TODO(#422): make this a GPU test once we can run checkpoint-dependent tests in CI. -->
+This check is also a test, tests/models/test_latent_gradient.py, marked gpu and slow; CI skips it
+until #422 lands.
 
-Needs no loss; confirms precondition (a). Inject a `requires_grad` leaf as `z_trunk` (or
-`s_trunk`), run one differentiable denoiser forward, and check the leaf received a gradient:
+Needs no loss; confirms precondition (a). Inject a copy of `z_trunk` (or `s_trunk`) with
+`requires_grad` on, run one differentiable denoiser forward, and check that the copy received a
+gradient:
 
 ```python
 import torch
@@ -60,8 +62,8 @@ feats = model.featurize(structure)  # trunk pass
 io = AttrLatentIO(single_attr="s_trunk", pair_attr="z_trunk")
 
 z0 = io.read_pair(feats.conditioning).detach()
-z_leaf = z0.clone().requires_grad_(True)
-cond = io.write_pair(feats.conditioning, z_leaf)
+z_copy = z0.clone().requires_grad_(True)
+cond = io.write_pair(feats.conditioning, z_copy)
 feats2 = GenerativeModelInput(conditioning=cond)  # conditioning-only (x_init removed in #330)
 
 sampler = AF3EDMSampler(EDMSamplerConfig(device=str(device), augmentation=False))
@@ -73,16 +75,12 @@ with torch.enable_grad():
     x0 = model.step(x, t_hat, features=feats2)
     x0.sum().backward()
 
-print("z_leaf.grad is None:", z_leaf.grad is None)
-print("z_leaf.grad abs-sum:", None if z_leaf.grad is None else z_leaf.grad.abs().sum().item())
+print("z_copy.grad is None:", z_copy.grad is None)
+print("z_copy.grad abs-sum:", None if z_copy.grad is None else z_copy.grad.abs().sum().item())
 ```
 
 **Expect** `grad is None → False`, `abs-sum → > 0`. Repeat with `read_single`/`write_single` and
 `s_trunk` to check `s`.
-
-> With the `z` cache **on**, this still shows a non-zero grad (through the direct `z_trunk` arg) but
-> the forward used the stale `pair_z`. Level 0 confirms the leaf reaches the trunk, not cache
-> correctness — that is why §1(b) matters for real `z` runs.
 
 ### Level 1 — A tiny end-to-end run
 
@@ -123,7 +121,7 @@ Raise `num_steps` (→200), `outer_steps` (→2–4), `ensemble_size`; turn on `
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `latent.grad is None` / zero (Level 0) | Injected latent isn't a leaf reaching the trunk (§1a); or you optimized a latent the model doesn't route to. | Confirm `requires_grad=True`; use `single_attr="s_trunk"`, `pair_attr="z_trunk"` for Protenix. |
+| `latent.grad is None` / zero (Level 0) | Injected latent isn't a `requires_grad` copy reaching the trunk (§1a); or you optimized a latent the model doesn't route to. | Confirm `requires_grad=True`; use `single_attr="s_trunk"`, `pair_attr="z_trunk"` for Protenix. |
 | `z` grad non-zero but structures don't respond | Stale `pair_z` cache (§1b). | `enable_diffusion_shared_vars_cache=False`, or optimize single-only first. |
 | Optimization loss is flat | LR too small; anchor too strong (latents pinned); or gradient fully clipped. | Raise `learning_rate`; lower `anchor_weight_*`; raise `max_grad_norm`. Log the pre-clip grad norm. |
 | Loss drops but structures degrade | Latent drifted off-manifold. | Raise `anchor_weight_*`; fewer steps/rounds; raise `bond_length_weight`. |

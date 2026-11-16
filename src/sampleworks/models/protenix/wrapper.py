@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -37,7 +38,7 @@ from sampleworks.models.protocol import GenerativeModelInput
 from sampleworks.utils.framework_utils import match_batch
 from sampleworks.utils.guidance_constants import StructurePredictor
 from sampleworks.utils.msa import MSAManager
-from sampleworks.utils.torch_utils import send_tensors_in_dict_to_device
+from sampleworks.utils.torch_utils import gaussian_prior, send_tensors_in_dict_to_device
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,38 +348,29 @@ class ProtenixWrapper:
         json_path, json_dict = create_protenix_input_from_structure(structure, out_dir)
 
         if use_msa:
-            # first try the MSAManager
+            # Rebuilt every call: MSAManager caches the MSA search itself by sequence hash,
+            # so a file cache here only risks reusing another structure's input (#412).
+            sequence_data: dict[str | int, str] = {
+                n: seq_data["proteinChain"]["sequence"]
+                for n, seq_data in enumerate(json_dict["sequences"])
+                if "proteinChain" in seq_data
+            }
+            msa_paths = self.msa_manager.get_msa(
+                sequence_data,
+                msa_pairing_strategy="complete",  # not actually passed through for Protenix
+                structure_predictor=StructurePredictor.PROTENIX,
+            )
 
-            import json
-
-            updated_json_path = json_path.with_name(f"{json_path.stem}-add-msa.json")
-            if not updated_json_path.exists():
-                # get all the required sequences from the json_dict
-                sequence_data: dict[str | int, str] = {
-                    n: seq_data["proteinChain"]["sequence"]
-                    for n, seq_data in enumerate(json_dict["sequences"])
-                    if "proteinChain" in seq_data
+            for idx in sequence_data:
+                # see https://github.com/bytedance/Protenix/blob/main/runner/msa_search.py#L57
+                json_dict["sequences"][idx]["proteinChain"]["msa"] = {
+                    "precomputed_msa_dir": str(msa_paths[idx]),
+                    "pairing_db": "uniref100",
                 }
-                msa_paths = self.msa_manager.get_msa(
-                    sequence_data,
-                    msa_pairing_strategy="complete",  # not actually passed through for Protenix
-                    structure_predictor=StructurePredictor.PROTENIX,
-                )
 
-                for idx in sequence_data:
-                    # see https://github.com/bytedance/Protenix/blob/main/runner/msa_search.py#L57
-                    json_dict["sequences"][idx]["proteinChain"]["msa"] = {
-                        "precomputed_msa_dir": str(msa_paths[idx]),
-                        "pairing_db": "uniref100",
-                    }
-
-                # Dump the new config to a file--for consistency with Protenix, not really needed.
-                with open(updated_json_path, "w") as f:
-                    json.dump([json_dict], f)
-
-            with open(updated_json_path) as f:
-                json_data = json.load(f)
-                json_dict = json_data[0]
+            # Written for inspection only, mirroring Protenix's own layout; never read back.
+            with open(json_path.with_name(f"{json_path.stem}-add-msa.json"), "w") as f:
+                json.dump([json_dict], f)
 
         try:
             sample2feat = SampleDictToFeatures(json_dict)
@@ -708,13 +700,7 @@ class ProtenixWrapper:
         ValueError
             If both features and shape are None, or if shape is invalid.
         """
-        if shape is not None:
-            if len(shape) != 2 or shape[1] != 3:
-                raise ValueError("shape must be of the form (num_atoms, 3)")
-            return torch.randn((batch_size, *shape), device=self.device)
-
-        if features is None or features.conditioning is None:
-            raise ValueError("Either features or shape must be provided to initialize_from_prior()")
-
-        cond = features.conditioning
-        return torch.randn((batch_size, cond.num_atoms, 3), device=self.device)
+        num_atoms = None
+        if features is not None and features.conditioning is not None:
+            num_atoms = features.conditioning.num_atoms
+        return gaussian_prior(batch_size, num_atoms, self.device, shape=shape)

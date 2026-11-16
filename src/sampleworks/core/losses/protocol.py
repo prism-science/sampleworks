@@ -7,6 +7,7 @@ import einx
 import numpy as np
 import torch
 from jaxtyping import Float, Int
+
 from sampleworks.utils.elements import elements_to_scattering_indices
 
 

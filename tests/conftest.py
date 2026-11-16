@@ -32,6 +32,7 @@ from sampleworks.utils.guidance_constants import (
     TrajectorySamplers,
     TrajectoryScalers,
 )
+from sampleworks.utils.guidance_script_arguments import _resolve_checkpoint
 from sampleworks.utils.imports import (
     BOLTZ_AVAILABLE,
     PROTENIX_AVAILABLE,
@@ -472,7 +473,7 @@ def structure_1vme(resources_dir: Path) -> dict:
 
 
 @pytest.fixture(scope="session")
-def structure_1vme_density(resources_dir: Path) -> dict:
+def structure_1vme_density_input(resources_dir: Path) -> dict:
     """1VME density input. Its chain A also carries CL/FEO ligand residues (malformed)."""
     return parse_and_remove_hydrogens(resources_dir / "1vme" / "1VME_single_001_density_input.cif")
 
@@ -686,24 +687,38 @@ def annotate_structure_for_wrapper_type(
     return annotate_structure_for_wrapper(info, structure, temp_output_dir, **kwargs)
 
 
+def _checkpoint_or_skip(model_key: str) -> Path:
+    """Resolve a checkpoint the way guidance runs do, skipping the test if none exists.
+
+    Parameters
+    ----------
+    model_key
+        Key into the guidance checkpoint registry, e.g. ``"boltz2"``.
+
+    Returns
+    -------
+    Path
+        The first existing checkpoint path.
+    """
+    try:
+        path = _resolve_checkpoint(model_key)
+    except ValueError as e:
+        pytest.skip(str(e))
+    return Path(path)
+
+
 @pytest.fixture(scope="session")
 def boltz1_checkpoint_path() -> Path:
     if not BOLTZ_AVAILABLE:
         pytest.skip("Boltz dependencies not installed in this environment")
-    path = Path("~/.boltz/boltz1_conf.ckpt").expanduser()
-    if not path.exists():
-        pytest.skip(f"Boltz1 checkpoint not found at {path}")
-    return path
+    return _checkpoint_or_skip("boltz1")
 
 
 @pytest.fixture(scope="session")
 def boltz2_checkpoint_path() -> Path:
     if not BOLTZ_AVAILABLE:
         pytest.skip("Boltz dependencies not installed in this environment")
-    path = Path("~/.boltz/boltz2_conf.ckpt").expanduser()
-    if not path.exists():
-        pytest.skip(f"Boltz2 checkpoint not found at {path}")
-    return path
+    return _checkpoint_or_skip("boltz2")
 
 
 @pytest.fixture(scope="session")
@@ -735,10 +750,7 @@ def protenix_checkpoint_path() -> Path:
     # Protenix would auto-download the checkpoint on first use if missing. Skip instead of
     # reaching out to the network so non-GPU/offline runs (e.g. CI) don't hang or time out
     # constructing the wrapper (see #216). Provision the checkpoint to run these tests.
-    path = Path(getsitepackages()[0]) / "release_data/checkpoint/protenix_base_default_v0.5.0.pt"
-    if not path.exists():
-        pytest.skip(f"Protenix checkpoint not found at {path}")
-    return path
+    return _checkpoint_or_skip("protenix")
 
 
 @pytest.fixture(scope="session")
@@ -755,10 +767,7 @@ def protenix_wrapper(protenix_checkpoint_path: Path, device: torch.device):
 def rf3_checkpoint_path() -> Path:
     if not RF3_AVAILABLE:
         pytest.skip("RF3 dependencies not installed in this environment")
-    path = Path("~/.foundry/checkpoints/rf3_foundry_01_24_latest.ckpt").expanduser()
-    if not path.exists():
-        pytest.skip(f"RF3 checkpoint not found at {path}")
-    return path
+    return _checkpoint_or_skip("rf3")
 
 
 @pytest.fixture(scope="session")
@@ -808,15 +817,19 @@ def temp_output_dir(tmp_path: Path) -> Generator[Path, None, None]:
 
 
 @pytest.fixture(scope="session")
-def density_map_1vme(resources_dir: Path):
+def density_path_1vme(resources_dir: Path) -> Path:
+    return resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB_1.80A.ccp4"
+
+
+@pytest.fixture(scope="session")
+def density_map_1vme(density_path_1vme: Path):
     from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.volume import (
         XMap,
     )
 
-    map_path = resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB_1.80A.ccp4"
-    if not map_path.exists():
-        pytest.skip(f"Density map not found at {map_path}")
-    return XMap.fromfile(str(map_path), resolution=1.8)
+    if not density_path_1vme.exists():
+        pytest.skip(f"Density map not found at {density_path_1vme}")
+    return XMap.fromfile(str(density_path_1vme), resolution=1.8)
 
 
 @pytest.fixture(scope="module")

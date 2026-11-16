@@ -100,6 +100,15 @@ pixi run -e analysis python scripts/eval/<script> \
 --occupancies 0.0 0.25 0.5 0.75 1.0 \
 --n-jobs 16
 ```
+Run directly, the scripts log only to the terminal (`run_analysis` already saves each job's output
+to `<results dir>/<job>_run.log`). To keep a log file, redirect the output. The scripts log to
+stderr, so redirect both streams:
+
+```shell
+pixi run -e analysis python scripts/eval/<script> ... &> <script>.log            # file only
+pixi run -e analysis python scripts/eval/<script> ... 2>&1 | tee <script>.log    # file and terminal
+```
+
 The `--occupancies` argument is a list of occupancy values to evaluate, which should correspond to
 what you used in the grid search.
 
@@ -114,17 +123,29 @@ The file has the following columns:
 - `protein`, the PDB id of the protein to evaluate.
 - `selection`, a semicolon separated list of selections, with a (very) limited PyMOL like algebra
 or a more complete atomworks-style selection syntax. See examples in the files in
-`sampleworks/data/`. Selections are only used by the RSCC, LDDT, and RMSD scripts.
+`sampleworks/data/`. Selections are used by the RSCC, LDDT, RMSD, `classify_altloc_regions.py`,
+and `find_max_rmsd_subsegment.py` scripts.
 - `structure_pattern`, the filename of the reference PDB file passed to the sampleworks generation script,
   probably through an input configuration CSV file if you used the `run_grid_search.py` script. If a
   different reference structure was used for different occupancies, you can use the variable `occ_str`
   in the pattern, which is replaced with the occupancy values one by one.
-  The reference is either a single model with altlocs (e.g. a deposited structure) or a multi-model
-  ensemble (e.g. from the synthetic_sampleworks preprocessing pipeline). This multi-model ensemble shares
-  one `altloc_id` annotation: blank on the anchor atoms every conformer shares (i.e. previously the blank
-  altloc in the single model source structure), and a non-blank label (e.g. `X`) elsewhere. The LDDT and
-  RMSD scripts align predicted and reference structures on the anchors plus the selection. The RSCC script
-  aligns to the first model, consistent with the single model where only first altloc kept.
+  The reference takes one of two forms:
+  - **Single model with altlocs** (e.g. a deposited structure).
+  - **Multi-model ensemble** (e.g. from the synthetic_sampleworks preprocessing pipeline), one conformer
+    per model, labelled `model_<i>`. All models share one `altloc_id` annotation (enforced by
+    `AtomArrayStack`), used as a flag rather than an identifier: blank on the anchor atoms every conformer
+    shares, non-blank (e.g. `X`) elsewhere. Only blank vs. non-blank matters. Anchor atoms' coordinates
+    may differ slightly (e.g. after per-conformer relaxation) across models.
+
+    How the evaluation scripts use this altloc annotation in multi-model reference structure:
+    - LDDT scores each reference conformer (anchors plus the selection) by interatomic distances, so no
+      superposition is needed.
+    - RMSD superimposes on all common atoms of that conformer, then reports RMSD over the selection.
+    - RSCC aligns to the first model, matching the single-model case where only the first altloc is kept.
+    - `find_altloc_selections.py` takes contiguous runs of non-blank altloc residues as the altloc spans.
+    - `classify_altloc_regions.py` and `find_max_rmsd_subsegment.py` compare every pair of models and
+      report pairs as `model_i-model_j` instead of pairs of altloc IDs like `A-B`.
+
   See `build_reference_frames` in `sampleworks/eval/grid_search_eval_utils.py` for more details.
 - `map_pattern`, Similar to `structure_pattern`, but for the density map files.
 - `base_map_dir` The code assumes the maps for each protein are in their own subdirectory of the inputs

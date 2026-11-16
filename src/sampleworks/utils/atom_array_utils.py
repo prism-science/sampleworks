@@ -985,6 +985,50 @@ def build_pairwise_altloc_arrays(
     return pairs
 
 
+def load_conformer_pairs(
+    path: Path,
+) -> tuple[AtomArray, list[str], dict[tuple[str, str], tuple[AtomArrayStack, AtomArrayStack]]]:
+    """Load a structure and pair up its conformers for pairwise comparison.
+
+    A single-model structure has one conformer per altloc ID, paired by
+    ``build_pairwise_altloc_arrays``. A multi-model ensemble has one conformer per model,
+    labelled ``model_<i>``. Its altloc annotation is consistent across models, so every model
+    pair is already atom-matched and model 0 stands in for the whole structure.
+
+    Parameters
+    ----------
+    path
+        Path to the structure file.
+
+    Returns
+    -------
+    atom_array : AtomArray
+        The structure (model 0 of an ensemble) for resolving selections and altloc masks.
+    conformer_ids : list[str]
+        Altloc IDs, or ``model_<i>`` labels for an ensemble.
+    pair_arrays : dict[tuple[str, str], tuple[AtomArrayStack, AtomArrayStack]]
+        ``(id_i, id_j) -> (conformer_i, conformer_j)`` for ``i < j``, each a one-frame stack
+        with matched atoms. Empty when fewer than two conformers exist.
+    """
+    structure = load_any(path, altloc="all", extra_fields=["occupancy", "b_factor"])
+    if isinstance(structure, AtomArrayStack) and structure.stack_depth() > 1:
+        conformer_ids = [f"model_{i}" for i in range(structure.stack_depth())]
+        pair_arrays = {
+            (conformer_ids[i], conformer_ids[j]): (structure[i : i + 1], structure[j : j + 1])
+            for i in range(len(conformer_ids))
+            for j in range(i + 1, len(conformer_ids))
+        }
+        return cast(AtomArray, structure[0]), conformer_ids, pair_arrays
+
+    atom_array = cast(
+        AtomArray, structure[0] if isinstance(structure, AtomArrayStack) else structure
+    )
+    conformer_ids = detect_altlocs(atom_array).altloc_ids
+    if len(conformer_ids) < 2:
+        return atom_array, conformer_ids, {}
+    return atom_array, conformer_ids, build_pairwise_altloc_arrays(atom_array, conformer_ids)
+
+
 def _closest_canonical_amino_acid(res_name: str) -> str | None:
     """Map a (possibly modified) residue name to its canonical parent amino acid.
 

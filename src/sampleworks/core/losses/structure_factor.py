@@ -11,11 +11,12 @@ import reciprocalspaceship as rs
 import torch
 from jaxtyping import Bool, Complex, Float, Int
 from loguru import logger
+from SFC_Torch import SFcalculator
+from SFC_Torch.io import PDBParser
+
 from sampleworks.core.losses.options import StructureFactorOptions
 from sampleworks.core.losses.registry import LossBuildContext
 from sampleworks.synthetic.synthetic_utils import atomarray_to_gemmi, resolve_mtz_column
-from SFC_Torch import SFcalculator
-from SFC_Torch.io import PDBParser
 
 
 if TYPE_CHECKING:
@@ -129,7 +130,7 @@ class StructureFactorLossFunction:
             * ``"off"`` (default): ``|Fprotein|`` — no solvent.
             * ``"combined"``: ``|Ftotal|`` with one bulk-solvent mask from the combined
               protein density, ``mask(<rho>)`` — matches the altloc single-structure
-              ``Ftotal`` that ``generate_synthetic_sf`` writes to the MTZ.
+              ``Ftotal`` that ``generate_synthetic_sf_sfc`` writes to the MTZ.
             * ``"per_conformer"``: ``|Ftotal|`` with the mean of per-conformer solvent
               mask ``<mask(rho)>`` — the ensemble-averaged bulk solvent. Each conformer
               contributes a solvent mask at 1/batch_size weight.
@@ -370,7 +371,7 @@ class StructureFactorLossFunction:
         self.sfc.inspect_data()
 
         # Ftotal uses the default (unrefined) scales kiso=1, kmask=0.35, small uaniso,
-        # matching generate_synthetic_sf's Ftotal. They don't depend on coordinates, so
+        # matching generate_synthetic_sf_sfc's Ftotal. They don't depend on coordinates, so
         # set them once here. _set_scales only needs atom_pos_frac (set at construction)
         # and n_bins (set by the experiment init) for dtype/device and bin count.
         if self.bulk_solvent != "off":

@@ -16,6 +16,7 @@ import torch
 from biotite.structure import AtomArray
 from sampleworks.models.protocol import GenerativeModelInput
 from sampleworks.utils.atom_reconciler import AtomReconciler
+from sampleworks.utils.elements import elements_to_scattering_indices
 from sampleworks.utils.structure_utils import SampleworksProcessedStructure
 
 
@@ -68,12 +69,22 @@ def test_falls_back_to_the_structure_array_when_the_model_has_none():
     assert processed.loss_atom_array is structure_array
 
 
-def test_loss_inputs_are_built_from_the_same_array():
-    """The whole point of the property: one choice, not two that can drift."""
+def test_loss_inputs_use_model_topology_and_elements():
+    """The whole point of the property: one choice, not two that can drift.
+
+    The arrays have equal length, so only the element tensor (N from the model,
+    not C from the input file) and the carried topology reveal which one the
+    loss inputs were built from.
+    """
     structure_array = _atom_array(4, element="C")
     model_array = _atom_array(4, element="N")
     processed = _processed(structure_array, model_array)
 
     loss_inputs = processed.to_loss_inputs()
 
-    assert loss_inputs.elements.shape[-1] == len(processed.loss_atom_array)
+    # (ensemble_size, n_atoms) == (1, 4)
+    expected_elements = torch.tensor([elements_to_scattering_indices(model_array.element)])
+    structure_elements = torch.tensor([elements_to_scattering_indices(structure_array.element)])
+    assert not torch.equal(expected_elements, structure_elements)
+    assert torch.equal(loss_inputs.elements, expected_elements)
+    assert loss_inputs.atom_array is model_array

@@ -16,6 +16,7 @@ import torch
 pytest.importorskip("lunus.sf", reason="lunus[sf] not installed")
 
 from sampleworks.synthetic.generate_synthetic_sf_lunus import process_batch
+from sampleworks.synthetic.synthetic_utils import SyntheticStructureOptions
 
 
 RESOLUTION = 4.0  # coarse: these tests are about bookkeeping, not accuracy
@@ -54,8 +55,7 @@ def _run(batch, **kwargs) -> dict:
         seed=0,
         device=torch.device("cpu"),
         n_jobs=1,
-        strip_hydrogens=True,
-        strip_waters=True,
+        structure_options=SyntheticStructureOptions(strip_hydrogens=True, strip_waters=True),
         **kwargs,
     )
 

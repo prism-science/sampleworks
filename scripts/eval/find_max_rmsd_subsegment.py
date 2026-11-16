@@ -26,11 +26,7 @@ from biotite.structure import AtomArrayStack, rmsd as biotite_rmsd
 from joblib import delayed, Parallel
 from loguru import logger
 from sampleworks.eval.grid_search_eval_utils import resolve_cif_path
-from sampleworks.utils.atom_array_utils import (
-    build_pairwise_altloc_arrays,
-    detect_altlocs,
-    load_structure_with_altlocs,
-)
+from sampleworks.utils.atom_array_utils import load_conformer_pairs
 from sampleworks.utils.structure_utils import selection_to_residues
 
 
@@ -107,15 +103,11 @@ def _process_structure(
         return []
 
     logger.info(f"[{protein}] loading {cif_path}")
-    atom_array = load_structure_with_altlocs(cif_path)
-    altloc_info = detect_altlocs(atom_array)
-    if len(altloc_info.altloc_ids) < 2:
-        logger.warning(
-            f"[{protein}] structure has <2 altloc IDs ({altloc_info.altloc_ids}); skipping"
-        )
+    atom_array, conformer_ids, pair_arrays = load_conformer_pairs(cif_path)
+    if len(conformer_ids) < 2:
+        logger.warning(f"[{protein}] structure has <2 conformers ({conformer_ids}); skipping")
         return []
 
-    pair_arrays = build_pairwise_altloc_arrays(atom_array, altloc_info.altloc_ids)
     if not pair_arrays:
         logger.warning(f"[{protein}] no valid altloc pairs could be built; skipping")
         return []

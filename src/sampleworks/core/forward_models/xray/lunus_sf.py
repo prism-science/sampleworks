@@ -30,7 +30,7 @@ Grid evaluation, blur and taper
 -------------------------------
 Each atom's density, the sum of Gaussians in ``atom_A`` and ``atom_lam``, is
 evaluated on the voxels within a cutoff radius and added to the grid
-(``lunus.sf.splat_density``); the FFT of the grid gives ``F(hkl)``. This is the
+(``lunus.sf.compute_density``); the FFT of the grid gives ``F(hkl)``. This is the
 grid-based alternative to summing over atoms in reciprocal space.
 
 The blur is an anti-aliasing correction. Atoms with low B need a fine grid even
@@ -44,10 +44,20 @@ voxel edge and no further.
 
 The taper smooths the cutoff. Both engines truncate each atom's density below a
 threshold (lunus's kernel default, 1e-5 e/Å³, is also gemmi's). lunus converts
-the threshold to a per-atom radius in ``cutoff_radius_batch``; gemmi tests the
-density on the grid. The truncation leaves a step that the FFT rings on; the
-taper brings the density to zero continuously over ``taper_width``. Truncation
-is the main source of disagreement with gemmi.
+the threshold to a per-atom radius ``R`` in ``cutoff_radius_batch``; gemmi tests
+the density on the grid. A hard cutoff leaves a step the FFT rings on, and
+autograd holds each cutoff sphere fixed, so its gradient omits the voxels that
+cross the sphere as the atom moves. The raised-cosine taper of width
+``taper_width`` (0.1 Å by default) removes the edge and makes the autograd and
+true gradients agree. Since lunus v0.2.1 the taper begins at the threshold and
+occupies ``[R, R + taper_width]``: inside ``R`` the density is a hard cutoff's
+and only the tail below the threshold is attenuated, so the width changes the
+forward values by at most the threshold times the tail volume, and otherwise
+sets the candidate-voxel count. Before that it occupied
+``[R - taper_width, R]`` and removed density above the threshold; lunus
+measured parity with gemmi improving 4.5x on the correction. What remains of
+the disagreement with gemmi is dominated by the cutoff value and the two
+engines' radius conventions, not by the taper.
 """
 
 from __future__ import annotations
@@ -64,10 +74,10 @@ from lunus.sf import (
     adjust_grid_for_symmetry,
     build_atom_kernels_torch,
     build_grid_ops,
+    compute_density,
     grid_shape_for_resolution,
     orth_matrix,
     SolventModel,
-    splat_density,
     structure_factors_batch,
     symmetrize_sum,
 )
@@ -191,9 +201,10 @@ class LunusSetup:
         its voxel, tapers to zero before the outermost offsets. One set per
         element is shared by every atom of that element.
     atom_radius_ang
-        ``(n_atoms,)`` cutoff radius per atom, Å.
+        ``(n_atoms,)`` outer radius of each atom's density per atom, Å: the radius
+        at which the density equals the cutoff threshold plus ``taper_width``.
     taper_width
-        Width of the smooth density cutoff, Å.
+        Width of the raised-cosine taper beyond the cutoff radius, Å.
     blur
         Extra isotropic B applied to the grid density and divided back out in the FFT.
     n_atoms
@@ -563,7 +574,7 @@ def calibrate_solvent(
     """
     frac = coords.to(setup.frac_matrix) @ setup.frac_matrix.T
     with torch.no_grad():
-        density = splat_density(
+        density = compute_density(
             frac,
             setup.element_idx,
             occupancies.to(frac),

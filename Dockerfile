@@ -50,12 +50,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean
 
 # Pinned, because everything else about this build is: the base image is a
-# digest, the checkpoints are a digest, and CI's setup-pixi is v0.82.1. An
+# digest, the checkpoints are a digest, and CI's setup-pixi is v0.11.3. An
 # unpinned `curl | bash` made the build tool the one component that could change
 # under us between two builds of the same commit, which is a bad property to
 # have while chasing a build that installs nothing (see the guard below). Keep
 # in step with `pixi-version` in .github/workflows/ci.yml.
-ARG PIXI_VERSION=v0.82.1
+ARG PIXI_VERSION=v0.84.1
 RUN curl -fsSL https://pixi.sh/install.sh | PIXI_VERSION="${PIXI_VERSION}" bash
 
 WORKDIR /app
@@ -98,7 +98,7 @@ FROM ${CHECKPOINTS_IMAGE} AS checkpoints
 # ============================================================================
 FROM source AS pixi-envs
 
-# Checkpoints (~10 GB) rarely change, so these layers stay cacheable across most
+# Checkpoints (~12 GB) rarely change, so these layers stay cacheable across most
 # source edits and dependency-only rebuilds.
 #
 # Split per-file so a cold pull fetches them as concurrent S3 flows instead of
@@ -118,6 +118,7 @@ COPY --from=checkpoints /checkpoints/boltz1_conf.ckpt                /checkpoint
 COPY --from=checkpoints /checkpoints/rf3_foundry_01_24_latest.ckpt   /checkpoints/
 COPY --from=checkpoints /checkpoints/boltz2_conf.ckpt                /checkpoints/
 COPY --from=checkpoints /checkpoints/protenix_base_default_v0.5.0.pt /checkpoints/
+COPY --from=checkpoints /checkpoints/bioemu2-preview/                /checkpoints/bioemu2-preview/
 COPY --from=checkpoints /checkpoints/ccd.pkl                         /checkpoints/
 COPY --from=checkpoints /checkpoints/mols/                           /checkpoints/mols/
 
@@ -125,7 +126,7 @@ COPY --from=checkpoints /checkpoints/mols/                           /checkpoint
 # image. Keep this list in sync with the COPY lines above; bumping
 # CHECKPOINTS_SOURCE_IMAGE to a digest with new or renamed files fails here.
 RUN --mount=type=bind,from=checkpoints,target=/ck \
-    unexpected="$(ls -A /ck/checkpoints | grep -vxE 'boltz1_conf\.ckpt|boltz2_conf\.ckpt|ccd\.pkl|rf3_foundry_01_24_latest\.ckpt|protenix_base_default_v0\.5\.0\.pt|mols')"; \
+    unexpected="$(ls -A /ck/checkpoints | grep -vxE 'boltz1_conf\.ckpt|boltz2_conf\.ckpt|ccd\.pkl|rf3_foundry_01_24_latest\.ckpt|protenix_base_default_v0\.5\.0\.pt|bioemu2-preview|mols')"; \
     [ -z "${unexpected}" ] || { \
         echo "Unenumerated checkpoints, add a COPY line above for each: ${unexpected}"; \
         exit 1; \
@@ -223,6 +224,7 @@ ENV BOLTZ1_CHECKPOINT=/checkpoints/boltz1_conf.ckpt \
     CCD_PATH=/checkpoints/ccd.pkl \
     RF3_CHECKPOINT=/checkpoints/rf3_foundry_01_24_latest.ckpt \
     PROTENIX_CHECKPOINT=/checkpoints/protenix_base_default_v0.5.0.pt \
+    BIOEMU2_CHECKPOINT=/checkpoints/bioemu2-preview/checkpoint.ckpt \
     HOME=/home/dev \
     XDG_CONFIG_HOME=/home/dev/.config \
     XDG_CACHE_HOME=/home/dev/.cache \

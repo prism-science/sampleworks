@@ -37,6 +37,7 @@ from sampleworks.models.protocol import GenerativeModelInput
 from sampleworks.utils.framework_utils import match_batch
 from sampleworks.utils.msa import MSAManager
 from sampleworks.utils.structure_utils import get_asym_unit_from_structure
+from sampleworks.utils.torch_utils import gaussian_prior
 
 
 def _decode_boltz_atom_name(raw_name: np.ndarray | str | bytes) -> str:
@@ -567,6 +568,8 @@ class Boltz2Wrapper:
 
         self.data_module: Boltz2InferenceDataModule
         self.cached_representations: dict[str, Any] = {}
+        # The (s, z) the diffusion-conditioning bundle was built from; checked in step().
+        self._dc_src: tuple[Tensor | None, Tensor | None] = (None, None)
 
     def _setup_data_module(
         self,
@@ -789,23 +792,12 @@ class Boltz2Wrapper:
 
             s, z = pairformer_module(s, z, mask=mask, pair_mask=pair_mask)
 
-        q, c, to_keys, atom_enc_bias, atom_dec_bias, token_trans_bias = (
-            self.model.diffusion_conditioning(
-                s_trunk=s,
-                z_trunk=z,
-                relative_position_encoding=relative_position_encoding,
-                feats=features,
-            )
+        diffusion_conditioning = self._build_diffusion_conditioning(
+            s_trunk=s,
+            z_trunk=z,
+            relative_position_encoding=relative_position_encoding,
+            feats=features,
         )
-
-        diffusion_conditioning = {
-            "q": q,
-            "c": c,
-            "to_keys": to_keys,
-            "atom_enc_bias": atom_enc_bias,
-            "atom_dec_bias": atom_dec_bias,
-            "token_trans_bias": token_trans_bias,
-        }
 
         return {
             "s": s,
@@ -814,6 +806,59 @@ class Boltz2Wrapper:
             "relative_position_encoding": relative_position_encoding,
             "feats": features,
             "diffusion_conditioning": diffusion_conditioning,
+        }
+
+    def _build_diffusion_conditioning(
+        self,
+        s_trunk: Tensor,
+        z_trunk: Tensor,
+        relative_position_encoding: Tensor,
+        feats: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Derive the diffusion module's conditioning bundle from the trunk latents.
+
+        Boltz2 collapses ``s`` and ``z`` into six coordinate-independent tensors the diffusion
+        module reuses at every denoising step.
+
+        Parameters
+        ----------
+        s_trunk : Tensor
+            Single representation, shape [batch, tokens, dim].
+        z_trunk : Tensor
+            Pair representation, shape [batch, tokens, tokens, dim].
+        relative_position_encoding : Tensor
+            Relative position encoding, as produced by the trunk pass.
+        feats : dict[str, Any]
+            Raw batch dict from the dataloader.
+
+        Returns
+        -------
+        dict[str, Any]
+            The six entries ``DiffusionModule.forward`` indexes.
+        """
+        q, c, to_keys, atom_enc_bias, atom_dec_bias, token_trans_bias = (
+            self.model.diffusion_conditioning(
+                s_trunk=s_trunk,
+                z_trunk=z_trunk,
+                relative_position_encoding=relative_position_encoding,
+                feats=feats,
+            )
+        )
+
+        # IT-opt replaces s and z on the conditioning. Each time they are updated, whether in the
+        # inner loop or the outer loop, the bundle must be rebuilt, so we keep this reference to
+        # what it was last built from. step() compares the conditioning's s and z against this
+        # pair by identity and rebuilds the bundle when they differ. Every rebuild comes back
+        # through here, so the reference always points at the latents behind the current bundle.
+        self._dc_src = (s_trunk, z_trunk)
+
+        return {
+            "q": q,
+            "c": c,
+            "to_keys": to_keys,
+            "atom_enc_bias": atom_enc_bias,
+            "atom_dec_bias": atom_dec_bias,
+            "token_trans_bias": token_trans_bias,
         }
 
     def step(
@@ -869,6 +914,18 @@ class Boltz2Wrapper:
         else:
             raise ValueError("pad_len is negative, cannot pad x_t")
 
+        # The bundle is derived from s and z, so rebuild it whenever the latents on the
+        # conditioning are not the ones it was built from. IT-opt swaps in optimized latents.
+        diffusion_conditioning = cond.diffusion_conditioning
+        source_s, source_z = self._dc_src
+        if cond.s is not source_s or cond.z is not source_z:
+            diffusion_conditioning = self._build_diffusion_conditioning(
+                s_trunk=cond.s,
+                z_trunk=cond.z,
+                relative_position_encoding=cond.relative_position_encoding,
+                feats=feats,
+            )
+
         padded_atom_coords_denoised = self.model.structure_module.preconditioned_network_forward(
             padded_x_t,
             t_tensor,
@@ -877,7 +934,7 @@ class Boltz2Wrapper:
                 s_inputs=cond.s_inputs,
                 s_trunk=cond.s,
                 feats=feats,
-                diffusion_conditioning=cond.diffusion_conditioning,
+                diffusion_conditioning=diffusion_conditioning,
             ),
         )
 
@@ -917,21 +974,11 @@ class Boltz2Wrapper:
         ValueError
             If both features and shape are None.
         """
-        if shape is not None:
-            if len(shape) != 2 or shape[1] != 3:
-                raise ValueError("shape must be of the form (num_atoms, 3)")
-            return torch.randn((batch_size, *shape), device=self.device)
-        if features is None or features.conditioning is None:
-            raise ValueError("Either features or shape must be provided to initialize_from_prior()")
-
-        cond = features.conditioning
-        feats = cond.feats
-        atom_mask = feats.get("atom_pad_mask")
-        atom_mask = cast(Tensor, atom_mask)
-
-        num_atoms = int(atom_mask.sum())
-
-        return torch.randn((batch_size, num_atoms, 3), device=self.device)
+        num_atoms = None
+        if features is not None and features.conditioning is not None:
+            atom_mask = cast(Tensor, features.conditioning.feats.get("atom_pad_mask"))
+            num_atoms = int(atom_mask.sum())
+        return gaussian_prior(batch_size, num_atoms, self.device, shape=shape)
 
 
 class Boltz1Wrapper:
@@ -1249,21 +1296,11 @@ class Boltz1Wrapper:
         ValueError
             If both features and shape are None.
         """
-        if shape is not None:
-            if len(shape) != 2 or shape[1] != 3:
-                raise ValueError("shape must be of the form (num_atoms, 3)")
-            return torch.randn((batch_size, *shape), device=self.device)
-        if features is None or features.conditioning is None:
-            raise ValueError("Either features or shape must be provided to initialize_from_prior()")
-
-        cond = features.conditioning
-        feats = cond.feats
-        atom_mask = feats.get("atom_pad_mask")
-        atom_mask = cast(Tensor, atom_mask)
-
-        num_atoms = int(atom_mask.sum())
-
-        return torch.randn((batch_size, num_atoms, 3), device=self.device)
+        num_atoms = None
+        if features is not None and features.conditioning is not None:
+            atom_mask = cast(Tensor, features.conditioning.feats.get("atom_pad_mask"))
+            num_atoms = int(atom_mask.sum())
+        return gaussian_prior(batch_size, num_atoms, self.device, shape=shape)
 
     def _pairformer_pass(
         self, features: dict[str, Any], recycling_steps: int = 3

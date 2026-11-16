@@ -153,32 +153,41 @@ class TestCoordinateTranslation:
 
     @pytest.fixture
     def mismatch_rec(self):
-        """Model has 5 atoms [N,CA,CB,N,CA], struct has 3 [N,CA,N]. Common: N,CA,N."""
+        """Model has 5 atoms [N,CA,CB,N,CA], struct has 3 [CA,N,N]. Common: N,CA,N.
+
+        The struct lists residue 5 as CA then N, so pairing by atom position
+        alone would cross N and CA.
+        """
         model = build_test_atom_array(
             chain_ids=["A", "A", "A", "A", "A"],
             res_ids=[0, 0, 0, 1, 1],
             atom_names=["N", "CA", "CB", "N", "CA"],
         )
         struct = build_test_atom_array(
-            chain_ids=["A", "A", "A"], res_ids=[5, 5, 6], atom_names=["N", "CA", "N"]
+            chain_ids=["A", "A", "A"], res_ids=[5, 5, 6], atom_names=["CA", "N", "N"]
         )
         return AtomReconciler.from_arrays(model, struct)
 
     def test_struct_to_model_copies_common_atoms(self, mismatch_rec):
+        """Each struct atom lands on the model atom with the same residue and atom name."""
         rec = mismatch_rec
+        # struct order: CA(res 5) -> [0,1,2], N(res 5) -> [3,4,5], N(res 6) -> [6,7,8]
         struct_coords = torch.arange(9, dtype=torch.float32).reshape(1, 3, 3)
         template = torch.full((1, 5, 3), -1.0)
         result = rec.struct_to_model(struct_coords, template)
-        assert result.shape == (1, 5, 3)
-        for i in range(rec.n_common):
-            m_i = int(rec.model_indices[i])
-            s_i = int(rec.struct_indices[i])
-            torch.testing.assert_close(result[0, m_i], struct_coords[0, s_i])
-        # Non-common model atoms should retain template value
-        common_model_set = set(rec.model_indices.tolist())
-        for j in range(rec.n_model):
-            if j not in common_model_set:
-                torch.testing.assert_close(result[0, j], torch.tensor([-1.0, -1.0, -1.0]))
+        # model order: N(res 0), CA(res 0), CB(res 0), N(res 1), CA(res 1)
+        expected = torch.tensor(
+            [
+                [
+                    [3.0, 4.0, 5.0],
+                    [0.0, 1.0, 2.0],
+                    [-1.0, -1.0, -1.0],
+                    [6.0, 7.0, 8.0],
+                    [-1.0, -1.0, -1.0],
+                ]
+            ]
+        )
+        torch.testing.assert_close(result, expected)
 
     def test_struct_to_model_rejects_wrong_shapes(self, mismatch_rec):
         rec = mismatch_rec

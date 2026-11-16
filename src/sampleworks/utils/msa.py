@@ -1,3 +1,4 @@
+import os
 from collections.abc import Mapping
 from hashlib import sha3_256
 from pathlib import Path
@@ -19,7 +20,29 @@ else:
 
 MAX_PAIRED_SEQS = 8192
 MAX_MSA_SEQS = 16384
+MSA_CACHE_DIR_ENV_VAR = "MSA_CACHE_DIR"
 MSAData = Mapping[str, str] | Mapping[int, str] | Mapping[str | int, str]
+
+
+def _resolve_msa_cache_dir(msa_cache_dir: Path | str | None) -> Path:
+    """Choose the MSA cache directory.
+
+    Parameters
+    ----------
+    msa_cache_dir : Path | str | None
+        Directory requested by the caller. When None, the ``MSA_CACHE_DIR``
+        environment variable is used if set and non-empty, else ``~/.sampleworks/msa``.
+
+    Returns
+    -------
+    Path
+        The cache directory, with ``~`` expanded.
+    """
+    if msa_cache_dir is None:
+        msa_cache_dir = os.environ.get(MSA_CACHE_DIR_ENV_VAR, "").strip() or None
+    if msa_cache_dir is None:
+        return Path.home() / ".sampleworks" / "msa"
+    return Path(msa_cache_dir).expanduser()
 
 
 def _msa_data_key_sort_key(key: str | int) -> tuple[int, int | str]:
@@ -250,23 +273,36 @@ class MSAManager:
     alignments while leveraging local caching for efficiency. It computes MSA
     results based on input data and pairing strategy, while transparently
     retrieving cached results when available.
+
+    Parameters
+    ----------
+    msa_cache_dir : Path | str | None
+        Where to cache MSAs; created if missing. When None, the ``MSA_CACHE_DIR``
+        environment variable is used if set, else ``~/.sampleworks/msa``.
+    msa_server_url : str
+        Base URL of the MMseqs2 API server.
+    msa_server_username : str | None
+        Username for basic authentication with the MSA server.
+    msa_server_password : str | None
+        Password for basic authentication with the MSA server.
+    api_key_header : str | None
+        Header name for API key authentication (default ``X-API-Key``).
+    api_key_value : str | None
+        API key for header authentication.
     """
 
     def __init__(
         self,
-        msa_cache_dir: Path | str | None = None,  # if None, use default
+        msa_cache_dir: Path | str | None = None,
         msa_server_url: str = "https://api.colabfold.com",
         msa_server_username: str | None = None,
         msa_server_password: str | None = None,
         api_key_header: str | None = None,
         api_key_value: str | None = None,
     ):
-        if msa_cache_dir is None:
-            home = Path.home()
-            msa_cache_dir = home / ".sampleworks" / "msa"
-            msa_cache_dir.mkdir(parents=True, exist_ok=True)
-
-        self.msa_dir = Path(msa_cache_dir)
+        self.msa_dir = _resolve_msa_cache_dir(msa_cache_dir)
+        self.msa_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Using MSA cache directory {self.msa_dir}")
         self.msa_server_url = msa_server_url
         self.msa_server_username = msa_server_username
         self.msa_server_password = msa_server_password

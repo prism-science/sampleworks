@@ -209,3 +209,49 @@ class TestSymmetryOperations:
         assert amplitudes.shape == (1, len(hkl))
         assert torch.isfinite(amplitudes).all()
         assert torch.abs(amplitudes).max() > 0, "expansion produced no density"
+
+
+class TestPhaseConvention:
+    """lunus's ``F(hkl)`` carries the standard phase, ``exp(+2 pi i h.x)``.
+
+    lunus before v0.2.1 returned ``F(-hkl)``: exact amplitudes, every phase negated.
+    Nothing else here would notice, so the phases are checked against a direct
+    summation with gemmi's IT92 form factors, which is the convention gemmi, cctbx
+    and SFC_Torch share. A flipped sign scores about 0 on the weighted cosine.
+    """
+
+    @staticmethod
+    def direct_summation(
+        atom_array: AtomArray, cell: gemmi.UnitCell, hkl: np.ndarray
+    ) -> np.ndarray:
+        """``F(hkl) = sum_j f_j(s) exp(-B_j s^2/4) exp(2 pi i h.x_j)`` over the atoms."""
+        frac = np.array([cell.fractionalize(gemmi.Position(*c)).tolist() for c in atom_array.coord])
+        stol2 = np.array([cell.calculate_1_d2(tuple(int(i) for i in h)) / 4.0 for h in hkl])
+        f = np.zeros(len(hkl), dtype=np.complex128)
+        for x, element, b in zip(frac, atom_array.element, atom_array.b_factor, strict=True):
+            form_factor = np.array([gemmi.Element(element).it92.calculate_sf(s) for s in stol2])
+            f += form_factor * np.exp(-b * stol2) * np.exp(2j * np.pi * (hkl @ x))
+        return f
+
+    def test_phases_match_gemmi_direct_summation(self, atom_array):
+        """Amplitude-weighted mean cosine of the phase difference is ~1, not ~0."""
+        cell = gemmi.UnitCell(*CELLS["cubic"])
+        setup = setup_for(atom_array, CELLS["cubic"])
+        grid = np.arange(-8, 9)
+        hkl = np.array(np.meshgrid(grid, grid, grid, indexing="ij")).reshape(3, -1).T
+        hkl = hkl[np.any(hkl != 0, axis=1)]
+
+        coords = torch.as_tensor(atom_array.coord, dtype=torch.float64)[None]
+        f_lunus = structure_factors(
+            setup, coords, torch.ones(len(atom_array), dtype=torch.float64), torch.as_tensor(hkl)
+        )[0].numpy()
+        f_ref = self.direct_summation(atom_array, cell, hkl)
+
+        weights = np.abs(f_ref)
+        amplitude_correlation = np.corrcoef(np.abs(f_lunus), weights)[0, 1]
+        weighted_cos = np.sum(weights * np.cos(np.angle(f_lunus * np.conj(f_ref)))) / weights.sum()
+
+        assert amplitude_correlation > 0.99, amplitude_correlation
+        assert weighted_cos > 0.99, (
+            f"phase convention disagrees with direct summation: {weighted_cos:.3f}"
+        )

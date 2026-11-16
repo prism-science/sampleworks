@@ -218,6 +218,7 @@ CLAUDE.local.md
 .pi/
 IDEA.md
 _tasks/
+.reviewer/
 
 # Model checkpoints
 release_data/
@@ -230,6 +231,12 @@ initial_dataset_40*/
 *.tar.gz
 *.tgz
 *.csv
+
+# Protenix ModelWrapper.featurize() writes these input/MSA cache files as a
+# side effect into a dir named after the structure id (relative to cwd), not
+# a fixed path -- ignore by filename instead of directory name.
+protenix_input.json
+protenix_input-add-msa.json
 
 # Reinclude
 !src/sampleworks/data/protein_configs.csv

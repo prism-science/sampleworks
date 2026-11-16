@@ -1,9 +1,16 @@
 """Shared AtomArray builders for tests."""
 
 from collections.abc import Sequence
+from pathlib import Path
 
 import numpy as np
 from biotite.structure import array, Atom, AtomArray
+from sampleworks.utils.atom_array_utils import (
+    BLANK_ALTLOC_IDS,
+    load_structure_with_altlocs,
+    map_altlocs_to_stack,
+    save_structure_to_cif,
+)
 
 
 def build_test_atom_array(
@@ -84,3 +91,45 @@ def build_test_atom_array(
         arr.set_annotation("occupancy", np.full(n, occupancy_value, dtype=np.float32))
     arr.set_annotation("b_factor", np.full(n, b_factor_value, dtype=np.float32))
     return arr
+
+
+def altlocs_to_ensemble_cif(cif_path: Path, output_path: Path) -> Path:
+    """Rewrite a single-model altloc structure as a multi-model ensemble reference.
+
+    Each altloc becomes one model. Anchor atoms keep a blank altloc ID and other atoms get
+    altloc ``X``, following the layout of ``build_reference_frames``. The ordering of the
+    models corresponds to the ordering of altloc IDs in the single-model altloc structure.
+
+    Parameters
+    ----------
+    cif_path
+        Single-model structure with altlocs.
+    output_path
+        Where to write the multi-model ensemble CIF.
+
+    Returns
+    -------
+    Path
+        The written ensemble CIF.
+
+    Raises
+    ------
+    ValueError
+        If stacking drops any atom, e.g. one present in only some altlocs, since the ensemble
+        would then no longer describe the same structure.
+    """
+    atom_array = load_structure_with_altlocs(cif_path)
+    ensemble, removed = map_altlocs_to_stack(atom_array)
+    dropped = set(zip(atom_array.chain_id, atom_array.res_id, atom_array.atom_name)) - set(
+        zip(ensemble.chain_id, ensemble.res_id, ensemble.atom_name)
+    )
+    if dropped:
+        raise ValueError(f"{cif_path} loses atoms when stacked by altloc: {sorted(dropped)[:10]}")
+    # altloc annotation should be consistent across models
+    is_anchor = np.isin(removed["altloc_id"][0], list(BLANK_ALTLOC_IDS))
+    ensemble.set_annotation("altloc_id", np.where(is_anchor, "", "X"))
+    # load_any keeps altloc_id only when the file has an occupancy column; per-model values
+    # cannot be stored on a stack, so model 0's stand in
+    ensemble.set_annotation("occupancy", removed["occupancy"][0])
+    ensemble.set_annotation("b_factor", removed["b_factor"][0])
+    return save_structure_to_cif(ensemble, output_path)
