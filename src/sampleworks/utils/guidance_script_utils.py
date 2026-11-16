@@ -105,7 +105,7 @@ _RCSB_CACHE = Path("~/.sampleworks/rcsb").expanduser()
 
 
 def _load_deposit(protein: str) -> Deposit | None:
-    """Fetch and parse the deposited CIF a run's outputs are placed in.
+    """Fetch the deposited mmCIF of a protein, so outputs can be written with its ids.
 
     Parameters
     ----------
@@ -116,8 +116,8 @@ def _load_deposit(protein: str) -> Deposit | None:
     Returns
     -------
     Deposit | None
-        The deposit, read from the local RCSB cache, or ``None`` (with a warning) when the name
-        is not an RCSB id or the deposit cannot be fetched or read. The cache entry is
+        The deposited mmCIF, read from the local RCSB cache, or ``None`` (with a warning) when
+        the name is not an RCSB id or the file cannot be fetched or read. The cache entry is
         populated atomically, so concurrent first-time fetches cannot read a truncated file.
     """
     rcsb_id = rcsb_id_from_protein_name(protein)
@@ -212,9 +212,10 @@ def relabel_model_residues(
     the model's, except ``b_factor`` on matched atoms, which is the input's, as in
     ``SampleworksProcessedStructure.to_loss_inputs``.
 
-    With ``deposit``, every residue instead takes its deposited ids (``place_in_deposit``), so
-    a residue built inside thrombin's 149A-149E loop gets its insertion code. When that fails,
-    the consecutive labels are kept with a warning.
+    With ``deposit``, residues instead take their deposited ids (``place_in_deposit``), so a
+    residue the model built inside a loop numbered with insertion codes (149A-149E in thrombin)
+    gets the right code. If placement fails, the consecutive labels are kept and a warning is
+    logged.
 
     Parameters
     ----------
@@ -225,7 +226,7 @@ def relabel_model_residues(
     reconciler : AtomReconciler
         Mapping between the two.
     deposit : Deposit | None
-        The deposit the input came from.
+        Deposited mmCIF the input came from; ``None`` keeps the consecutive labels.
 
     Returns
     -------
@@ -591,8 +592,8 @@ def save_everything(
         Optional model-space atom template. When provided (mismatch runs),
         this template is used for final structure and trajectory saving.
     deposit : Deposit | None
-        The deposit (``_load_deposit``) whose ids and polymer entity categories the outputs
-        carry; ``None`` writes them without.
+        Deposited mmCIF (from ``_load_deposit``) whose ids and categories are written into the
+        outputs; ``None`` writes outputs without them.
     """
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -600,7 +601,7 @@ def save_everything(
     logger.info("Saving results")
     base_atom_array = ensure_atom_array_stack(refined_structure["asym_unit"])[0]
     if model_atom_array is None or final_state is None:
-        # The input is placed in the deposit once, here; a model was placed when relabeled.
+        # Place the input here; relabel_model_residues already placed a model.
         base_atom_array = _with_deposit_ids(base_atom_array, deposit)
 
     # Use model's internal atom accounting template for mismatch runs when available
