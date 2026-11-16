@@ -484,7 +484,7 @@ _DEPOSIT_READS = {
     ],
 )
 def test_carry_writes_deposited_ids(resources_dir: Path, deposit, structure, read):
-    """Real data: residues and ligands take the deposit's label ids and keep their author ids.
+    """Real data: residues and ligands take their deposited label ids and keep their author ids.
 
     Inputs are RCSB CIFs read by label or author ids, renumbered as a model does or not, or
     density inputs (author values in both columns). Each output row the deposit lists is
@@ -588,7 +588,7 @@ def test_saved_cif_numbers_model_added_residues_from_the_deposit(
     dropped,
     relabel_by_deposit,
 ):
-    """Residues a model builds from the full sequence take the deposit's ids when saved.
+    """Residues a model builds from the full sequence take their deposited ids when saved.
 
     The model is the input chain plus ``added`` residues before it (one CA each); the input
     lacks those and its first ``dropped`` residues. The saved CIF must give all of them the
@@ -719,7 +719,7 @@ def test_saved_cif_places_residues_built_inside_gaps(
 def test_relabel_keeps_input_labels_when_a_built_residue_contradicts_the_deposit(
     resources_dir: Path, caplog: pytest.LogCaptureFixture
 ):
-    """A built residue whose name the deposit does not list at its place is not put there."""
+    """A built residue is not placed where the deposited sequence lists a different monomer."""
     atoms = _read_by_author(resources_dir / "1vme" / "1vme_rcsb.cif")
     chain_atoms = atoms[(atoms.chain_id == "A") & filter_amino_acids(atoms)]
     struct = chain_atoms[chain_atoms.res_id != -2]
