@@ -197,7 +197,8 @@ pytest = "*"
 pytest-cov = "*"
 pytest-loguru = "*"
 python-semantic-release = "*"
-ruff = "*"
+# Pinned so editors, prek hooks, and CI lint and format with one Ruff version in every environment.
+ruff = "==0.16.8"
 ty = "==0.0.39"
 
 # Differentiable structure factors and diffuse scattering. Scoped to a feature
