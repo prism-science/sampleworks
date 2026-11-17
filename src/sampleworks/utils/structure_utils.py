@@ -8,7 +8,6 @@ from typing import Any, cast, overload
 import numpy as np
 import torch
 from atomworks.io.transforms.atom_array import ensure_atom_array_stack
-from atomworks.io.utils.io_utils import infer_pdb_file_type, load_any
 from biotite.structure import AtomArray, AtomArrayStack, from_template
 from loguru import logger
 
@@ -20,7 +19,7 @@ from sampleworks.utils.atom_array_utils import (
     _closest_canonical_amino_acid,
     apply_selection,
     BLANK_ALTLOC_IDS,
-    use_author_numbering,
+    load_with_author_numbering,
 )
 from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.framework_utils import match_batch
@@ -539,12 +538,7 @@ def get_reference_atomarraystack(
         return None, None
 
     # Same loading as load_structure_with_altlocs, which keeps only the first model.
-    extra_fields = ["occupancy", "b_factor"]
-    if infer_pdb_file_type(Path(ref_path)) in ("cif", "bcif"):
-        # Selections and pairing use the author columns. A PDB file has only that numbering,
-        # and biotite's PDB reader rejects the fields.
-        extra_fields += ["auth_seq_id", "auth_asym_id"]
-    ref_struct = use_author_numbering(load_any(ref_path, altloc="all", extra_fields=extra_fields))
+    ref_struct = load_with_author_numbering(ref_path)
     # A modified residue (e.g. CSO) recorded as an altloc at the same position as its canonical
     # form (e.g. CYS) makes map_altlocs_to_stack fail: the conformers disagree on res_name/hetero
     # so biotite.stack() rejects them. Canonicalize these residues to get map_altlocs_to_stack to

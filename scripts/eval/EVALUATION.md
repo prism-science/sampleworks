@@ -64,8 +64,8 @@ Selection strings in the protein configuration CSV are in author numbering, the 
 structure and `refined.cif` and use them for selections and atom pairing, so the two files must
 carry the same author numbering; their `label_` columns may differ. An `auth_seq_id` that is not
 an integer is an error. The altloc scripts (`find_altloc_selections`, `classify_altloc_regions`,
-`find_max_rmsd_subsegment`) still read the `label_` columns, which give the same selections only
-for a reference whose two numberings agree (#572).
+`find_max_rmsd_subsegment`) and the synthetic data generators read the same columns, so a
+selection string means the same residues wherever it is generated or applied.
 
 The evaluation scripts have a common interface defined by the method
 `sampleworks.eval.grid_search_eval_utils.parse_eval_args`. The general form of these commands is:

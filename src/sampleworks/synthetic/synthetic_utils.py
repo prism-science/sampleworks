@@ -370,7 +370,8 @@ def load_structure_for_synthetic_loss(
     structure_options
         Atom filters, applied after ``selection``, and the B-factor override.
     selection
-        Optional atom selection string. If None, the full structure is used.
+        Optional atom selection string, in author numbering. If None, the full structure is
+        used.
     model
         0-based index of the one model to load from a multi-model file. Callers that
         need every model (e.g. ``generate_synthetic_sf_sfc``) call this once per

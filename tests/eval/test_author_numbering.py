@@ -1,5 +1,6 @@
 """
-The evaluators select and pair atoms on the author columns of the files they load.
+The evaluators, the altloc scripts and the synthetic generators select and pair atoms on the
+author columns of the files they load.
 
 Atomworks loads the label columns into ``res_id`` and ``chain_id``. An output whose label
 columns were rewritten to a deposit's numbering no longer shares them with the reference, so a
@@ -20,7 +21,14 @@ import pytest
 from atomworks.io.utils.io_utils import load_any
 from biotite.structure.io.pdbx import CIFFile
 from sampleworks.eval.eval_dataclasses import ProteinConfig
-from sampleworks.utils.atom_array_utils import filter_to_common_atoms, use_author_numbering
+from sampleworks.synthetic.synthetic_utils import load_structure_for_synthetic_loss
+from sampleworks.utils.atom_array_utils import (
+    filter_to_common_atoms,
+    load_conformer_pairs,
+    load_structure_with_altlocs,
+    use_author_numbering,
+)
+from sampleworks.utils.cif_utils import find_altloc_selections
 from sampleworks.utils.structure_utils import get_reference_atomarraystack
 
 from tests.eval.conftest import _REAL_CIF
@@ -151,6 +159,62 @@ def test_reference_loader_returns_author_numbering(tmp_path: Path):
     assert set(np.asarray(reference_stack.chain_id)) == set(np.asarray(unmoved.chain_id))
     assert reference_stack.res_id.min() == unmoved.res_id.min()
     assert reference_stack.res_id.max() == unmoved.res_id.max()
+
+
+def test_altloc_loader_returns_author_numbering(tmp_path: Path):
+    """The altloc loader gives a label-moved file the ids of the unmoved file."""
+    label_moved = write_cif_with_moved_ids(_REAL_CIF, tmp_path / "moved.cif", "label")
+
+    moved_atom_array = load_structure_with_altlocs(label_moved)
+    unmoved_atom_array = load_structure_with_altlocs(_REAL_CIF)
+
+    np.testing.assert_array_equal(moved_atom_array.chain_id, unmoved_atom_array.chain_id)
+    np.testing.assert_array_equal(moved_atom_array.res_id, unmoved_atom_array.res_id)
+
+
+def test_synthetic_loader_selects_on_author_numbering(tmp_path: Path):
+    """A selection in author numbering picks the same atoms from a label-moved file."""
+    label_moved = write_cif_with_moved_ids(_REAL_CIF, tmp_path / "moved.cif", "label")
+
+    moved_selected = load_structure_for_synthetic_loss(
+        label_moved, "default", [], selection=_SELECTION
+    )
+    unmoved_selected = load_structure_for_synthetic_loss(
+        _REAL_CIF, "default", [], selection=_SELECTION
+    )
+
+    assert moved_selected is not None
+    assert unmoved_selected is not None
+    assert unmoved_selected.array_length() > 0
+    np.testing.assert_array_equal(moved_selected.res_id, unmoved_selected.res_id)
+    np.testing.assert_array_equal(moved_selected.atom_name, unmoved_selected.atom_name)
+
+
+def test_altloc_selections_are_in_author_numbering(tmp_path: Path):
+    """find_altloc_selections gives a label-moved file the selections of the unmoved file."""
+    label_moved = write_cif_with_moved_ids(_REAL_CIF, tmp_path / "moved.cif", "label")
+
+    moved_selections = list(find_altloc_selections(label_moved))
+    unmoved_selections = list(find_altloc_selections(_REAL_CIF))
+
+    assert unmoved_selections
+    assert moved_selections == unmoved_selections
+
+
+def test_conformer_pairs_are_on_author_numbering(tmp_path: Path):
+    """The conformer pairs of a label-moved file carry the ids of the unmoved file."""
+    label_moved = write_cif_with_moved_ids(_REAL_CIF, tmp_path / "moved.cif", "label")
+
+    moved_atom_array, moved_conformer_ids, moved_pairs = load_conformer_pairs(label_moved)
+    unmoved_atom_array, unmoved_conformer_ids, unmoved_pairs = load_conformer_pairs(_REAL_CIF)
+
+    assert moved_conformer_ids == unmoved_conformer_ids
+    assert unmoved_pairs
+    np.testing.assert_array_equal(moved_atom_array.res_id, unmoved_atom_array.res_id)
+    for pair, (unmoved_first, _) in unmoved_pairs.items():
+        moved_first, _ = moved_pairs[pair]
+        np.testing.assert_array_equal(moved_first.chain_id, unmoved_first.chain_id)
+        np.testing.assert_array_equal(moved_first.res_id, unmoved_first.res_id)
 
 
 def test_rmsd_script_scores_label_moved_output(rscc_fixture_factory, rmsd_script):
