@@ -6,6 +6,7 @@ import json
 import pickle
 from argparse import Namespace
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -93,9 +94,9 @@ def test_get_checkpoint_reads_model_checkpoint():
     assert get_checkpoint(args) == "/tmp/model.ckpt"
 
 
-def test_get_checkpoint_returns_none_when_missing():
-    """get_checkpoint should return None when model_checkpoint is absent."""
-    args = Namespace()
+def test_get_checkpoint_returns_none_when_unset():
+    """get_checkpoint should return None when --model-checkpoint was left unset."""
+    args = Namespace(model_checkpoint=None)
 
     assert get_checkpoint(args) is None
 
@@ -110,6 +111,28 @@ def test_get_checkpoint_treats_empty_string_as_missing():
 # ============================================================================
 # populate_config_for_guidance_type tests
 # ============================================================================
+
+
+def _grid_search_args(**overrides: Any) -> Namespace:
+    """Build the grid-search namespace fields populate_config_for_guidance_type reads.
+
+    Parameters
+    ----------
+    **overrides
+        Fields to replace, keyed by argparse destination.
+
+    Returns
+    -------
+    Namespace
+        Grid-search parser defaults with ``overrides`` applied.
+    """
+    defaults = {
+        "model_checkpoint": "",
+        "disable_chiral_features": False,
+        "track_chiral_features": False,
+        "step_scaler_type": "noisespace",
+    }
+    return Namespace(**(defaults | overrides))
 
 
 def _build_job(model: StructurePredictor) -> JobConfig:
@@ -149,7 +172,7 @@ def test_populate_config_resolves_checkpoint_when_none_provided(_mock_resolve, m
 
     config.populate_config_for_guidance_type(
         _build_job(model_wrapper_type),
-        Namespace(use_tweedie=False, step_scaler_type="noisespace"),
+        _grid_search_args(),
     )
 
     assert config.model_checkpoint == "/checkpoints/mock.ckpt"
@@ -171,11 +194,7 @@ def test_populate_config_uses_model_checkpoint_argument(model_wrapper_type):
         )
         mock_resolve.reset_mock()
 
-        args = Namespace(
-            model_checkpoint="/tmp/custom.ckpt",
-            use_tweedie=False,
-            step_scaler_type="noisespace",
-        )
+        args = _grid_search_args(model_checkpoint="/tmp/custom.ckpt")
         config.populate_config_for_guidance_type(_build_job(model_wrapper_type), args)
         mock_resolve.assert_not_called()
 
