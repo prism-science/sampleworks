@@ -98,6 +98,11 @@ class RealSpaceDensityOptions:
         help="Scattering table, as in Phenix (default: electron with --em, otherwise wk1995)",
         choices=("wk1995", "it1992", "electron"),
     )
+    allow_torch_fallback: bool = opt(
+        False,
+        help="Use the slower PyTorch density path when the CUDA density kernel failed to "
+        "build (default: fail)",
+    )
 
     def __post_init__(self):
         _check_resolution(self.resolution)

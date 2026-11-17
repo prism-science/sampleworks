@@ -6,6 +6,7 @@ from biotite.structure import AtomArray, AtomArrayStack
 
 from sampleworks.core.forward_models.xray.real_space_density import (
     DifferentiableTransformer,
+    use_cuda_density_kernels,
     XMap_torch,
 )
 from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.unitcell import (
@@ -122,7 +123,7 @@ def build_density_transformer(
         scattering_params=scattering_params,
         em=em_mode,
         device=device,
-        use_cuda_kernels=device.type == "cuda" and torch.cuda.is_available(),
+        use_cuda_kernels=use_cuda_density_kernels(device),
     )
     return transformer, xmap_torch
 
