@@ -211,6 +211,26 @@ class DiffuseBraggOptions:
             )
 
 
+@dataclass(frozen=True)
+class BondGeometryOptions:
+    """Options for :class:`~sampleworks.core.losses.geometry.BondGeometryLoss`."""
+
+    bond_tolerance: float = opt(
+        0.2, help="Bond-length deviation from ideal, in Angstroms, that costs nothing"
+    )
+    clash_padding: float = opt(
+        0.4,
+        help="Angstroms added to the sum of covalent radii below which non-bonded atoms clash",
+    )
+    bond_power: int = opt(2, help="Exponent on the bond-length hinge", choices=(1, 2))
+
+    def __post_init__(self):
+        for name in ("bond_tolerance", "clash_padding"):
+            value = getattr(self, name)
+            if not (math.isfinite(value) and value >= 0):
+                raise ValueError(f"{name} must be a finite, non-negative distance; got {value}.")
+
+
 def option_type(options_cls: type, name: str) -> Any:
     """Return the declared type of one option, with ``None`` stripped from unions.
 

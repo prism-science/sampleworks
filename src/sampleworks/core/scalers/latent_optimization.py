@@ -379,10 +379,8 @@ class LatentOptimization:
         # BondGeometryLoss penalizes stretched bonds and steric clashes in the denoised structure,
         # curbing the overshoot where an aggressive latent update trades geometry for density fit.
         if self.bond_length_weight > 0:
-            geometry_atom_array = processed.loss_atom_array
-            bond_geometry = BondGeometryLoss(
-                geometry_atom_array, self.bond_length_weight, coords.device
-            )
+            bond_geometry = BondGeometryLoss()
+            bond_geometry.prepare(loss_inputs, device=coords.device)
         else:
             bond_geometry = None
 
@@ -622,7 +620,12 @@ class LatentOptimization:
         # latent update is pushed toward density fits that keep valid geometry; it backpropagates
         # through the same denoised prediction to the latents.
         if bond_geometry is not None:
-            loss = loss + bond_geometry(denoised)
+            loss = loss + self.bond_length_weight * bond_geometry(
+                coordinates=denoised,
+                elements=loss_inputs.elements,
+                b_factors=loss_inputs.b_factors,
+                occupancies=loss_inputs.occupancies,
+            )
 
         optimizer.zero_grad()
         loss.backward()

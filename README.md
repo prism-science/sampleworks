@@ -194,6 +194,7 @@ readiness table, and [docs/IT_OPT_TESTING.md](docs/IT_OPT_TESTING.md) for how to
 | `real_space_density` (default) | Fit to a density map                                                   | `--density`, `--resolution`, `--loss-order`, `--em`, `--scattering-table`, `--allow-torch-fallback` |
 | `structure_factor`             | Fit to structure-factor amplitudes from an MTZ                         | `--mtzfile`, `--expcolumns`, `--resolution`, `--bulk-solvent`, `--scattering-factor-mode`, ... |
 | `diffuse_bragg`                | Fit to Bragg amplitudes and anisotropic diffuse intensities (lunus.sf) | `--bragg-target`, `--diffuse-target`, `--bragg-weight`, `--resolution`, ...                    |
+| `bond_geometry`                | Bond-length and steric-clash penalty; combine with a data loss         | `--bond-tolerance`, `--clash-padding`, `--bond-power`                                          |
 
 ```bash
 sampleworks-guidance --model boltz2 --guidance-type pure_guidance \
@@ -220,6 +221,22 @@ structure_factor:
 
 Weights default to `1/N` when omitted, so combining losses leaves the meaning of the
 guidance step size intact.
+
+`bond_geometry` scores no experimental data, so it is meant as a second term that keeps guidance
+from stretching bonds or packing atoms into clashes to improve the data fit. Its penalty is a sum
+over every bond and atom pair, so it usually needs a much smaller weight than the data loss. The
+weight below is IT-opt's tuned default (`--bond-length-weight`); treat it as a starting point for
+`pure_guidance` and `fk_steering`, where it has not been tuned:
+
+```yaml
+real_space_density:
+  weight: 1.0
+  loss_options:
+    density: 1vme.ccp4
+    resolution: 1.8
+bond_geometry:
+  weight: 5.0e-5
+```
 
 ## Grid Search
 
