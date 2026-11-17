@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -90,13 +91,14 @@ class LossEntry:
         Raises
         ------
         ValueError
-            If the options name something the loss does not have, or the weight
-            is negative.
+            If the options name something the loss does not have or hold an
+            invalid value, or the weight is negative or non-finite.
         """
         coerce_options(get_loss_spec(self.loss), self.options)
-        if self.weight is not None and self.weight < 0:
+        if self.weight is not None and not (math.isfinite(self.weight) and self.weight >= 0):
             raise ValueError(
-                f"Weight for loss '{self.loss.value}' must be non-negative, got {self.weight}."
+                f"Weight for loss '{self.loss.value}' must be non-negative and finite, "
+                f"got {self.weight}."
             )
         return self
 
@@ -321,6 +323,31 @@ class LossConfig:
             absent = tuple(
                 name for name in spec.required_for(options) if getattr(options, name) is None
             )
+            if absent:
+                missing[entry.loss.value] = absent
+        return missing
+
+    def missing_input_files(self) -> dict[str, dict[str, str]]:
+        """Report path-valued options that name a file that does not exist.
+
+        Like :meth:`missing_required_options`, this lets a caller refuse a
+        configuration before a model is loaded or a grid of jobs is queued,
+        rather than having each worker fail on its own when the loss is built.
+
+        Returns
+        -------
+        dict[str, dict[str, str]]
+            Loss name to ``{option: path}`` for each path that does not exist, for
+            losses with any.
+        """
+        missing = {}
+        for entry in self.entries:
+            options_cls = get_loss_spec(entry.loss).options_cls
+            absent = {
+                name: str(entry.options[name])
+                for name in path_option_names(options_cls)
+                if entry.options.get(name) is not None and not Path(entry.options[name]).exists()
+            }
             if absent:
                 missing[entry.loss.value] = absent
         return missing
