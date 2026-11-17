@@ -6,6 +6,8 @@ using Feynman-Kaç steering. All per-step guidance comes from a given StepScaler
 Per Singhal et al. (arXiv 2501.06848) and Boltz-1x (doi:10.1101/2024.11.19.624167)
 """
 
+from typing import Literal
+
 import einx
 import torch
 import torch.nn.functional as F
@@ -26,11 +28,78 @@ from sampleworks.utils.structure_utils import (
 )
 
 
+ResamplingMethod = Literal["multinomial", "systematic"]
+
+# Log-weight given to particles with a non-finite potential, so that one bad particle loses
+# every resample instead of turning its group's weights into NaN.
+_NON_FINITE_LOG_WEIGHT = -1e4
+
+
+def resample_indices(
+    log_weights: torch.Tensor,
+    method: ResamplingMethod = "multinomial",
+    group_size: int | None = None,
+) -> torch.Tensor:
+    """Draw ancestor indices from unnormalized log-weights.
+
+    Particles are resampled within consecutive groups of ``group_size`` (all particles when
+    ``None``); a group never takes ancestors from another group, and the last group is smaller
+    when ``group_size`` does not divide the particle count. Systematic resampling follows
+    BioEmu2's ``systematic_resample``: one uniform offset per group, read at evenly spaced
+    points of the group's weight CDF, so a particle of weight ``w`` in a group of ``n`` gets
+    ``floor(n w)`` or ``ceil(n w)`` offspring.
+
+    Parameters
+    ----------
+    log_weights : torch.Tensor
+        Unnormalized log-weights, shape ``(particles,)``. Non-finite entries get a weight that
+        loses every draw.
+    method : {"multinomial", "systematic"}
+        Draw independently with replacement, or systematically.
+    group_size : int | None
+        Particles per independent resampling group.
+
+    Returns
+    -------
+    torch.Tensor
+        Ancestor index of every particle, shape ``(particles,)``.
+    """
+    if group_size is not None and group_size < 1:
+        raise ValueError(f"group_size must be at least 1, got {group_size}")
+    log_weights = torch.where(
+        torch.isfinite(log_weights),
+        log_weights,
+        torch.full_like(log_weights, _NON_FINITE_LOG_WEIGHT),
+    )
+    indices, offset = [], 0
+    for group in log_weights.split(group_size or len(log_weights)):
+        weights = F.softmax(group, dim=0)
+        n = len(weights)
+        if method == "multinomial":
+            drawn = torch.multinomial(weights, n, replacement=True)
+        elif method == "systematic":
+            positions = (
+                torch.arange(n, device=weights.device, dtype=weights.dtype)
+                + torch.rand((), device=weights.device, dtype=weights.dtype)
+            ) / n
+            drawn = torch.searchsorted(weights.cumsum(0), positions).clamp(max=n - 1)
+        else:
+            raise ValueError(f"Unknown resampling method: {method!r}")
+        indices.append(offset + drawn)
+        offset += n
+    return torch.cat(indices)
+
+
 class FKSteering:
     """Feynman-Kac Steering trajectory scaler.
 
     The key difference from the standard FKSteering implementation is that "particles"
-    are ensembles of structures, rather than individual structures.
+    are ensembles of structures, rather than individual structures. With ``ensemble_size=1``
+    particles are single structures, as in Singhal et al. and BioEmu2.
+
+    Between resamples the potential telescopes: a resample weighs each particle by
+    ``exp(fk_lambda * (loss at the previous resample - current loss))``, or
+    ``exp(-fk_lambda * loss)`` at the first one, times the sampler's proposal correction.
 
     Parameters
     ----------
@@ -46,6 +115,14 @@ class FKSteering:
         Starting time fraction for partial diffusion. Default is 0.0.
     guidance_t_start : float
         Fraction of trajectory after which to start guidance. Default is 0.0.
+    resampling_method : {"multinomial", "systematic"}
+        How ancestors are drawn, see :func:`resample_indices`. Default is multinomial.
+    resampling_group_size : int | None
+        Particles per independent resampling group; ``None`` (default) resamples all
+        particles together.
+    return_all_particles : bool
+        Return every particle's ensemble, ``(particles * ensemble, atoms, 3)``, instead of the
+        lowest-loss particle's. Default is False.
     """
 
     def __init__(
@@ -56,6 +133,9 @@ class FKSteering:
         fk_lambda: float = 1.0,
         guidance_t_start: float = 0.0,
         t_start: float = 0.0,
+        resampling_method: ResamplingMethod = "multinomial",
+        resampling_group_size: int | None = None,
+        return_all_particles: bool = False,
     ):
         self.ensemble_size = ensemble_size
         self.num_steps = num_steps
@@ -63,6 +143,9 @@ class FKSteering:
         self.fk_lambda = fk_lambda
         self.guidance_start = int(guidance_t_start * num_steps)
         self.starting_step = int(t_start * num_steps)
+        self.resampling_method: ResamplingMethod = resampling_method
+        self.resampling_group_size = resampling_group_size
+        self.return_all_particles = return_all_particles
 
     def sample(
         self,
@@ -122,6 +205,8 @@ class FKSteering:
 
         schedule = sampler.compute_schedule(self.num_steps)
         loss_history: list[torch.Tensor] = []
+        # Per-particle loss when particles were last resampled, aligned with the current particles.
+        loss_at_last_resample: torch.Tensor | None = None
 
         trajectory_denoised: list[torch.Tensor] = []
         trajectory_next_step: list[torch.Tensor] = []
@@ -160,9 +245,10 @@ class FKSteering:
 
             # RESAMPLE
             if apply_guidance and loss_prev is not None and self._should_resample(i, context):
-                coords = self._resample_particles(
+                coords, loss_at_last_resample = self._resample_particles(
                     coords=coords,
                     loss_curr=loss_prev,
+                    loss_at_last_resample=loss_at_last_resample,
                     loss_history=loss_history,
                     log_proposal_correction=log_proposal_correction_prev,
                     num_particles=num_particles,
@@ -204,13 +290,15 @@ class FKSteering:
             coords_4d_current = coords.reshape(num_particles, self.ensemble_size, -1, 3)
             trajectory_next_step.append(coords_4d_current.clone().cpu())
 
-        # Select the particle (ensemble) with the lowest final loss.
         # final_coords_4d: (particles, ensemble, atoms, 3)
-        # lowest_loss_coords: (ensemble, atoms, 3) — the winning ensemble's
-        # denoised coordinates.
         final_coords_4d = coords_4d_current
-        lowest_loss_index = torch.argmin(loss_history[-1]) if loss_history else 0
-        lowest_loss_coords = final_coords_4d[lowest_loss_index]
+        if self.return_all_particles:
+            # (particles * ensemble, atoms, 3)
+            final_state = final_coords_4d.reshape(-1, final_coords_4d.shape[-2], 3)
+        else:
+            # The particle (ensemble) with the lowest final loss: (ensemble, atoms, 3).
+            lowest_loss_index = torch.argmin(loss_history[-1]) if loss_history else 0
+            final_state = final_coords_4d[lowest_loss_index]
 
         metadata: dict = {"trajectory_denoised": trajectory_denoised}
 
@@ -223,7 +311,7 @@ class FKSteering:
 
         return GuidanceOutput(
             structure=structure,
-            final_state=lowest_loss_coords,
+            final_state=final_state,
             trajectory=trajectory_next_step,
             losses=losses,
             metadata=metadata,
@@ -421,10 +509,11 @@ class FKSteering:
         self,
         coords: torch.Tensor,
         loss_curr: torch.Tensor,
+        loss_at_last_resample: torch.Tensor | None,
         loss_history: list[torch.Tensor],
         log_proposal_correction: torch.Tensor | None,
         num_particles: int,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         r"""Resample particles using FK weights before the next step.
 
         Each *particle* is an ensemble of ``self.ensemble_size`` structures.
@@ -437,8 +526,11 @@ class FKSteering:
             Coordinates, shape ``(particles * ensemble, atoms, 3)``.
         loss_curr : torch.Tensor
             Loss per particle from the current step, shape ``(particles,)``.
+        loss_at_last_resample : torch.Tensor | None
+            Loss per particle at the previous resample, shape ``(particles,)``, or ``None``
+            before the first one.
         loss_history : list[torch.Tensor]
-            History of per-particle loss tensors from previous steps.
+            History of per-particle loss tensors from previous steps; resampled in place.
         log_proposal_correction : torch.Tensor | None
             Log-ratio of base to guided proposal, shape ``(particles,)``, or
             ``None`` when the sampler does not produce a correction term.
@@ -447,19 +539,19 @@ class FKSteering:
 
         Returns
         -------
-        torch.Tensor
-            Resampled coordinates, shape ``(particles * ensemble, atoms, 3)``.
+        tuple[torch.Tensor, torch.Tensor]
+            Resampled coordinates, shape ``(particles * ensemble, atoms, 3)``, and the resampled
+            ``loss_curr``, shape ``(particles,)``, for the next resample's increment.
         """
-        if len(loss_history) < 2:
+        if loss_at_last_resample is None:
             log_G = -self.fk_lambda * loss_curr
         else:
-            log_G = self.fk_lambda * (loss_history[-2] - loss_history[-1])
+            log_G = self.fk_lambda * (loss_at_last_resample - loss_curr)
 
         if log_proposal_correction is not None:
             log_G = log_G + log_proposal_correction
 
-        weights = F.softmax(log_G, dim=0)
-        indices = torch.multinomial(weights, num_particles, replacement=True)
+        indices = resample_indices(log_G, self.resampling_method, self.resampling_group_size)
 
         # Resample coordinates
         coords_4d = coords.reshape(num_particles, self.ensemble_size, -1, 3)
@@ -469,4 +561,4 @@ class FKSteering:
         for j in range(len(loss_history)):
             loss_history[j] = loss_history[j][indices]
 
-        return resampled.reshape(-1, coords_4d.shape[-2], 3)
+        return resampled.reshape(-1, coords_4d.shape[-2], 3), loss_curr[indices]

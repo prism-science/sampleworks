@@ -11,6 +11,7 @@ BOLTZ_AVAILABLE = False
 PROTENIX_AVAILABLE = False
 RF3_AVAILABLE = False
 PROTPARDELLE_AVAILABLE = False
+BIOEMU2_AVAILABLE = False
 
 try:
     from sampleworks.models.boltz.wrapper import Boltz1Wrapper, Boltz2Wrapper
@@ -50,6 +51,14 @@ try:
     PROTPARDELLE_AVAILABLE = True
     del ProtpardelleWrapper
 except (ImportError, ModuleNotFoundError, OSError):
+    pass
+
+try:
+    from sampleworks.models.bioemu2.wrapper import BioEmu2Wrapper
+
+    BIOEMU2_AVAILABLE = True
+    del BioEmu2Wrapper
+except (ImportError, ModuleNotFoundError):
     pass
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -268,6 +277,55 @@ def require_protpardelle(message: F | str | None = None) -> F | Callable[[F], F]
 
 
 @overload
+def require_bioemu2(message: F) -> F: ...
+@overload
+def require_bioemu2(message: str | None = None) -> Callable[[F], F]: ...
+def require_bioemu2(message: F | str | None = None) -> F | Callable[[F], F]:
+    """Decorator to require BioEmu2 model availability.
+
+    Parameters
+    ----------
+    message: str, optional
+        Custom error message. If None, uses default message.
+
+    Returns
+    -------
+    Callable
+        Decorator function
+
+    Examples
+    --------
+    >>> @require_bioemu2
+    ... def sample_bioemu2():
+    ...     pass
+    """
+    if callable(message):
+        # Bare ``@require_bioemu2`` usage: the decorated function arrives as ``message``.
+        return require_bioemu2()(cast("F", message))
+
+    default_message = (
+        "BioEmu2 model wrapper is not available. Install with: pixi install -e bioemu2"
+    )
+
+    def decorator(func: F) -> F:
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            if not BIOEMU2_AVAILABLE:
+                error_msg = message or default_message
+                try:
+                    import pytest
+
+                    pytest.skip(error_msg)
+                except ImportError:
+                    raise ImportError(error_msg) from None
+            return func(*args, **kwargs)
+
+        return wrapper  # type: ignore
+
+    return decorator
+
+
+@overload
 def require_any_model(message: F) -> F: ...
 @overload
 def require_any_model(message: str | None = None) -> Callable[[F], F]: ...
@@ -302,8 +360,8 @@ def require_any_model(message: F | str | None = None) -> F | Callable[[F], F]:
     default_message = (
         "No model wrappers are available. "
         "Please install at least one model wrapper with the appropriate feature group: "
-        "'pixi install -e boltz', 'pixi install -e protpardelle', or "
-        "'pixi install -e protenix', or 'pixi install -e rf3'"
+        "'pixi install -e boltz', 'pixi install -e protpardelle', "
+        "'pixi install -e protenix', 'pixi install -e rf3', or 'pixi install -e bioemu2'"
     )
 
     def decorator(func: F) -> F:
@@ -314,6 +372,7 @@ def require_any_model(message: F | str | None = None) -> F | Callable[[F], F]:
                 and not PROTENIX_AVAILABLE
                 and not RF3_AVAILABLE
                 and not PROTPARDELLE_AVAILABLE
+                and not BIOEMU2_AVAILABLE
             ):
                 error_msg = message or default_message
                 try:
@@ -408,6 +467,26 @@ def check_protpardelle_available(message: str | None = None) -> None:
         raise ImportError(message or default_message)
 
 
+def check_bioemu2_available(message: str | None = None) -> None:
+    """Check if BioEmu2 is available, raise ImportError if not.
+
+    Parameters
+    ----------
+    message: str, optional
+        Custom error message. If None, uses default message.
+
+    Raises
+    ------
+    ImportError
+        If BioEmu2 model wrapper is not available.
+    """
+    if not BIOEMU2_AVAILABLE:
+        default_message = (
+            "BioEmu2 model wrapper is not available. Install with: pixi install -e bioemu2"
+        )
+        raise ImportError(message or default_message)
+
+
 def check_any_model_available(message: str | None = None) -> None:
     """Check if at least one model is available, raise ImportError if not.
 
@@ -426,11 +505,12 @@ def check_any_model_available(message: str | None = None) -> None:
         and not PROTENIX_AVAILABLE
         and not RF3_AVAILABLE
         and not PROTPARDELLE_AVAILABLE
+        and not BIOEMU2_AVAILABLE
     ):
         default_message = (
             "No model wrappers are available. "
             "Please install at least one model wrapper with the appropriate "
             "feature group: 'pixi install -e boltz', 'pixi install -e protenix', "
-            "'pixi install -e rf3', or 'pixi install -e protpardelle'"
+            "'pixi install -e rf3', 'pixi install -e protpardelle', or 'pixi install -e bioemu2'"
         )
         raise ImportError(message or default_message)

@@ -6,7 +6,7 @@
 #   docker run pixi-with-checkpoints -e boltz run_grid_search.py --proteins /data/proteins.csv ...
 #   docker run pixi-with-checkpoints bash  # interactive shell
 #
-# Available pixi environments: boltz, protenix, rf3, analysis
+# Available pixi environments: boltz, protenix, rf3, bioemu2, analysis
 #
 # Examples:
 #   # Run grid search with RF3
@@ -36,7 +36,7 @@ IMPORTANT:
     Always use --shm-size=16g (or larger) to avoid shared memory errors with DataLoaders.
 
 OPTIONS:
-    -e, --env <env>     Pixi environment to use (boltz, protenix, rf3, analysis)
+    -e, --env <env>     Pixi environment to use (boltz, protenix, rf3, bioemu2, analysis)
     -h, --help          Show this help message
     bash                Start an interactive shell
 
@@ -253,10 +253,10 @@ if [[ -z "$ENV" ]]; then
 fi
 
 case $ENV in
-    boltz|protenix|rf3|analysis)
+    boltz|protenix|rf3|bioemu2|analysis)
         ;;
     *)
-        echo "Error: Invalid environment '$ENV'. Must be one of: boltz, protenix, rf3, analysis"
+        echo "Error: Invalid environment '$ENV'. Must be one of: boltz, protenix, rf3, bioemu2, analysis"
         exit 1
         ;;
 esac
