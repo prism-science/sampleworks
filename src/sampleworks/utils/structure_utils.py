@@ -541,8 +541,8 @@ def get_reference_atomarraystack(
     # Same loading as load_structure_with_altlocs, which keeps only the first model.
     extra_fields = ["occupancy", "b_factor"]
     if infer_pdb_file_type(Path(ref_path)) in ("cif", "bcif"):
-        # The author columns carry the input's numbering; selections and pairing use it. A PDB
-        # file has only that numbering, and biotite's PDB reader rejects the fields.
+        # Selections and pairing use the author columns. A PDB file has only that numbering,
+        # and biotite's PDB reader rejects the fields.
         extra_fields += ["auth_seq_id", "auth_asym_id"]
     ref_struct = use_author_numbering(load_any(ref_path, altloc="all", extra_fields=extra_fields))
     # A modified residue (e.g. CSO) recorded as an altloc at the same position as its canonical

@@ -59,11 +59,13 @@ argument. It will output a patched CIF files named `refined-patched.cif` along e
 file. These `refined-patched.cif` files can be used as input to the remaining evaluation scripts.
 
 ## Running the scripts
-Selection strings in the protein configuration CSV are in the input structure's numbering, the
-author columns `auth_asym_id` and `auth_seq_id`. The evaluation scripts read those columns from
-every structure they load and use them for selections and atom pairing, so an output whose
-`label_` columns carry a deposit's numbering (the entity carry of #413) is evaluated on the
-input's numbering.
+Selection strings in the protein configuration CSV are in author numbering, the `auth_asym_id` and
+`auth_seq_id` columns. The RSCC, lDDT and RMSD scripts read those columns from both the reference
+structure and `refined.cif` and use them for selections and atom pairing, so the two files must
+carry the same author numbering; their `label_` columns may differ. An `auth_seq_id` that is not
+an integer is an error. The altloc scripts (`find_altloc_selections`, `classify_altloc_regions`,
+`find_max_rmsd_subsegment`) still read the `label_` columns, which give the same selections only
+for a reference whose two numberings agree (#572).
 
 The evaluation scripts have a common interface defined by the method
 `sampleworks.eval.grid_search_eval_utils.parse_eval_args`. The general form of these commands is:

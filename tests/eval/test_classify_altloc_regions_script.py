@@ -14,9 +14,8 @@ from atomworks.io.utils.io_utils import load_any
 from sampleworks.utils.atom_array_utils import detect_altlocs, load_structure_with_altlocs
 from sampleworks.utils.cif_utils import find_altloc_selections
 
+from tests.script_loader import load_script
 from tests.utils.atom_array_builders import altlocs_to_ensemble_cif
-
-from .script_loader import load_script
 
 
 _SCRIPT_PATH = (

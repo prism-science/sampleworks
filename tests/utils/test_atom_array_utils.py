@@ -982,15 +982,16 @@ class TestUseAuthorNumbering:
         assert list(cast(np.ndarray, result.res_id)) == [-11, -10, 365, 366]
         assert list(cast(np.ndarray, result.chain_id)) == ["P"] * 4
 
-    def test_non_integer_author_number_keeps_res_id(self):
-        """A non-polymer row written as '.' keeps the res_id it was loaded with."""
+    @pytest.mark.parametrize("non_integer", [".", "?", "100A"])
+    def test_non_integer_author_number_raises(self, non_integer: str):
+        """One atom without an integer auth_seq_id fails the whole relabeling."""
         atom_array = _labeled_array()
-        atom_array.set_annotation("auth_seq_id", np.array(["10", ".", "?", "13"]))
+        atom_array.set_annotation("auth_seq_id", np.array(["10", non_integer, "12", "13"]))
 
-        result = use_author_numbering(atom_array)
+        with pytest.raises(ValueError, match="non-integer auth_seq_id"):
+            use_author_numbering(atom_array)
 
-        assert list(cast(np.ndarray, result.res_id)) == [10, 2, 3, 13]
-        assert list(cast(np.ndarray, result.chain_id)) == ["A"] * 4
+        assert list(cast(np.ndarray, atom_array.res_id)) == [1, 2, 3, 4]
 
     def test_without_author_annotations_is_unchanged(self):
         """An array loaded without the author columns comes back as it was."""

@@ -176,15 +176,14 @@ def use_author_numbering(atom_array: AtomArray | AtomArrayStack) -> AtomArray | 
     """Relabel ``res_id`` and ``chain_id`` from the author columns of a loaded mmCIF.
 
     Atomworks loads mmCIF with ``use_author_fields=False``, so ``res_id`` and ``chain_id`` are
-    ``label_seq_id`` and ``label_asym_id``. An output written with the deposit's polymer
-    categories carries the deposit's label ids in those columns and the input's chain and
-    numbering in ``auth_asym_id`` and ``auth_seq_id``. Evaluation selections and atom pairing
-    are in the input's numbering, so the evaluators call this right after loading.
+    ``label_seq_id`` and ``label_asym_id``. Evaluation selections and atom pairing use the
+    author numbering, ``auth_seq_id`` and ``auth_asym_id``, which a reference and an output
+    share even when their label columns differ, so the evaluators call this right after
+    loading.
 
     Side effect: ``res_id`` and ``chain_id`` are overwritten in place wherever the
     ``auth_seq_id`` and ``auth_asym_id`` annotations exist (load with them in ``extra_fields``).
-    Rows whose ``auth_seq_id`` is not an integer (non-polymer rows written as ``.``) keep their
-    ``res_id``. An array without those annotations is returned unchanged.
+    An array without those annotations is left as it was.
 
     Parameters
     ----------
@@ -195,14 +194,24 @@ def use_author_numbering(atom_array: AtomArray | AtomArrayStack) -> AtomArray | 
     -------
     AtomArray | AtomArrayStack
         The same object, relabeled.
+
+    Raises
+    ------
+    ValueError
+        If any atom's ``auth_seq_id`` is not an integer. Keeping the label number for such
+        atoms would mix two numberings in one array.
     """
     categories = atom_array.get_annotation_categories()
     if "auth_seq_id" in categories:
         auth_seq_id = np.asarray(atom_array.auth_seq_id).astype(str)
         is_integer = np.char.isdigit(np.char.lstrip(auth_seq_id, "-"))
-        res_id = cast(np.ndarray, atom_array.res_id).copy()
-        res_id[is_integer] = auth_seq_id[is_integer].astype(int)
-        atom_array.res_id = res_id
+        if not is_integer.all():
+            non_integer_values = sorted(set(auth_seq_id[~is_integer]))
+            raise ValueError(
+                f"{np.count_nonzero(~is_integer)} atoms have a non-integer auth_seq_id "
+                f"({non_integer_values[:5]}); author numbering needs an integer on every atom."
+            )
+        atom_array.res_id = auth_seq_id.astype(int)
     if "auth_asym_id" in categories:
         atom_array.chain_id = np.asarray(atom_array.auth_asym_id).astype(str)
     return atom_array
