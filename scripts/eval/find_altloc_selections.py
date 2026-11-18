@@ -66,7 +66,8 @@ if __name__ == "__main__":
         "--input-csv",
         type=Path,
         required=True,
-        help="Path to the input CSV config file used for grid search",
+        help="Path to the input CSV config file used for grid search. Do not name it "
+        "<output-file stem>_union.csv: that file is overwritten with the unions.",
     )
     parser.add_argument("--output-file", type=Path, required=True)
     parser.add_argument("--min-span", type=int, default=5)

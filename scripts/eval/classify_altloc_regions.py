@@ -482,12 +482,10 @@ def _process_structure(
             letters = sorted(set(atom_array.altloc_id[in_residue & structure_altloc_mask]))
             if len(letters) == 1 and letters[0] in conformer_ids:
                 reasons.append(f"{chain}:{res_id} not covered: single altloc {letters[0]}")
-            else:
-                reasons.append(f"{chain}:{res_id} not covered: in no classified span")
+        reason_text = f" ({'; '.join(reasons)})" if reasons else ""
         logger.warning(
             f"[{protein}] residue coverage invariant not satisfied: "
-            f"{len(missing)} altloc residues missing from classification "
-            f"({'; '.join(reasons)}), "
+            f"{len(missing)} altloc residues missing from classification{reason_text}, "
             f"{len(extra)} classified residues not in full altloc set. "
             "This typically means --min-span > 1 was used upstream."
         )

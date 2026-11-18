@@ -57,8 +57,9 @@ def find_altloc_selections(
 ) -> tuple[list[str], list[str]]:
     """Find alternative location selections in a CIF file.
 
-    Spans and unions are returned separately because they are different kinds of selection: a
-    span is one contiguous altloc run, a union is a whole chain's altloc residues at once.
+    Individual spans at least ``min_span`` residues long are returned as selection strings.
+    Optionally, a final batch of selection strings is also returned that contains all residues
+    with altlocs, one selection per chain.
 
     A multi-model ensemble that keeps altloc annotation is treated as one conformer per model.
     This means that atoms with non-blank altloc ID in the first model conceptually corresponds
