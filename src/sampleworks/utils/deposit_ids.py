@@ -18,6 +18,7 @@ from atomworks.io.transforms.categories import category_to_dict
 from biotite.structure import (
     AtomArray,
     AtomArrayStack,
+    CellList,
     get_residue_positions,
     get_residue_starts,
 )
@@ -50,6 +51,12 @@ _INAPPLICABLE = "."
 _HETERO = "hetero"
 _HETERO_YES = "y"
 _HETERO_NO = "n"
+
+# Atom pairs that link consecutive polymer residues: peptide C-N and nucleic acid O3'-P.
+_BACKBONE_LINKS = (("C", "N"), ("O3'", "P"))
+# Bond length range in angstroms, as in biotite's check_backbone_continuity.
+_MIN_BOND_LENGTH = 1.2
+_MAX_BOND_LENGTH = 1.8
 
 _POLYMER_ENTITY_CATEGORIES = (
     _ENTITY,
@@ -280,13 +287,63 @@ def _residue_atoms(atom_array: AtomArray | AtomArrayStack) -> AtomArray | AtomAr
     return atom_array[..., get_residue_starts(atom_array)]
 
 
+def _backbone_linked(atom_array: AtomArray | AtomArrayStack) -> np.ndarray:
+    """Find the residues bonded to a given residue in the same chain through the backbone.
+
+    A residue is linked when its ``C`` lies within bond length of the ``N`` of another
+    residue in its chain, or its ``N`` within bond length of another residue's ``C`` (``O3'``
+    and ``P`` for nucleic acids). Distances come from the first model, and atoms with
+    non-finite coordinates are skipped.
+
+    Parameters
+    ----------
+    atom_array : AtomArray | AtomArrayStack
+        Structure to inspect.
+
+    Returns
+    -------
+    np.ndarray
+        Whether each residue is linked, shape ``(n_residues,)``.
+    """
+    frame = atom_array[0] if isinstance(atom_array, AtomArrayStack) else atom_array
+    residue_of_atom = get_residue_positions(frame, np.arange(frame.array_length()))
+    finite = np.isfinite(frame.coord).all(axis=-1)
+    linked = np.zeros(len(get_residue_starts(frame)), dtype=bool)
+    for head_name, tail_name in _BACKBONE_LINKS:
+        heads = np.flatnonzero((frame.atom_name == head_name) & finite)
+        tails = np.flatnonzero((frame.atom_name == tail_name) & finite)
+        if heads.size == 0 or tails.size == 0:
+            continue
+        cell_list = CellList(frame.coord[tails], cell_size=_MAX_BOND_LENGTH)
+        candidates = cell_list.get_atoms(frame.coord[heads], radius=_MAX_BOND_LENGTH)
+        head_of_pair, tail_column = np.nonzero(candidates >= 0)  # -1 pads the candidate lists
+        head = heads[head_of_pair]
+        tail = tails[candidates[head_of_pair, tail_column]]
+        distance = np.linalg.norm(frame.coord[head] - frame.coord[tail], axis=-1)
+        bonded = (
+            (distance >= _MIN_BOND_LENGTH)
+            & (residue_of_atom[head] != residue_of_atom[tail])
+            & (frame.chain_id[head] == frame.chain_id[tail])
+        )
+        linked[residue_of_atom[head[bonded]]] = True
+        linked[residue_of_atom[tail[bonded]]] = True
+    return linked
+
+
 def _polymer_residues(atom_array: AtomArray | AtomArrayStack, deposit: Deposit) -> np.ndarray:
     """Decide which residues of a structure belong to a polymer chain.
 
     A residue is polymer when it is written as ``ATOM``, or when it is a ``HETATM`` whose
-    canonical name is listed in the deposited ``entity_poly_seq`` (a modified residue such as
-    MSE). Membership is decided by name, not residue number, because ligand numbers can fall
-    inside the sequence range of a chain.
+    canonical name is listed in the deposited ``entity_poly_seq`` and that is bonded to its
+    chain through the backbone (``_backbone_linked``) (e.g. like a modified residue such as MSE is).
+    A free amino acid (a GLU ligand beside a chain containing GLU) has a listed name but no
+    such bond, so it stays a ligand. A modified residue whose neighbors are both unobserved
+    has no bond to test: we still link it to the chain when its ids name a position in the
+    deposited sequence (``_positions_by_lookup``), but the sequence alignment does not link it.
+
+    Only input structures are classified this way: model wrappers may write every residue as
+    ``ATOM``, so model residues follow the input residues they were matched to
+    (``place_in_deposit``).
 
     Parameters
     ----------
@@ -305,7 +362,7 @@ def _polymer_residues(atom_array: AtomArray | AtomArrayStack, deposit: Deposit) 
         [_canonical_monomer(str(name)) in deposit.monomers for name in residue_atoms.res_name],
         dtype=bool,
     )
-    return ~residue_atoms.hetero | listed
+    return ~residue_atoms.hetero | (listed & _backbone_linked(atom_array))
 
 
 def _positions_by_lookup(
@@ -317,9 +374,7 @@ def _positions_by_lookup(
     """Place residues by looking up a key for each residue among the deposited positions.
 
     The key holds the author ids or the label ids of the residue
-    (``_resolve_deposit_positions``). A polymer ``HETATM`` residue with no position is treated
-    as a ligand, since a free amino acid (a GLU ligand beside a chain containing GLU) looks like
-    a modified residue by name.
+    (``_resolve_deposit_positions``).
 
     Parameters
     ----------
@@ -330,7 +385,8 @@ def _positions_by_lookup(
     residue_atoms : AtomArray | AtomArrayStack
         One atom per residue that ``keys`` describe (``_residue_atoms``).
     polymer : np.ndarray
-        Whether each residue is polymer (``_polymer_residues``), shape ``(n_residues,)``.
+        Whether each residue is polymer (``_polymer_residues``), shape ``(n_residues,)``. A
+        ``HETATM`` residues that match a deposited sequence position are considered polymer.
 
     Returns
     -------
@@ -340,12 +396,18 @@ def _positions_by_lookup(
     Raises
     ------
     ValueError
-        If an ``ATOM`` residue has no position, a polymer residue name is not among the
-        monomers of its position, or no residue is placed.
+        If a polymer residue has no position or its name is not among the monomers of its
+        sequence position, or no residue is placed.
     """
-    unmatched = {
-        key for key, hetero in zip(keys, residue_atoms.hetero) if not hetero and key not in lookup
-    }
+    sequenced = np.array(
+        [
+            key in lookup and _canonical_monomer(str(name)) in lookup[key].monomers
+            for key, name in zip(keys, residue_atoms.res_name, strict=True)
+        ],
+        dtype=bool,
+    )
+    polymer = polymer | sequenced
+    unmatched = {key for key, is_polymer in zip(keys, polymer) if is_polymer and key not in lookup}
     if unmatched:
         raise ValueError(
             f"{len(unmatched)} residue(s) have no deposited pdbx_poly_seq_scheme row, "
@@ -354,11 +416,11 @@ def _positions_by_lookup(
     renamed = {
         (key, name)
         for key, name, is_polymer in zip(keys, residue_atoms.res_name, polymer)
-        if is_polymer and key in lookup and _canonical_monomer(name) not in lookup[key].monomers
+        if is_polymer and _canonical_monomer(name) not in lookup[key].monomers
     }
     if renamed:
         raise ValueError(f"Residue names disagree with the deposit, e.g. {sorted(renamed)[:3]}")
-    positions = [lookup.get(key) if is_polymer else None for key, is_polymer in zip(keys, polymer)]
+    positions = [lookup[key] if is_polymer else None for key, is_polymer in zip(keys, polymer)]
     if not any(positions):
         raise ValueError("Output has no polymer residues")
     return positions
@@ -584,6 +646,7 @@ def _resolve_deposit_positions(
 def _walk_deposited_positions(
     atom_array: AtomArray | AtomArrayStack,
     known: list[_PolySeqSchemePosition | None],
+    polymer: np.ndarray,
     deposit: Deposit,
 ) -> list[_PolySeqSchemePosition | None]:
     """Place polymer residues that have no position by counting from a placed neighbor.
@@ -600,6 +663,8 @@ def _walk_deposited_positions(
         Structure that ``known`` describes, e.g. a model with built residues.
     known : list[_PolySeqSchemePosition | None]
         Deposited position of each residue, ``None`` where unknown.
+    polymer : np.ndarray
+        Whether each residue is polymer, shape ``(n_residues,)``; only these are placed.
     deposit : Deposit
         Deposited mmCIF that ``known`` refers to.
 
@@ -616,7 +681,6 @@ def _walk_deposited_positions(
         (``_one_residue_per_position``).
     """
     residue_atoms = _residue_atoms(atom_array)
-    polymer = _polymer_residues(atom_array, deposit)
     chain_positions: dict[str, list[_PolySeqSchemePosition]] = {}  # asym_id -> scheme order
     for position in deposit.scheme:
         chain_positions.setdefault(position.asym_id, []).append(position)
@@ -756,7 +820,8 @@ def place_in_deposit(
     looked up in the deposited mmCIF. Instead, the input residues are placed in the deposited
     mmCIF (``_resolve_deposit_positions``), each model residue with a matched atom takes the
     position of its input residue, and residues the model built are placed by counting from
-    their neighbors along the deposited chain (``_walk_deposited_positions``).
+    their neighbors along the deposited chain (``_walk_deposited_positions``). A model residue
+    matched to an input ligand stays a ligand, whatever the model wrote as its ``hetero`` flag.
 
     Parameters
     ----------
@@ -788,10 +853,14 @@ def place_in_deposit(
     input_positions = _resolve_deposit_positions(input_atom_array, deposit)
     model_residue = get_residue_positions(model_atom_array, model_indices)  # (n_common,)
     input_residue = get_residue_positions(input_atom_array, input_indices)  # (n_common,)
-    known: list[_PolySeqSchemePosition | None] = [None] * len(get_residue_starts(model_atom_array))
+    n_model_residues = len(get_residue_starts(model_atom_array))
+    known: list[_PolySeqSchemePosition | None] = [None] * n_model_residues
     for residue, matched in zip(model_residue, input_residue, strict=True):
         known[residue] = known[residue] or input_positions[matched]
-    positions = _walk_deposited_positions(model_atom_array, known, deposit)
+    input_ligand = np.array([position is None for position in input_positions])
+    model_polymer = np.ones(n_model_residues, dtype=bool)
+    model_polymer[model_residue[input_ligand[input_residue]]] = False
+    positions = _walk_deposited_positions(model_atom_array, known, model_polymer, deposit)
     return annotate_deposit_ids(model_atom_array, deposit, positions)
 
 
