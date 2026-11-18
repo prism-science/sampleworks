@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from numpy.typing import NDArray
 
+from .real_space_density_deps.ops import CUDA_LOAD_ERROR
 from .real_space_density_deps.ops.dilate_points_cuda import dilate_atom_centric
 from .real_space_density_deps.qfit.spacegroups import GetSpaceGroup
 from .real_space_density_deps.qfit.unitcell import UnitCell
@@ -320,6 +321,54 @@ class XMap_torch:
             origin=self.origin,
             device=self.array.device,
         )
+
+
+def use_cuda_density_kernels(
+    device: torch.device,
+    *,
+    allow_torch_fallback: bool = False,
+    kernel_load_error: str | None = CUDA_LOAD_ERROR,
+) -> bool:
+    """Decide whether density is computed with the compiled CUDA kernel.
+
+    On a CUDA device the kernel is required unless ``allow_torch_fallback`` is set, so a
+    missing build fails at setup rather than silently running the slower PyTorch path.
+
+    Parameters
+    ----------
+    device
+        Device the density is computed on.
+    allow_torch_fallback
+        Use the PyTorch path, with a warning, when the kernel failed to build.
+    kernel_load_error
+        Why the kernel failed to build, or None if it built.
+
+    Returns
+    -------
+    bool
+        True to use the CUDA kernel, False for the PyTorch path.
+
+    Raises
+    ------
+    RuntimeError
+        If ``device`` is CUDA, the kernel failed to build, and fallback is not allowed.
+    """
+    if device.type != "cuda":
+        return False
+    if kernel_load_error is None:
+        return True
+    if not allow_torch_fallback:
+        raise RuntimeError(
+            f"The CUDA density kernel failed to build ({kernel_load_error}). Install the "
+            "CUDA toolchain it needs, or pass --allow-torch-fallback (allow_torch_fallback "
+            "in a --loss-config file) to use the slower PyTorch density path."
+        )
+    warnings.warn(
+        f"The CUDA density kernel failed to build ({kernel_load_error}); using the slower "
+        "PyTorch density path because allow_torch_fallback is set.",
+        stacklevel=2,
+    )
+    return False
 
 
 class DifferentiableTransformer(torch.nn.Module):
