@@ -1,15 +1,23 @@
 """Tests for ``BondGeometryLoss``, the bond-length and steric-clash penalty.
 
 The toy systems are a water molecule (two O-H bonds, one non-bonded H-H pair) and
-pairs of single-atom residues (no bonds, one non-bonded pair), placed by hand so the
-expected hinge values follow from the covalent radii alone. The last test scores the
-deposited 1VME protein against a noised copy of it.
+pairs of single-atom residues (no template bonds, one pair that is non-bonded unless
+the atom array bonds it explicitly), placed by hand so the expected hinge values follow
+from the covalent radii alone. One test scores the deposited 1VME protein against a
+noised copy of it.
 """
 
 import numpy as np
 import pytest
 import torch
-from biotite.structure import array, Atom, AtomArray, AtomArrayStack, filter_amino_acids
+from biotite.structure import (
+    array,
+    Atom,
+    AtomArray,
+    AtomArrayStack,
+    BondList,
+    filter_amino_acids,
+)
 from biotite.structure.info import residue
 from sampleworks.core.losses.config import build_loss, LossConfig
 from sampleworks.core.losses.geometry import BondGeometryLoss
@@ -397,3 +405,33 @@ def test_options_reject_invalid_distances(option, value):
     """
     with pytest.raises(ValueError, match=option):
         BondGeometryOptions(**{option: value})
+
+
+@pytest.fixture
+def explicitly_bonded_sulfurs() -> AtomArray:
+    """Two single-atom sulfur residues joined by a bond the residue templates do not know.
+
+    Stands in for a disulfide or a covalent ligand link: the bond exists only in the
+    atom array's own ``bonds``.
+    """
+    sulfurs = single_atom_residues("S")
+    sulfurs.bonds = BondList(sulfurs.array_length(), np.array([[0, 1]]))
+    return sulfurs
+
+
+def test_explicit_bond_is_not_scored_as_a_clash(explicitly_bonded_sulfurs):
+    """An explicitly bonded pair at its ideal length costs nothing; unbonded, it clashes."""
+    ideal_length = 2 * covalent_radius("S")
+    coords = pair_coords(ideal_length)
+
+    assert make_loss(single_atom_residues("S")).collision_loss(coords) > 0
+    assert make_loss(explicitly_bonded_sulfurs)(coords) == 0.0
+
+
+def test_explicit_bond_is_held_at_its_ideal_length(explicitly_bonded_sulfurs):
+    """Stretching an explicit bond past the tolerance costs the excess squared."""
+    excess = 0.3
+    stretched_length = 2 * covalent_radius("S") + BOND_TOLERANCE + excess
+    loss = make_loss(explicitly_bonded_sulfurs)
+
+    assert loss.bond_length_loss(pair_coords(stretched_length)).item() == pytest.approx(excess**2)

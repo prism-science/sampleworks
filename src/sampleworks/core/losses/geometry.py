@@ -121,19 +121,24 @@ class BondGeometryLoss:
         return torch.tensor(radii, dtype=torch.float32, device=device)
 
     def _build_bonds(self, atom_array: AtomArray, device):
-        """Bonded-atom endpoints and ideal lengths, inferred from residue-name templates.
+        """Bonded-atom endpoints and ideal lengths, from residue templates and explicit bonds.
 
         biotite's ``connect_via_residue_names`` infers the intra- and inter-residue bonds from the
-        standard component templates and returns a ``BondList``. By default that list already holds
-        each bond exactly once with the lower atom index first, so ``as_array()`` gives us the edge
-        list directly -- its columns are atom i, atom j, bond type. (``get_all_bonds()`` would
-        instead return padded per-atom adjacency, which lists every bond twice.) A bond's ideal
-        length is the sum of the two atoms' covalent radii.
+        standard component templates and returns a ``BondList``. Templates cannot know bonds that
+        are specific to this structure (disulfides, covalent ligand links), so the bonds
+        ``atom_array`` itself carries are merged in; ``BondList.merge`` drops the duplicates. The
+        merged list holds each bond exactly once with the lower atom index first, so ``as_array()``
+        gives us the edge list directly -- its columns are atom i, atom j, bond type.
+        (``get_all_bonds()`` would instead return padded per-atom adjacency, which lists every bond
+        twice.) A bond's ideal length is the sum of the two atoms' covalent radii.
 
         Returns three aligned 1-D tensors, each of length n_bonds: the first endpoint of every bond,
         the second endpoint, and the ideal length.
         """
-        bonds = connect_via_residue_names(atom_array).as_array()  # [n_bonds, 3]: i, j, bond type
+        bond_list = connect_via_residue_names(atom_array)
+        if atom_array.bonds is not None:
+            bond_list = bond_list.merge(atom_array.bonds)
+        bonds = bond_list.as_array()  # [n_bonds, 3]: i, j, bond type
         # as_array() is uint32, which torch refuses to convert, so cast to a signed integer.
         pair_array = bonds[:, :2].astype(np.int64)
 
