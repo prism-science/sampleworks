@@ -706,6 +706,7 @@ class TestLossSelection:
             "resolution": 1.8,
             "loss_order": 2,
             "em": False,
+            "allow_torch_fallback": False,
         }
 
     def test_density_options_still_reach_the_flat_config_fields(self):
