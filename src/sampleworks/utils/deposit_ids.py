@@ -31,6 +31,8 @@ from sampleworks.utils.cif_utils import add_category_to_cif
 from sampleworks.utils.sequence import align_to_sequence
 
 
+_Structure = TypeVar("_Structure", AtomArray, AtomArrayStack)
+
 # mmCIF category names, spelled once: a mistyped key would silently skip a category instead of
 # raising.
 _ATOM_SITE = "atom_site"
@@ -260,9 +262,6 @@ class Deposit:
         return cls(
             block, monomers, _scheme_positions(block), category_to_dict(block, _PDBX_NONPOLY_SCHEME)
         )
-
-
-_Structure = TypeVar("_Structure", AtomArray, AtomArrayStack)
 
 
 class _Residues(NamedTuple):
