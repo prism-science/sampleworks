@@ -1,6 +1,7 @@
 from collections.abc import Iterable
 
 import gemmi
+import numpy as np
 from loguru import logger
 
 from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.sf import (
@@ -67,6 +68,25 @@ def elements_to_scattering_indices(elements: Iterable[str]) -> list[int]:
         Scattering tensor indices, one per input element.
     """
     return [element_to_scattering_idx(e) for e in elements]
+
+
+def atomic_numbers_to_symbols(atomic_numbers: Iterable[int]) -> np.ndarray:
+    """Convert atomic numbers to upper-case element symbols (e.g. ``15`` -> ``'P'``).
+
+    Use this instead of guessing elements from atom names, which misreads ligand
+    atom names such as ``PB`` (a phosphorus) as lead.
+
+    Parameters
+    ----------
+    atomic_numbers
+        Atomic numbers, one per atom. ``0`` (unknown) maps to gemmi's ``'X'``.
+
+    Returns
+    -------
+    np.ndarray
+        Element symbols, shape ``(n_atoms,)``.
+    """
+    return np.array([gemmi.Element(int(z)).name.upper() for z in atomic_numbers])
 
 
 def covalent_radius(raw: str) -> float:
