@@ -22,6 +22,7 @@ from sampleworks.utils.deposit_ids import (
     annotate_deposit_ids,
     Deposit,
     DEPOSIT_LABEL_ANNOTATIONS,
+    place_in_deposit,
     set_deposited_structure,
 )
 from sampleworks.utils.guidance_script_arguments import GuidanceConfig
@@ -38,6 +39,9 @@ from sampleworks.utils.guidance_script_utils import (
 _SEQUENCE = ["MET", "GLY", "HIS", "HIS", "HIS", "HIS", "MSE", "CYS", "LYR", "CYS"]
 _AUTHOR_OFFSET = -4  # pdb_seq_num = seq_id + _AUTHOR_OFFSET
 _HETERO = {"MSE", "LYR", "CSO", "HOH", "GOL", "XYZ1"}
+# Backbone atoms of a residue and their x offsets; residues sit 3.8 apart, so the C-N bond
+# between neighbors is 1.33 angstrom.
+_BACKBONE_X = (("N", 0.0), ("CA", 1.46), ("C", 2.47))
 
 
 def _reference(chem_comp_ids: list[str] | None = None) -> CIFFile:
@@ -97,7 +101,11 @@ def _output(
     renumber: bool = False,
     bonds: tuple[tuple[int, int], ...] = (),
 ) -> AtomArrayStack:
-    """Build a two-model, one-CA-per-residue output in the deposit's author numbering.
+    """Build a two-model output in the deposit's author numbering.
+
+    Modeled residues are N, CA and C atoms along a line, each C a peptide bond length from the
+    next residue's N, so modified residues are bonded into the chain. ``extra`` residues are
+    one CA each, far from the chain.
 
     Parameters
     ----------
@@ -109,8 +117,8 @@ def _output(
         Write the modeled residues as chain ``A`` numbered 1..n instead, as a model wrapper
         does without #414. ``extra`` residues keep their numbers, in chain ``A``.
     bonds : tuple[tuple[int, int], ...]
-        Bonded pairs of output residues, by index; ``set_structure`` writes them to
-        ``struct_conn``.
+        Bonded pairs of output residues, by index, joining their CA atoms; ``set_structure``
+        writes them to ``struct_conn``.
 
     Returns
     -------
@@ -122,15 +130,25 @@ def _output(
         residues = [
             ("A", number, name) for number, (_, _, name) in enumerate(residues[: len(positions)], 1)
         ] + [("A", number, name) for _, number, name in extra]
-    atom_array = AtomArray(len(residues))
-    atom_array.chain_id[:] = [chain for chain, _, _ in residues]
-    atom_array.res_id[:] = [number for _, number, _ in residues]
-    atom_array.res_name[:] = [name for _, _, name in residues]
-    atom_array.hetero[:] = [name in _HETERO for _, _, name in residues]
-    atom_array.atom_name[:] = "CA"
-    atom_array.element[:] = "C"
-    bond_rows = [(i, j, BondType.SINGLE) for i, j in bonds]
-    atom_array.bonds = BondList(len(residues), np.array(bond_rows, dtype=int).reshape(-1, 3))
+    atoms = []  # (residue index, atom name, x)
+    for index in range(len(residues)):
+        if index < len(positions):
+            atoms += [(index, name, 3.8 * index + x) for name, x in _BACKBONE_X]
+        else:
+            atoms.append((index, "CA", 100.0 * (index + 1)))
+    residue_of_atom = np.array([index for index, _, _ in atoms])
+    atom_array = AtomArray(len(atoms))
+    atom_array.chain_id[:] = [residues[index][0] for index in residue_of_atom]
+    atom_array.res_id[:] = [residues[index][1] for index in residue_of_atom]
+    atom_array.res_name[:] = [residues[index][2] for index in residue_of_atom]
+    atom_array.hetero[:] = np.isin(atom_array.res_name, list(_HETERO))
+    atom_array.atom_name[:] = [name for _, name, _ in atoms]
+    atom_array.element[:] = [name[0] for _, name, _ in atoms]
+    atom_array.coord[:] = 0.0
+    atom_array.coord[:, 0] = [x for _, _, x in atoms]
+    ca_of_residue = {index: i for i, (index, name, _) in enumerate(atoms) if name == "CA"}
+    bond_rows = [(ca_of_residue[i], ca_of_residue[j], BondType.SINGLE) for i, j in bonds]
+    atom_array.bonds = BondList(len(atoms), np.array(bond_rows, dtype=int).reshape(-1, 3))
     return stack([atom_array, atom_array])
 
 
@@ -156,6 +174,13 @@ def _column(output: CIFFile, category: str, column: str) -> list[str]:
     return output.block[category][column].as_array(str).tolist()
 
 
+def _ca_column(output: CIFFile, column: str) -> list[str]:
+    """Return one ``atom_site`` column at the CA atoms, one per residue of ``_output``."""
+    atom_site = output.block["atom_site"]
+    is_ca = atom_site["label_atom_id"].as_array(str) == "CA"
+    return atom_site[column].as_array(str)[is_ca].tolist()
+
+
 def test_carry_takes_label_ids_from_deposited_scheme():
     """Author P/-2..6 maps to label A/2..10, modified residues included, across both models."""
     positions = list(range(1, len(_SEQUENCE)))  # MET -3 is unmodeled
@@ -171,7 +196,7 @@ def test_carry_takes_label_ids_from_deposited_scheme():
     assert set(_column(output, "atom_site", "auth_asym_id")) == {"P"}
     assert set(_column(output, "atom_site", "label_asym_id")) == {"A"}
     assert set(_column(output, "atom_site", "label_entity_id")) == {"1"}
-    assert _column(output, "atom_site", "label_seq_id") == [str(p + 1) for p in positions] * 2
+    assert _ca_column(output, "label_seq_id") == [str(p + 1) for p in positions] * 2
     assert _column(output, "entity", "id") == ["1"]
     assert _column(output, "struct_asym", "id") == ["A"]
 
@@ -198,7 +223,7 @@ def test_carry_maps_gap_beside_repeat_by_number():
     positions = [2, 3, 5, 6]  # HIS HIS _ HIS MSE
     output, _ = _carry(_output(positions), _reference())
 
-    assert _column(output, "atom_site", "label_seq_id") == ["3", "4", "6", "7"] * 2
+    assert _ca_column(output, "label_seq_id") == ["3", "4", "6", "7"] * 2
 
 
 def test_annotate_rejects_residue_no_match_places():
@@ -214,7 +239,7 @@ def test_carry_accepts_canonical_parent_of_deposited_modified_residue():
     """A model that writes CSO where the deposit has CYS (or CYS for CSO) still maps."""
     output, _ = _carry(_renamed(_output([6, 7]), "CYS", "CSO"), _reference())
 
-    assert _column(output, "atom_site", "label_seq_id") == ["7", "8"] * 2
+    assert _ca_column(output, "label_seq_id") == ["7", "8"] * 2
 
 
 @pytest.mark.parametrize("chain", ["A", "P"])
@@ -231,13 +256,10 @@ def test_carry_falls_back_to_alignment_for_renumbered_output(chain):
     output, categories = _carry(atoms, _reference())
 
     assert "pdbx_poly_seq_scheme" in categories
-    assert _column(output, "atom_site", "label_seq_id") == [str(p + 1) for p in positions] * 2
+    assert _ca_column(output, "label_seq_id") == [str(p + 1) for p in positions] * 2
     assert set(_column(output, "atom_site", "label_asym_id")) == {"A"}
     assert set(_column(output, "atom_site", "auth_asym_id")) == {"P"}
-    assert (
-        _column(output, "atom_site", "auth_seq_id")
-        == [str(p + 1 + _AUTHOR_OFFSET) for p in positions] * 2
-    )
+    assert _ca_column(output, "auth_seq_id") == [str(p + 1 + _AUTHOR_OFFSET) for p in positions] * 2
     assert set(_column(output, "atom_site", "label_entity_id")) == {"1"}
     assert _column(output, "struct_asym", "id") == ["A"]
     assert _column(output, "entity", "id") == ["1"]
@@ -247,12 +269,13 @@ def test_carry_aligns_residues_that_differ_only_by_insertion_code():
     """Renumbered residues 2 and 2A are two sequence positions, not one."""
     positions = [1, 2, 3, 4, 5, 6, 8, 9]
     atoms = _output(positions, renumber=True)
-    atoms.res_id[2] = 2  # the second HIS becomes 2A, beside the HIS at 2
-    atoms.ins_code[2] = "A"
+    second_his = atoms.res_id == 3
+    atoms.res_id[second_his] = 2  # the second HIS becomes 2A, beside the HIS at 2
+    atoms.ins_code[second_his] = "A"
 
     output, _ = _carry(atoms, _reference())
 
-    assert _column(output, "atom_site", "label_seq_id") == [str(p + 1) for p in positions] * 2
+    assert _ca_column(output, "label_seq_id") == [str(p + 1) for p in positions] * 2
 
 
 def test_carry_rejects_aligned_chain_naming_no_deposited_chain():
@@ -285,7 +308,7 @@ def test_carry_accepts_met_for_deposited_selenomethionine():
     )
     assert rows[5:9] == [("6", "HIS", "n"), ("7", "MSE", "y"), ("7", "MET", "y"), ("8", "CYS", "n")]
     assert len(rows) == len(_SEQUENCE) + 2  # the deposit's CSO hetero row plus the new MET row
-    assert _column(output, "atom_site", "label_seq_id") == ["6", "7", "8"] * 2
+    assert _ca_column(output, "label_seq_id") == ["6", "7", "8"] * 2
     assert {"MET", "MSE"} <= set(_column(output, "chem_comp", "id"))
 
 
@@ -335,7 +358,7 @@ def test_carry_copies_deposited_chem_comp_rows(caplog: pytest.LogCaptureFixture)
     ]
     assert deposited_names == ["DEPOSITED GLY", "DEPOSITED HIS"]
     assert "Reference CIF lacks chem_comp rows for ['XYZ1']" in caplog.text
-    assert _column(output, "atom_site", "label_seq_id") == ["2", "3", "9", "."] * 2
+    assert _ca_column(output, "label_seq_id") == ["2", "3", "9", "."] * 2
 
 
 @pytest.mark.parametrize(
@@ -367,11 +390,7 @@ def test_carry_keeps_polymer_beside_non_polymer(positions, ligand, renumber):
     assert {_column(output, "atom_site", "label_asym_id")[i] for i in ligand_rows} == {ligand_chain}
     assert {_column(output, "atom_site", "label_seq_id")[i] for i in ligand_rows} == {"."}
     assert {_column(output, "atom_site", "label_entity_id")[i] for i in ligand_rows} == {"3"}
-    polymer_seq = [
-        seq
-        for i, seq in enumerate(_column(output, "atom_site", "label_seq_id"))
-        if i not in ligand_rows
-    ]
+    polymer_seq = [seq for seq in _ca_column(output, "label_seq_id") if seq != "."]
     assert polymer_seq == [str(p + 1) for p in positions] * 2
     assert _column(output, "struct_asym", "id") == ["A"]
     assert _column(output, "entity", "id") == ["1"]
@@ -602,6 +621,7 @@ def test_saved_cif_numbers_model_added_residues_from_the_deposit(
     built = chain_atoms[chain_atoms.atom_name == "CA"][: len(added)]
     built.res_id = np.arange(len(added)) - 1000  # apart from the chain's own numbers
     built.res_name[:] = added
+    built.hetero[:] = False  # copied from the chain's first CAs, which may be MSE
     model = built + chain_atoms
     model.res_id = get_residue_positions(model, np.arange(model.array_length())) + 1
     model.ins_code[:] = ""
@@ -737,6 +757,70 @@ def test_relabel_keeps_input_labels_when_a_built_residue_contradicts_the_deposit
     assert "lands on deposited ['HIS']" in caplog.text
 
 
+def _with_free_amino_acid(chain: str, renumber: bool) -> AtomArray:
+    """Build ``_output`` with a free HIS ligand (``HETATM``, one atom) numbered 101 in ``chain``.
+
+    The deposited sequence contains HIS, so only the missing backbone bond tells the ligand
+    from a modified residue.
+    """
+    atoms = _output([1, 2, 3, 4, 5, 6, 8, 9], extra=((chain, 101, "HIS"),), renumber=renumber)[0]
+    atoms.hetero[atoms.res_id == 101] = True
+    return atoms
+
+
+@pytest.mark.parametrize(
+    ("chain", "renumber"),
+    [("P", False), ("L", False), ("A", True)],
+    ids=["beside-chain", "own-chain", "renumbered"],
+)
+def test_free_amino_acid_stays_a_ligand(chain, renumber):
+    """A free HIS is not placed in the sequence, whether the input or a model is placed."""
+    atoms = _with_free_amino_acid(chain, renumber)
+    deposit = Deposit.from_cif(_reference())
+    every_atom = np.arange(atoms.array_length())
+
+    for placed in (
+        annotate_deposit_ids(atoms, deposit),
+        place_in_deposit(atoms, atoms, every_atom, every_atom, deposit),
+    ):
+        is_ligand = placed.res_id == 101
+        assert set(placed.deposit_label_seq_id[is_ligand]) == {"."}
+        assert set(placed.deposit_label_seq_id[~is_ligand]) == {
+            str(p + 1) for p in [1, 2, 3, 4, 5, 6, 8, 9]
+        }
+
+
+def test_modified_residue_without_observed_neighbors_takes_its_deposited_position():
+    """An MSE with no backbone neighbor is placed by its ids, since the deposit sequences it."""
+    atoms = _output([2, 6])[0]  # HIS -1, MSE 3
+    atoms.coord[atoms.res_name == "MSE"] += 50.0  # its neighbors are unobserved
+    deposit = Deposit.from_cif(_reference())
+    every_atom = np.arange(atoms.array_length())
+
+    for placed in (
+        annotate_deposit_ids(atoms, deposit),
+        place_in_deposit(atoms, atoms, every_atom, every_atom, deposit),
+    ):
+        assert list(dict.fromkeys(placed.deposit_label_seq_id)) == ["3", "7"]
+
+
+def test_model_written_as_atom_records_keeps_its_ligand():
+    """A model that writes every residue as ATOM still leaves the input's ligand unsequenced."""
+    struct = _output([1, 2, 3], extra=(("P", 101, "GOL"),))[0]
+    model = struct.copy()
+    model.hetero[:] = False
+    every_atom = np.arange(struct.array_length())
+
+    placed = place_in_deposit(model, struct, every_atom, every_atom, Deposit.from_cif(_reference()))
+
+    assert set(placed.deposit_label_seq_id[placed.res_name == "GOL"]) == {"."}
+    assert list(dict.fromkeys(placed.deposit_label_seq_id[placed.res_name != "GOL"])) == [
+        "2",
+        "3",
+        "4",
+    ]
+
+
 def test_carry_rejects_two_residues_at_one_deposited_position():
     """Two residues a match gives one deposited position fail instead of sharing its ids."""
     atoms = _output([2, 3, 3, 4])  # HIS HIS HIS HIS, the middle two both author 0
@@ -758,11 +842,11 @@ def test_alignment_accepts_any_deposited_alternative_at_a_position(name):
     """A position deposited with two monomers matches either."""
     positions = [5, 6, 7, 8, 9]  # HIS MSE CYS LYR CYS/CSO
     atoms = _output(positions, renumber=True)
-    atoms.res_name[-1] = name
+    atoms.res_name[atoms.res_id == len(positions)] = name
 
     output, _ = _carry(atoms, _reference())
 
-    assert _column(output, "atom_site", "label_seq_id") == [str(p + 1) for p in positions] * 2
+    assert _ca_column(output, "label_seq_id") == [str(p + 1) for p in positions] * 2
 
 
 def test_save_everything_writes_cifs_when_entity_carry_fails(
