@@ -816,14 +816,22 @@ def place_in_deposit(
     input_indices: np.ndarray,
     deposit: Deposit,
 ) -> AtomArray:
-    """Label a model with the deposited ids of its residues, using the input it was matched to.
+    """Give a model's residues the chain, residue and entity IDs they have in the deposited mmCIF.
 
-    Models renumber residues and build ones the input lacks, so their own numbering cannot be
-    looked up in the deposited mmCIF. Instead, the input residues are placed in the deposited
-    mmCIF (``_resolve_deposit_positions``), each model residue with a matched atom takes the
-    position of its input residue, and residues the model built are placed by counting from
-    their neighbors along the deposited chain (``_walk_deposited_positions``). A model residue
-    matched to an input ligand stays a ligand, whatever the model wrote as its ``hetero`` flag.
+    The deposited mmCIF is the PDB entry file as it was submitted, with its own IDs. A structure
+    prediction model often numbers its residues differently from that file, and it can build
+    residues the input file does not have. So the model's own numbers cannot be used directly.
+
+    To address this, we:
+
+    1. Find each residue of the input file in the deposited mmCIF.
+    2. Give each model residue that shares atoms with an input residue
+       the IDs of that input residue.
+    3. Give each residue the model built the IDs that follow its neighbors
+       along the deposited chain.
+
+    A model residue that matches an input ligand stays a ligand, even if the model marks it
+    differently (its ``hetero`` flag).
 
     Parameters
     ----------
