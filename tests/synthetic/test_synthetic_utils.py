@@ -38,7 +38,10 @@ from SFC_Torch.io import PDBParser
 from SFC_Torch.utils import assert_numpy
 
 
-DMIN = 2.0
+# SFC_Torch keeps several dense [atoms, reflections] tensors alive at once; at 2 Å on 6b8x
+# one Fprotein call needs several GiB of RAM. These tests check that the conversion is
+# faithful and that occupancies change the amplitudes, which needs no high resolution.
+DMIN = 4.0
 
 # chain_info fields the model wrappers read: chain_type (all), the canonical sequence
 # (Boltz/Protpardelle polymer YAML), and res_name (Boltz ligand CCD code).

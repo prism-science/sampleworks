@@ -32,7 +32,6 @@ from sampleworks.utils.elements import covalent_radius
 # human readers and the ty checker. Worked examples: core/scalers/latent_optimization.py.
 
 
-# TODO(#420): this loss has no test coverage.
 # TODO(#363): widen __call__ to LossFunctionProtocol so this composes with the other losses.
 class BondGeometryLoss:
     """Penalize distorted bonds and steric clashes in the denoised structure.

@@ -151,7 +151,7 @@ readiness table, and [docs/IT_OPT_TESTING.md](docs/IT_OPT_TESTING.md) for how to
 
 | Loss                           | Guided by                                                              | Its options                                                                                    |
 | ------------------------------ | ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `real_space_density` (default) | Fit to a density map                                                   | `--density`, `--resolution`, `--loss-order`, `--em`, `--scattering-table`                      |
+| `real_space_density` (default) | Fit to a density map                                                   | `--density`, `--resolution`, `--loss-order`, `--em`, `--scattering-table`, `--allow-torch-fallback` |
 | `structure_factor`             | Fit to structure-factor amplitudes from an MTZ                         | `--mtzfile`, `--expcolumns`, `--resolution`, `--bulk-solvent`, `--scattering-factor-mode`, ... |
 | `diffuse_bragg`                | Fit to Bragg amplitudes and anisotropic diffuse intensities (lunus.sf) | `--bragg-target`, `--diffuse-target`, `--bragg-weight`, `--resolution`, ...                    |
 

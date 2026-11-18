@@ -10,6 +10,7 @@ from loguru import logger
 from sampleworks.core.forward_models.xray.real_space_density import (
     DifferentiableTransformer,
     scale_map,
+    use_cuda_density_kernels,
     XMap_torch,
 )
 from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.sf import (
@@ -278,6 +279,7 @@ class RealSpaceLossFunction:
         em: bool = False,
         loss_order: int = 2,
         device: torch.device | None = None,
+        allow_torch_fallback: bool = False,
     ):
         """Hardcoded loss function for now, L1 or L2 loss for fitting real space
         electron density.
@@ -294,7 +296,9 @@ class RealSpaceLossFunction:
             scattering_params=scattering_params,
             em=em,
             device=device,
-            use_cuda_kernels=device.type == "cuda" and torch.cuda.is_available(),
+            use_cuda_kernels=use_cuda_density_kernels(
+                device, allow_torch_fallback=allow_torch_fallback
+            ),
         )
 
         # TODO: selection doesn't do anything right now
@@ -459,6 +463,7 @@ def build_real_space_density_loss(
         em=options.em,
         loss_order=options.loss_order,
         device=device,
+        allow_torch_fallback=options.allow_torch_fallback,
     )
 
     # Experimental maps come in arbitrary units (sigma-scaled X-ray, raw cryo-EM) while the

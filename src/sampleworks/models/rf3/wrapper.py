@@ -28,6 +28,7 @@ from sampleworks.models.protocol import GenerativeModelInput
 from sampleworks.utils.framework_utils import match_batch
 from sampleworks.utils.guidance_constants import StructurePredictor
 from sampleworks.utils.msa import MSAManager
+from sampleworks.utils.torch_utils import gaussian_prior
 
 
 # Attached to the trainer-owned model after RF3InferenceEngine initialization in
@@ -823,15 +824,7 @@ class RF3Wrapper:
         ValueError
             If both features and shape are None, or if shape is invalid.
         """
-        if shape is not None:
-            if len(shape) != 2 or shape[1] != 3:
-                raise ValueError("shape must be of the form (num_atoms, 3)")
-            return torch.randn((batch_size, *shape), device=self.device)
-
-        if features is None or features.conditioning is None:
-            raise ValueError("Either features or shape must be provided to initialize_from_prior()")
-
-        cond = features.conditioning
-        num_atoms = len(cond.features["atom_to_token_map"])
-
-        return torch.randn((batch_size, num_atoms, 3), device=self.device)
+        num_atoms = None
+        if features is not None and features.conditioning is not None:
+            num_atoms = len(features.conditioning.features["atom_to_token_map"])
+        return gaussian_prior(batch_size, num_atoms, self.device, shape=shape)

@@ -418,7 +418,8 @@ def main() -> None:
         )
     elif args.structure:
         row = BatchRow(
-            filename=str(args.structure),
+            # Relative to base_dir below; the full path would repeat its directory.
+            filename=args.structure.name,
             selection=args.selection,
             occupancy_values=[float(v.strip()) for v in args.occupancy_values.split(":")]
             if args.occupancy_values

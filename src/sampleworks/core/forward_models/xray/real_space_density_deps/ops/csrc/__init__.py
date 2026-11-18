@@ -43,7 +43,9 @@ try:
         verbose=True,
     )
     CUDA_AVAILABLE = True
+    CUDA_LOAD_ERROR = None
 except Exception as e:
     print(f"CUDA extension loading failed: {e}")
     dilate_points_cuda = None
     CUDA_AVAILABLE = False
+    CUDA_LOAD_ERROR = f"{type(e).__name__}: {e}"
