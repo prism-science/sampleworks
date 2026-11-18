@@ -135,6 +135,29 @@ def test_load_deposit_returns_none_for_non_deposited_name(
     assert not (tmp_path / "rcsb-cache").exists()
 
 
+def test_load_deposit_reads_a_local_file_without_fetching(
+    tmp_path: Path, resources_dir: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A named deposit is read for any protein name, and RCSB is not consulted."""
+    monkeypatch.setattr(guidance_script_utils, "_RCSB_CACHE", tmp_path / "rcsb-cache")
+
+    deposit = guidance_script_utils._load_deposit(
+        "example_run", resources_dir / "1vme" / "1vme_rcsb.cif"
+    )
+
+    assert deposit is not None
+    assert {position.asym_id for position in deposit.scheme} == {"A", "B"}
+    assert not (tmp_path / "rcsb-cache").exists()
+
+
+def test_load_deposit_raises_for_a_local_file_it_cannot_use(resources_dir: Path):
+    """A named file that lacks the deposit categories, such as a density input, fails."""
+    density_input = resources_dir / "1vme" / "1VME_single_001_density_input.cif"
+
+    with pytest.raises(ValueError, match="lacks required categories"):
+        guidance_script_utils._load_deposit("1vme", density_input)
+
+
 def _unreachable_rcsb(path: Path) -> None:
     """Fail as a fetch from an unreachable RCSB does."""
     raise RequestError("RCSB is down")

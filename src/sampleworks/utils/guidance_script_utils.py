@@ -109,22 +109,32 @@ from sampleworks.utils.torch_utils import try_gpu
 _RCSB_CACHE = Path("~/.sampleworks/rcsb").expanduser()
 
 
-def _load_deposit(protein: str) -> Deposit | None:
-    """Fetch the deposited mmCIF of a protein, so outputs can be written with its ids.
+def _load_deposit(protein: str, deposit_cif: Path | str | None = None) -> Deposit | None:
+    """Read the deposited mmCIF of a protein, so outputs can be written with its ids.
 
     Parameters
     ----------
     protein : str
         Protein name: an RCSB id followed only by occupancy tokens, as
         ``rcsb_id_from_protein_name`` accepts (e.g. ``"1VME_0.5occA_0.5occB"``).
+    deposit_cif : Path | str | None
+        Local mmCIF to read instead of fetching the RCSB entry (``--deposit-cif``).
 
     Returns
     -------
     Deposit | None
-        The deposited mmCIF, read from the local RCSB cache, or ``None`` (with a warning) when
-        the name is not an RCSB id or the file cannot be fetched or read. The cache entry is
-        populated atomically, so concurrent first-time fetches cannot read a truncated file.
+        The deposited mmCIF, read from ``deposit_cif`` or else the local RCSB cache, or
+        ``None`` (with a warning) when the name is not an RCSB id or the file cannot be
+        fetched or read. The cache entry is populated atomically, so concurrent first-time
+        fetches cannot read a truncated file.
+
+    Raises
+    ------
+    OSError, InvalidFileError, ValueError
+        If ``deposit_cif`` cannot be read or lacks the categories ``Deposit.from_cif`` needs.
     """
+    if deposit_cif is not None:
+        return Deposit.from_cif(CIFFile.read(str(deposit_cif)))
     rcsb_id = rcsb_id_from_protein_name(protein)
     if rcsb_id is None:
         logger.warning(
@@ -1013,7 +1023,7 @@ def _run_guidance(args: GuidanceConfig, model_wrapper, device):
         raise TypeError("Unknown guidance type!")
 
     metadata = result.metadata or {}
-    deposit = _load_deposit(args.protein)
+    deposit = _load_deposit(args.protein, args.deposit_cif)
     model_atom_array = metadata.get("model_atom_array")
     if model_atom_array is not None:
         model_atom_array = relabel_model_residues(
