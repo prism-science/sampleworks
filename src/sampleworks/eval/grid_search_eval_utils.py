@@ -506,6 +506,35 @@ def get_method_and_model_name(model_name: str) -> tuple[str | None, str]:
     return method, model
 
 
+def add_grid_search_args(parser: argparse.ArgumentParser) -> None:
+    """Add the arguments every eval script needs to find trials in a grid-search tree.
+
+    Parameters
+    ----------
+    parser
+        Parser to add ``--grid-search-results-path``, ``--target-filename`` and
+        ``--depth`` to; mutated in place.
+    """
+    parser.add_argument(
+        "--grid-search-results-path",
+        type=Path,
+        required=True,
+        help="Path to the top-level grid search results directory, usu. called "
+        "``grid_search_results``",
+    )
+    parser.add_argument(
+        "--target-filename",
+        default="refined.cif",
+        help="Target filename for the CIF files to process, defaults to 'refined.cif'",
+    )
+    parser.add_argument(
+        "--depth",
+        type=int,
+        default=4,
+        help="Maximum directory depth to recurse when scanning for target CIF files.",
+    )
+
+
 def parse_eval_args(description: str | None = None):
     """
     Return a common set of arguments for grid search evaluation scripts,
@@ -514,13 +543,7 @@ def parse_eval_args(description: str | None = None):
     All eval scripts should use this same framework
     """
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument(
-        "--grid-search-results-path",
-        type=Path,
-        required=True,
-        help="Path to the top-level grid search results directory, usu. called "
-        "``grid_search_results``",
-    )
+    add_grid_search_args(parser)
     # not technically used everywhere yet, but requiring it future-proofs.
     parser.add_argument(
         "--grid-search-inputs-path",
@@ -543,17 +566,6 @@ def parse_eval_args(description: str | None = None):
         type=float,
         help=f"Occupancies to evaluate, defaults to {OCCUPANCY_LEVELS}",
         default=OCCUPANCY_LEVELS,
-    )
-    parser.add_argument(
-        "--target-filename",
-        default="refined.cif",
-        help="Target filename for the CIF files to process, defaults to 'refined.cif'",
-    )
-    parser.add_argument(
-        "--depth",
-        type=int,
-        default=4,
-        help="Maximum directory depth to recurse when scanning for target CIF files.",
     )
     parser.add_argument(
         "--n-jobs",
