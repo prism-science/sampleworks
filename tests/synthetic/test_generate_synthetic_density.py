@@ -2,6 +2,7 @@
 
 import pytest
 from sampleworks.synthetic.generate_synthetic_density import BatchRow, main
+from sampleworks.utils.atom_array_utils import load_structure_with_altlocs, save_structure_to_cif
 
 
 def test_batch_row_accepts_occupancy_values_column() -> None:
@@ -49,3 +50,38 @@ def test_em_mode_with_it1992_exits_nonzero(monkeypatch, tmp_path) -> None:
     with pytest.raises(SystemExit) as excinfo:
         main()
     assert excinfo.value.code == 1
+
+
+def test_relative_structure_path_is_read_and_written_beside_itself(
+    monkeypatch, tmp_path, resources_dir
+) -> None:
+    """A relative ``--structure`` is not joined onto its own directory a second time.
+
+    The map lands at ``--output`` and the grid-aligned structure next to the input, both in
+    the subdirectory the relative paths name.
+    """
+    deposited = load_structure_with_altlocs(
+        resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif"
+    )
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    save_structure_to_cif(deposited[deposited.res_id <= 20], inputs / "fragment.cif")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "generate_synthetic_density",
+            "--structure",
+            "inputs/fragment.cif",
+            "--resolution",
+            "3.0",
+            "--save-structure",
+            "--output",
+            "inputs/fragment.ccp4",
+        ],
+    )
+
+    main()
+
+    assert (inputs / "fragment.ccp4").stat().st_size > 0
+    assert (inputs / "fragment_density_input.cif").exists()
