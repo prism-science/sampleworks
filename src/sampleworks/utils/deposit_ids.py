@@ -11,7 +11,7 @@ categories that describe its chains, entities and ligands.
 
 from collections import Counter
 from dataclasses import dataclass, replace
-from typing import Any, NamedTuple, Self, TypeVar
+from typing import Any, Self, TypeVar
 
 import numpy as np
 from atomworks.io.transforms.categories import category_to_dict
@@ -264,31 +264,24 @@ class Deposit:
         )
 
 
-class _Residues(NamedTuple):
-    """Annotations of each residue in an atom array, used to find it in the deposited mmCIF.
+def _residue_atoms(atom_array: AtomArray | AtomArrayStack) -> AtomArray | AtomArrayStack:
+    """Return the first atom of each residue, whose annotations describe the residue.
 
-    Every field has shape ``(n_residues,)``.
-
-    Attributes
+    Parameters
     ----------
-    chain_id, res_id, ins_code, res_name : np.ndarray
-        Residue annotations, with ``res_id`` as strings.
-    hetero : np.ndarray
-        Whether the residue is written as ``HETATM``.
-    polymer : np.ndarray
-        Whether the residue belongs to a polymer chain (see ``_residues``).
+    atom_array : AtomArray | AtomArrayStack
+        Structure to describe.
+
+    Returns
+    -------
+    AtomArray | AtomArrayStack
+        One atom per residue, in residue order.
     """
-
-    chain_id: np.ndarray
-    res_id: np.ndarray
-    ins_code: np.ndarray
-    res_name: np.ndarray
-    hetero: np.ndarray
-    polymer: np.ndarray
+    return atom_array[..., get_residue_starts(atom_array)]
 
 
-def _residues(atom_array: AtomArray | AtomArrayStack, deposit: Deposit) -> _Residues:
-    """Collect the annotations of each residue and decide which residues are polymer.
+def _polymer_residues(atom_array: AtomArray | AtomArrayStack, deposit: Deposit) -> np.ndarray:
+    """Decide which residues of a structure belong to a polymer chain.
 
     A residue is polymer when it is written as ``ATOM``, or when it is a ``HETATM`` whose
     canonical name is listed in the deposited ``entity_poly_seq`` (a modified residue such as
@@ -304,29 +297,22 @@ def _residues(atom_array: AtomArray | AtomArrayStack, deposit: Deposit) -> _Resi
 
     Returns
     -------
-    _Residues
-        One entry per residue, in residue order.
+    np.ndarray
+        Whether each residue is polymer, shape ``(n_residues,)``.
     """
-    starts = get_residue_starts(atom_array)
-    res_name = atom_array.res_name[starts]
-    hetero = atom_array.hetero[starts]
+    residue_atoms = _residue_atoms(atom_array)
     listed = np.array(
-        [_canonical_monomer(str(name)) in deposit.monomers for name in res_name], dtype=bool
+        [_canonical_monomer(str(name)) in deposit.monomers for name in residue_atoms.res_name],
+        dtype=bool,
     )
-    return _Residues(
-        chain_id=atom_array.chain_id[starts],
-        res_id=atom_array.res_id[starts].astype(str),
-        ins_code=atom_array.ins_code[starts],
-        res_name=res_name,
-        hetero=hetero,
-        polymer=~hetero | listed,
-    )
+    return ~residue_atoms.hetero | listed
 
 
 def _positions_by_lookup(
     keys: list[tuple[str, ...]],
     lookup: dict[tuple[str, ...], _PolySeqSchemePosition],
-    residues: _Residues,
+    residue_atoms: AtomArray | AtomArrayStack,
+    polymer: np.ndarray,
 ) -> list[_PolySeqSchemePosition | None]:
     """Place residues by looking up a key for each residue among the deposited positions.
 
@@ -341,8 +327,10 @@ def _positions_by_lookup(
         Lookup key of each residue.
     lookup : dict[tuple[str, ...], _PolySeqSchemePosition]
         Deposited positions, by the same kind of key.
-    residues : _Residues
-        Residues that ``keys`` describe.
+    residue_atoms : AtomArray | AtomArrayStack
+        One atom per residue that ``keys`` describe (``_residue_atoms``).
+    polymer : np.ndarray
+        Whether each residue is polymer (``_polymer_residues``), shape ``(n_residues,)``.
 
     Returns
     -------
@@ -356,7 +344,7 @@ def _positions_by_lookup(
         monomers of its position, or no residue is placed.
     """
     unmatched = {
-        key for key, hetero in zip(keys, residues.hetero) if not hetero and key not in lookup
+        key for key, hetero in zip(keys, residue_atoms.hetero) if not hetero and key not in lookup
     }
     if unmatched:
         raise ValueError(
@@ -365,21 +353,21 @@ def _positions_by_lookup(
         )
     renamed = {
         (key, name)
-        for key, name, polymer in zip(keys, residues.res_name, residues.polymer)
-        if polymer and key in lookup and _canonical_monomer(name) not in lookup[key].monomers
+        for key, name, is_polymer in zip(keys, residue_atoms.res_name, polymer)
+        if is_polymer and key in lookup and _canonical_monomer(name) not in lookup[key].monomers
     }
     if renamed:
         raise ValueError(f"Residue names disagree with the deposit, e.g. {sorted(renamed)[:3]}")
-    positions = [
-        lookup.get(key) if polymer else None for key, polymer in zip(keys, residues.polymer)
-    ]
+    positions = [lookup.get(key) if is_polymer else None for key, is_polymer in zip(keys, polymer)]
     if not any(positions):
         raise ValueError("Output has no polymer residues")
     return positions
 
 
 def _positions_by_alignment(
-    residues: _Residues, scheme: tuple[_PolySeqSchemePosition, ...]
+    residue_atoms: AtomArray | AtomArrayStack,
+    polymer: np.ndarray,
+    scheme: tuple[_PolySeqSchemePosition, ...],
 ) -> list[_PolySeqSchemePosition | None]:
     """Place residues by aligning the sequence of each output chain to a deposited chain.
 
@@ -395,8 +383,10 @@ def _positions_by_alignment(
 
     Parameters
     ----------
-    residues : _Residues
-        Residues to place.
+    residue_atoms : AtomArray | AtomArrayStack
+        One atom per residue to place (``_residue_atoms``).
+    polymer : np.ndarray
+        Whether each residue is polymer (``_polymer_residues``), shape ``(n_residues,)``.
     scheme : tuple[_PolySeqSchemePosition, ...]
         Deposited positions (``Deposit.scheme``).
 
@@ -415,18 +405,18 @@ def _positions_by_alignment(
     chain_positions: dict[str, list[_PolySeqSchemePosition]] = {}  # asym_id -> scheme order
     for position in scheme:
         chain_positions.setdefault(position.asym_id, []).append(position)
-    positions: list[_PolySeqSchemePosition | None] = [None] * len(residues.chain_id)
+    positions: list[_PolySeqSchemePosition | None] = [None] * residue_atoms.array_length()
     output_chain_by_asym_id: dict[str, str] = {}
-    for chain in dict.fromkeys(residues.chain_id):
-        rows = np.flatnonzero((residues.chain_id == chain) & residues.polymer)
+    for chain in dict.fromkeys(residue_atoms.chain_id):
+        rows = np.flatnonzero((residue_atoms.chain_id == chain) & polymer)
         if rows.size == 0:
             continue  # ligands and waters
         names: dict[tuple[int, str], str] = {}  # (number, insertion code) -> name
         for row in rows:
-            key = (int(residues.res_id[row]), str(residues.ins_code[row]))
-            if key in names and names[key] != residues.res_name[row]:
+            key = (int(residue_atoms.res_id[row]), str(residue_atoms.ins_code[row]))
+            if key in names and names[key] != residue_atoms.res_name[row]:
                 raise ValueError(f"Output chain {chain} has conflicting names for residue {key}")
-            names[key] = str(residues.res_name[row])
+            names[key] = str(residue_atoms.res_name[row])
         # Sort by number only: insertion codes keep input order, which need not be alphabetical
         # (thrombin runs 1H, 1G, ..., 1).
         sequence_keys = sorted(names, key=lambda key: key[0])
@@ -472,7 +462,9 @@ def _positions_by_alignment(
             zip(sequence_keys, (chain_positions[asym_id][index] for index in indices), strict=True)
         )
         for row in rows:
-            positions[row] = position_of[(int(residues.res_id[row]), str(residues.ins_code[row]))]
+            positions[row] = position_of[
+                (int(residue_atoms.res_id[row]), str(residue_atoms.ins_code[row]))
+            ]
     if not output_chain_by_asym_id:
         raise ValueError("Output has no polymer chains")
     return positions
@@ -560,23 +552,29 @@ def _resolve_deposit_positions(
     whose label ids also read as valid author ids, with matching names, are placed by author
     ids.
     """
-    residues = _residues(atom_array, deposit)
+    residue_atoms = _residue_atoms(atom_array)
+    polymer = _polymer_residues(atom_array, deposit)
+    chain_ids, res_ids = residue_atoms.chain_id, residue_atoms.res_id.astype(str)
     scheme = deposit.scheme
     errors: list[str] = []
     try:
-        keys = list(zip(residues.chain_id, residues.res_id, residues.ins_code, strict=True))
-        positions = _positions_by_lookup(keys, {p.author_key: p for p in scheme}, residues)
+        keys = list(zip(chain_ids, res_ids, residue_atoms.ins_code, strict=True))
+        positions = _positions_by_lookup(
+            keys, {p.author_key: p for p in scheme}, residue_atoms, polymer
+        )
         return _one_residue_per_position(positions, atom_array)
     except ValueError as error:
         errors.append(f"author lookup: {error}")
     try:
-        keys = list(zip(residues.chain_id, residues.res_id, strict=True))
-        positions = _positions_by_lookup(keys, {(p.asym_id, p.seq_id): p for p in scheme}, residues)
+        keys = list(zip(chain_ids, res_ids, strict=True))
+        positions = _positions_by_lookup(
+            keys, {(p.asym_id, p.seq_id): p for p in scheme}, residue_atoms, polymer
+        )
         return _one_residue_per_position(positions, atom_array)
     except ValueError as error:
         errors.append(f"label lookup: {error}")
     try:
-        positions = _positions_by_alignment(residues, scheme)
+        positions = _positions_by_alignment(residue_atoms, polymer, scheme)
         return _one_residue_per_position(positions, atom_array)
     except ValueError as error:
         errors.append(f"sequence alignment: {error}")
@@ -617,7 +615,8 @@ def _walk_deposited_positions(
         or lists a different monomer, or two residues share a position
         (``_one_residue_per_position``).
     """
-    residues = _residues(atom_array, deposit)
+    residue_atoms = _residue_atoms(atom_array)
+    polymer = _polymer_residues(atom_array, deposit)
     chain_positions: dict[str, list[_PolySeqSchemePosition]] = {}  # asym_id -> scheme order
     for position in deposit.scheme:
         chain_positions.setdefault(position.asym_id, []).append(position)
@@ -627,8 +626,8 @@ def _walk_deposited_positions(
         for index, position in enumerate(positions)
     }
     positions = list(known)
-    for chain in dict.fromkeys(residues.chain_id):
-        rows = np.flatnonzero((residues.chain_id == chain) & residues.polymer)
+    for chain in dict.fromkeys(residue_atoms.chain_id):
+        rows = np.flatnonzero((residue_atoms.chain_id == chain) & polymer)
         if rows.size == 0:
             continue  # ligands and waters
         placed = np.flatnonzero([positions[row] is not None for row in rows])  # ranks in rows
@@ -644,8 +643,8 @@ def _walk_deposited_positions(
             assert anchor is not None
             deposited = chain_positions[anchor.asym_id]
             index = index_of[(anchor.asym_id, anchor.seq_id)] + rank - anchor_rank
-            name = str(residues.res_name[row])
-            residue = f"{name} {chain} {residues.res_id[row]}{residues.ins_code[row]}"
+            name = str(residue_atoms.res_name[row])
+            residue = f"{name} {chain} {residue_atoms.res_id[row]}{residue_atoms.ins_code[row]}"
             if not 0 <= index < len(deposited):
                 raise ValueError(f"{residue} lies outside deposited chain {anchor.asym_id}")
             if _canonical_monomer(name) not in deposited[index].monomers:
@@ -658,7 +657,9 @@ def _walk_deposited_positions(
 
 
 def _match_deposited_ligands(
-    residues: _Residues, positions: list[_PolySeqSchemePosition | None], nonpoly: dict[str, Any]
+    residue_atoms: AtomArray | AtomArrayStack,
+    positions: list[_PolySeqSchemePosition | None],
+    nonpoly: dict[str, Any],
 ) -> dict[int, int]:
     """Find the deposited ``pdbx_nonpoly_scheme`` row of each ligand and water.
 
@@ -669,8 +670,8 @@ def _match_deposited_ligands(
 
     Parameters
     ----------
-    residues : _Residues
-        Residues to match.
+    residue_atoms : AtomArray | AtomArrayStack
+        One atom per residue to match (``_residue_atoms``).
     positions : list[_PolySeqSchemePosition | None]
         Deposited polymer position of each residue; only residues without one are matched.
     nonpoly : dict[str, Any]
@@ -705,10 +706,10 @@ def _match_deposited_ligands(
     for residue, (position, *key) in enumerate(
         zip(
             positions,
-            residues.chain_id,
-            residues.res_id,
-            residues.ins_code,
-            residues.res_name,
+            residue_atoms.chain_id,
+            residue_atoms.res_id.astype(str),
+            residue_atoms.ins_code,
+            residue_atoms.res_name,
             strict=True,
         )
     ):
@@ -838,14 +839,14 @@ def annotate_deposit_ids(
     if positions is None:
         positions = _resolve_deposit_positions(atom_array, deposit)
     reference_block = deposit.block
-    residues = _residues(atom_array, deposit)
+    residue_atoms = _residue_atoms(atom_array)
     nonpoly = deposit.nonpoly
-    ligands = _match_deposited_ligands(residues, positions, nonpoly)
+    ligands = _match_deposited_ligands(residue_atoms, positions, nonpoly)
     new_entity_ids = _new_entity_ids(
         reference_block,
         [
             str(name)
-            for residue, (position, name) in enumerate(zip(positions, residues.res_name))
+            for residue, (position, name) in enumerate(zip(positions, residue_atoms.res_name))
             if position is None and residue not in ligands
         ],
     )
@@ -854,10 +855,10 @@ def annotate_deposit_ids(
     for residue, (position, chain, number, code, name) in enumerate(
         zip(
             positions,
-            residues.chain_id,
-            residues.res_id,
-            residues.ins_code,
-            residues.res_name,
+            residue_atoms.chain_id,
+            residue_atoms.res_id,
+            residue_atoms.ins_code,
+            residue_atoms.res_name,
             strict=True,
         )
     ):
