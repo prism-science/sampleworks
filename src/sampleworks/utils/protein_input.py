@@ -12,7 +12,7 @@ from sampleworks.utils.sequence import resolve_sequence_arg
 
 
 # Columns describing the protein itself; every other column is a loss option.
-_PROTEIN_COLUMNS = ("name", "structure", "sequence")
+_PROTEIN_COLUMNS = ("name", "structure", "sequence", "deposit_cif")
 
 
 @dataclass
@@ -41,6 +41,10 @@ class ProteinInput:
         raw sequence or a path to a single-record FASTA file. ``None`` (empty
         cell or missing column) keeps the sequence from the coordinates in the
         structure file.
+    deposit_cif : Path or None
+        mmCIF whose ids we use to write our output (``--deposit-cif``). Relative CSV paths
+        resolve against the CSV's directory. ``None`` (empty cell or missing column) uses the
+        RCSB entry named by ``name``.
     loss_options : dict[str, Any]
         Loss option name to this protein's value, typed as the option declares.
         Path options are absolute in CSV-read instances, and must exist. Empty
@@ -50,6 +54,7 @@ class ProteinInput:
     name: str
     structure: Path
     sequence: str | None = None
+    deposit_cif: Path | None = None
     loss_options: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -60,6 +65,12 @@ class ProteinInput:
             raise FileNotFoundError(
                 f"Structure file does not exist for protein '{self.name}': {self.structure}"
             )
+        if self.deposit_cif is not None:
+            self.deposit_cif = Path(self.deposit_cif)
+            if not self.deposit_cif.exists():
+                raise FileNotFoundError(
+                    f"Deposit CIF does not exist for protein '{self.name}': {self.deposit_cif}"
+                )
         for option, value in self.loss_options.items():
             if is_path_option(option) and not Path(value).exists():
                 raise FileNotFoundError(
@@ -76,8 +87,8 @@ class ProteinInput:
         Parameters
         ----------
         csv_path : Path
-            CSV with ``name`` and ``structure`` columns, an optional ``sequence``
-            column, and any number of loss-option columns.
+            CSV with ``name`` and ``structure`` columns, optional ``sequence`` and
+            ``deposit_cif`` columns, and any number of loss-option columns.
 
         Returns
         -------
@@ -125,6 +136,7 @@ class ProteinInput:
                 name = (row.get("name") or "").strip()
                 structure_raw = (row.get("structure") or "").strip()
                 sequence_raw = (row.get("sequence") or "").strip()
+                deposit_raw = (row.get("deposit_cif") or "").strip()
 
                 structure = Path(structure_raw)
                 if not structure.is_absolute():
@@ -156,6 +168,7 @@ class ProteinInput:
                         name=name,
                         structure=structure,
                         sequence=sequence,
+                        deposit_cif=csv_dir / deposit_raw if deposit_raw else None,
                         loss_options=loss_options,
                     )
                 )
