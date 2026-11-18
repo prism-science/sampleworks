@@ -278,6 +278,28 @@ def test_carry_aligns_residues_that_differ_only_by_insertion_code():
     assert _ca_column(output, "label_seq_id") == [str(p + 1) for p in positions] * 2
 
 
+def test_alignment_rejects_a_unique_fit_beside_an_ambiguous_one():
+    """A chain that fits one deposited chain exactly and another ambiguously is not placed.
+
+    Chain B is the label of the GLY-GLY chain and, here, the author name of chain A, which
+    has a single GLY.
+    """
+    reference = _reference()
+    scheme = reference.block["pdbx_poly_seq_scheme"]
+    scheme["pdb_strand_id"] = [
+        "B" if asym == "A" else strand
+        for asym, strand in zip(
+            scheme["asym_id"].as_array(str), scheme["pdb_strand_id"].as_array(str), strict=True
+        )
+    ]
+    atoms = _output([1], renumber=True)
+    atoms.chain_id[:] = "B"
+    atoms.res_id[:] = 100  # outside both numberings, so only the alignment can place it
+
+    with pytest.raises(ValueError, match=r"names deposited chains \['A', 'B'\]"):
+        annotate_deposit_ids(atoms, Deposit.from_cif(reference))
+
+
 def test_carry_rejects_aligned_chain_naming_no_deposited_chain():
     """An aligned chain that is neither a deposited label nor author chain cannot be placed."""
     atoms = _output([1, 2, 3, 4, 5, 6, 8, 9], renumber=True)

@@ -484,7 +484,7 @@ def _positions_by_alignment(
         sequence_keys = sorted(names, key=lambda key: key[0])
         observed = [_canonical_monomer(names[key]) for key in sequence_keys]
         fits: dict[str, np.ndarray] = {}  # asym_id -> index in its chain of each residue
-        ambiguous: list[str] = []
+        ambiguous: dict[str, str] = {}  # asym_id -> deposited position we're unsure about
         for asym_id, deposited in chain_positions.items():
             # A chain name can be the label id of one deposited chain and the author id of
             # another, so both are tried.
@@ -499,19 +499,19 @@ def _positions_by_alignment(
             if ambiguous_at is None:
                 fits[asym_id] = indices
             else:
-                ambiguous.append(
-                    f"chain {asym_id} around position {deposited[ambiguous_at].seq_id}"
-                )
-        if not fits and ambiguous:
+                ambiguous[asym_id] = deposited[ambiguous_at].seq_id
+        if not fits and len(ambiguous) == 1:
+            ((asym_id, seq_id),) = ambiguous.items()
             raise ValueError(
                 f"Output chain {chain} fits the deposited sequence in several equally good ways "
-                f"({'; '.join(ambiguous)}): a gap inside a run of repeated residues cannot be "
-                "placed from the sequence alone"
+                f"(chain {asym_id} around position {seq_id}): a gap inside a run of repeated "
+                "residues cannot be placed from the sequence alone"
             )
-        if len(fits) != 1:
+        # A chain fit ambiguously still contains the sequence, so it competes with a unique fit.
+        if len(fits) + len(ambiguous) != 1:
             raise ValueError(
-                f"Output chain {chain} names deposited chains {sorted(fits)} that contain its "
-                "sequence, not exactly one"
+                f"Output chain {chain} names deposited chains {sorted(fits | ambiguous)} that "
+                "contain its sequence, not exactly one"
             )
         ((asym_id, indices),) = fits.items()
         if asym_id in output_chain_by_asym_id:
