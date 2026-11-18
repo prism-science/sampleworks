@@ -241,8 +241,6 @@ class BondGeometryLoss:
         elements: Int[Tensor, "batch n_atoms"],
         b_factors: Float[Tensor, "batch n_atoms"],
         occupancies: Float[Tensor, "batch n_atoms"],
-        unique_combinations: Tensor | None = None,
-        inverse_indices: Tensor | None = None,
     ) -> Float[Tensor, ""]:
         """Sum of the bond-length and collision penalties over the ensemble.
 
@@ -251,7 +249,7 @@ class BondGeometryLoss:
         coordinates
             Denoised coordinates in model atom order, shape [batch, n_atoms, 3]; the batch axis is
             the ensemble.
-        elements, b_factors, occupancies, unique_combinations, inverse_indices
+        elements, b_factors, occupancies
             Accepted for ``LossFunctionProtocol`` compatibility and ignored.
 
         Returns
@@ -264,7 +262,7 @@ class BondGeometryLoss:
         RuntimeError
             If :meth:`prepare` has not been called.
         """
-        del elements, b_factors, occupancies, unique_combinations, inverse_indices
+        del elements, b_factors, occupancies
         if self._radii is None:
             raise RuntimeError("BondGeometryLoss.prepare() must be called before scoring.")
         return self.bond_length_loss(coordinates) + self.collision_loss(coordinates)
