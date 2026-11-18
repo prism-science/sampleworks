@@ -96,7 +96,7 @@ class RealSpaceDensityOptions:
     scattering_table: str | None = opt(
         None,
         help="Scattering table, as in Phenix (default: electron with --em, otherwise wk1995)",
-        choices=("wk1995", "it1992", "electron"),
+        choices=("wk1995", "it1992", "electron", "c4322"),
     )
     allow_torch_fallback: bool = opt(
         False,

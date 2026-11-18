@@ -169,7 +169,8 @@ def _process_single_row(
     save_structure
         If True, save the processed structure to a CIF file in the input directory. Default is True.
     scattering_table
-        ``"wk1995"``, ``"it1992"`` or ``"electron"``; ``None`` takes the mode's default.
+        ``"wk1995"``, ``"it1992"``, ``"electron"`` or ``"c4322"``; ``None`` takes the
+        mode's default.
     """
     structure_path = base_dir / row.filename
     atom_array = load_structure_for_synthetic_loss(
@@ -264,7 +265,8 @@ def process_batch(
     save_structure
         If True, save the processed structure to a CIF file in the input directory.
     scattering_table
-        ``"wk1995"``, ``"it1992"`` or ``"electron"``; ``None`` takes the mode's default.
+        ``"wk1995"``, ``"it1992"``, ``"electron"`` or ``"c4322"``; ``None`` takes the
+        mode's default.
     """
     from joblib import delayed, Parallel
 

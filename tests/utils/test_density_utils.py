@@ -250,6 +250,22 @@ class TestComputeDensityFromAtomarray:
         torch.testing.assert_close(density_gemmi, density, rtol=0, atol=0.005 * density.max())
         assert not torch.equal(density_gemmi, density)
 
+    def test_c4322_table(self, simple_atom_array: AtomArray, device: torch.device):
+        """gemmi's C4322 table gives nearly the same cryo-EM density as the Peng default."""
+        density, _ = compute_density_from_atomarray(
+            simple_atom_array, resolution=2.0, em_mode=True, device=device
+        )
+        density_gemmi, _ = compute_density_from_atomarray(
+            simple_atom_array,
+            resolution=2.0,
+            em_mode=True,
+            device=device,
+            scattering_table="c4322",
+        )
+        assert density_gemmi.shape == density.shape
+        torch.testing.assert_close(density_gemmi, density, rtol=0, atol=0.005 * density.max())
+        assert not torch.equal(density_gemmi, density)
+
     def test_device_parameter(self, simple_atom_array: AtomArray, device: torch.device):
         """Test that function respects device parameter."""
         density, _ = compute_density_from_atomarray(

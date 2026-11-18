@@ -201,10 +201,83 @@ class TestSetupScatteringParams:
         with pytest.raises(ValueError, match="Unknown scattering_table"):
             setup_scattering_params(em_mode=False, device=device, scattering_table="n_gaussian")
 
-    def test_it1992_reject_em_mode_until_c4322_is_wired(self, device):
-        """gemmi carries an electron table too (C4322), but it is not wired up, so
-        the combination fails loudly rather than silently using the X-ray one."""
-        with pytest.raises(ValueError, match="C4322"):
+    def test_c4322_reproduce_gemmi_electron_scattering_factor(self, device):
+        """Summing the five Gaussians of a C4322 row gives gemmi's own f(s)."""
+        from sampleworks.core.losses.real_space_density import ELEMENT_TO_SCATTERING_INDEX
+
+        params = setup_scattering_params(em_mode=True, device=device, scattering_table="c4322")
+        s = torch.linspace(0.0, 0.6, 7, device=device)
+
+        for element in ["H", "C", "N", "O", "S", "Se"]:
+            row = params[ELEMENT_TO_SCATTERING_INDEX[element]]
+            ours = (row[:, 0:1] * torch.exp(-row[:, 1:2] * s**2)).sum(0)
+            c4322 = gemmi.Element(element).c4322
+            expected = torch.tensor(
+                [c4322.calculate_sf(stol**2) for stol in s.tolist()],
+                dtype=torch.float32,
+                device=device,
+            )
+            torch.testing.assert_close(
+                ours, expected, msg=lambda m: f"Mismatch for '{element}': {m}"
+            )
+
+    def test_c4322_match_the_published_carbon_values(self, device):
+        """International Tables Vol. C, Table 4.3.2.2, carbon: five a, b pairs."""
+        from sampleworks.core.losses.real_space_density import ELEMENT_TO_SCATTERING_INDEX
+
+        params = setup_scattering_params(em_mode=True, device=device, scattering_table="c4322")
+        row = params[ELEMENT_TO_SCATTERING_INDEX["C"]].cpu()
+
+        torch.testing.assert_close(row[:, 0], torch.tensor([0.0893, 0.2563, 0.757, 1.0487, 0.3575]))
+        torch.testing.assert_close(
+            row[:, 1], torch.tensor([0.2465, 1.71, 6.4094, 18.6113, 50.2523])
+        )
+
+    def test_c4322_agree_with_the_peng_table_over_the_refinement_range(self, device):
+        """Both tables fit Peng et al. (1996) electron factors, so f(s) for the
+        common biomolecular elements agrees within 1% out to 1 Å resolution."""
+        from sampleworks.core.losses.real_space_density import ELEMENT_TO_SCATTERING_INDEX
+
+        c4322 = setup_scattering_params(em_mode=True, device=device, scattering_table="c4322")
+        peng = setup_scattering_params(em_mode=True, device=device, scattering_table="electron")
+        s = torch.linspace(0.0, 0.5, 51, device=device)
+
+        def form_factor(row):
+            return (row[:, 0:1] * torch.exp(-row[:, 1:2] * s**2)).sum(0)
+
+        for element in ["H", "C", "N", "O", "P", "S", "Fe", "Zn", "Se"]:
+            idx = ELEMENT_TO_SCATTERING_INDEX[element]
+            torch.testing.assert_close(
+                form_factor(c4322[idx]),
+                form_factor(peng[idx]),
+                rtol=0.01,
+                atol=0,
+                msg=lambda m: f"Mismatch for '{element}': {m}",
+            )
+
+    def test_c4322_ignore_formal_charge_and_zero_fill_only_unknown_symbols(self, device):
+        """C4322 tabulates neutral atoms, so ionic rows take their element's factors;
+        only the ``'?'`` placeholder and qFit's valence pseudo-element stay zero."""
+        from sampleworks.core.losses.real_space_density import ELEMENT_TO_SCATTERING_INDEX
+
+        params = setup_scattering_params(em_mode=True, device=device, scattering_table="c4322")
+        for ion, neutral in (("Fe2+", "Fe"), ("O1-", "O")):
+            torch.testing.assert_close(
+                params[ELEMENT_TO_SCATTERING_INDEX[ion]],
+                params[ELEMENT_TO_SCATTERING_INDEX[neutral]],
+            )
+        zero_rows = {
+            element
+            for element, idx in ELEMENT_TO_SCATTERING_INDEX.items()
+            if params[idx].abs().sum().item() == 0
+        }
+        assert zero_rows == {"?", "Cval"}
+
+    def test_c4322_needs_em_mode_and_it1992_is_still_x_ray_only(self, device):
+        """C4322 is an electron table, so X-ray mode rejects it; IT1992 stays X-ray only."""
+        with pytest.raises(ValueError, match="needs em_mode"):
+            setup_scattering_params(em_mode=False, device=device, scattering_table="c4322")
+        with pytest.raises(ValueError, match="X-ray table"):
             setup_scattering_params(em_mode=True, device=device, scattering_table="it1992")
 
 
