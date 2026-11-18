@@ -612,7 +612,9 @@ def save_everything(
         the `refined_structure`'s existing coordinates are saved as-is.
     model_atom_array : AtomArray | None
         Optional model-space atom template. When provided (mismatch runs),
-        this template is used for final structure and trajectory saving.
+        this template is used for final structure and trajectory saving. Pass the output of
+        ``relabel_model_residues``, which relabels the atom array ids to the ones
+        they have in ``deposit``.
     deposit : Deposit | None
         Deposited mmCIF (from ``_load_deposit``) whose ids and categories are written into the
         outputs; ``None`` writes outputs without them.
