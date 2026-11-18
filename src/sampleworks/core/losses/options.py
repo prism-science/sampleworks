@@ -227,10 +227,17 @@ class BondGeometryOptions:
     bond_power: int = opt(2, help="Exponent on the bond-length hinge", choices=(1, 2))
 
     def __post_init__(self):
+        if (
+            not isinstance(self.bond_power, int)
+            or isinstance(self.bond_power, bool)
+            or self.bond_power not in (1, 2)
+        ):
+            raise ValueError(f"bond_power must be 1 or 2; got {self.bond_power!r}.")
         for name in ("bond_tolerance", "clash_padding"):
             value = getattr(self, name)
-            if not (math.isfinite(value) and value >= 0):
-                raise ValueError(f"{name} must be a finite, non-negative distance; got {value}.")
+            is_number = isinstance(value, (int, float)) and not isinstance(value, bool)
+            if not (is_number and math.isfinite(value) and value >= 0):
+                raise ValueError(f"{name} must be a finite, non-negative distance; got {value!r}.")
 
 
 def option_type(options_cls: type, name: str) -> Any:
