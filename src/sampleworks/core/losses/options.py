@@ -106,6 +106,8 @@ class RealSpaceDensityOptions:
 
     def __post_init__(self):
         _check_resolution(self.resolution)
+        if not isinstance(self.allow_torch_fallback, bool):
+            raise ValueError("allow_torch_fallback must be a boolean")
 
 
 @dataclass(frozen=True)
