@@ -85,6 +85,11 @@ def _check_resolution(resolution: float | None):
         )
 
 
+XRAY_SCATTERING_TABLES = ("wk1995", "it1992")
+ELECTRON_SCATTERING_TABLES = ("electron", "c4322")
+SCATTERING_TABLES = XRAY_SCATTERING_TABLES + ELECTRON_SCATTERING_TABLES
+
+
 @dataclass(frozen=True)
 class RealSpaceDensityOptions:
     """Options for :class:`~sampleworks.core.losses.real_space_density.RealSpaceLossFunction`."""
@@ -96,7 +101,7 @@ class RealSpaceDensityOptions:
     scattering_table: str | None = opt(
         None,
         help="Scattering table, as in Phenix (default: electron with --em, otherwise wk1995)",
-        choices=("wk1995", "it1992", "electron"),
+        choices=SCATTERING_TABLES,
     )
     allow_torch_fallback: bool = opt(
         False,
