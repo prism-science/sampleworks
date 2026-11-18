@@ -174,6 +174,22 @@ def _column(output: CIFFile, category: str, column: str) -> list[str]:
     return output.block[category][column].as_array(str).tolist()
 
 
+def _assert_label_ids_resolve(output: CIFFile) -> None:
+    """Check that every atom's label chain and entity are written, one entity per chain."""
+    entity_of_asym = dict(
+        zip(_column(output, "struct_asym", "id"), _column(output, "struct_asym", "entity_id"))
+    )
+    atom_labels = set(
+        zip(
+            _column(output, "atom_site", "label_asym_id"),
+            _column(output, "atom_site", "label_entity_id"),
+            strict=True,
+        )
+    )
+    assert {entity_id for _, entity_id in atom_labels} <= set(_column(output, "entity", "id"))
+    assert all(entity_of_asym.get(asym_id) == entity_id for asym_id, entity_id in atom_labels)
+
+
 def _ca_column(output: CIFFile, column: str) -> list[str]:
     """Return one ``atom_site`` column at the CA atoms, one per residue of ``_output``."""
     atom_site = output.block["atom_site"]
@@ -392,12 +408,12 @@ def test_carry_copies_deposited_chem_comp_rows(caplog: pytest.LogCaptureFixture)
     ],
 )
 def test_carry_keeps_polymer_beside_non_polymer(positions, ligand, renumber):
-    """A ligand or water the deposit lacks keeps its chain, under a new entity, unsequenced.
+    """A ligand or water the deposit lacks keeps its author chain and gets new label ids.
 
     6b8x numbers its glycerols 301-303 inside chain A's 1-321, so a non-polymer row whose
     author number is also a deposited sequence position must not be read as a renamed
-    residue, on either path. Its entity is numbered after the deposit's (1 and 2), so it
-    cannot claim the polymer's.
+    residue, on either path. Its entity is numbered after the deposit's (1 and 2) and its
+    label chain after the deposit's (A and B), so it cannot claim the polymer's.
     """
     atoms = _output(positions, extra=(ligand,), renumber=renumber)
     ligand_chain = atoms.chain_id[atoms.res_name == ligand[2]][0]
@@ -409,13 +425,30 @@ def test_carry_keeps_polymer_beside_non_polymer(positions, ligand, renumber):
         for i, name in enumerate(_column(output, "atom_site", "label_comp_id"))
         if name == ligand[2]
     ]
-    assert {_column(output, "atom_site", "label_asym_id")[i] for i in ligand_rows} == {ligand_chain}
+    assert {_column(output, "atom_site", "auth_asym_id")[i] for i in ligand_rows} == {ligand_chain}
+    assert {_column(output, "atom_site", "label_asym_id")[i] for i in ligand_rows} == {"C"}
     assert {_column(output, "atom_site", "label_seq_id")[i] for i in ligand_rows} == {"."}
     assert {_column(output, "atom_site", "label_entity_id")[i] for i in ligand_rows} == {"3"}
     polymer_seq = [seq for seq in _ca_column(output, "label_seq_id") if seq != "."]
     assert polymer_seq == [str(p + 1) for p in positions] * 2
-    assert _column(output, "struct_asym", "id") == ["A"]
-    assert _column(output, "entity", "id") == ["1"]
+    assert _column(output, "struct_asym", "id") == ["A", "C"]
+    assert _column(output, "entity", "id") == ["1", "3"]
+    _assert_label_ids_resolve(output)
+
+
+def test_carry_gives_each_new_ligand_a_label_chain_and_waters_one_per_chain():
+    """Ligands the deposit lacks get a label chain each; a chain's waters share one."""
+    extra = (("P", 101, "HOH"), ("P", 102, "HOH"), ("P", 103, "GOL"), ("P", 104, "GOL"))
+    output, _ = _carry(_output([1, 2, 3], extra=extra), _reference())
+
+    label_asym = dict(
+        zip(
+            zip(_ca_column(output, "auth_seq_id"), _ca_column(output, "label_comp_id")),
+            _ca_column(output, "label_asym_id"),
+        )
+    )
+    assert [label_asym[(str(number), name)] for _, number, name in extra] == ["C", "C", "D", "E"]
+    _assert_label_ids_resolve(output)
 
 
 @pytest.mark.parametrize("renumber", [False, True])
@@ -436,10 +469,9 @@ def test_carry_relabels_struct_conn_partners(renumber):
         )
         for partner in (1, 2)
     ]
-    ligand_chain = "A" if renumber else "P"
     assert set(zip(*labels, strict=True)) == {
         (("A", "7"), ("A", "10")),
-        (("A", "3"), (ligand_chain, ".")),
+        (("A", "3"), ("C", ".")),
     }
     atom_rows = set(
         zip(
@@ -577,6 +609,7 @@ def test_carry_writes_deposited_ids(resources_dir: Path, deposit, structure, rea
     if ligand_asyms:
         assert set(_column(output, "pdbx_nonpoly_scheme", "asym_id")) == ligand_asyms
         assert ligand_asyms <= set(_column(output, "struct_asym", "id"))
+    _assert_label_ids_resolve(output)
 
 
 # The eight N-terminal residues of 1VME's deposited sequence that its experiment never resolved.

@@ -15,6 +15,7 @@ from typing import Any, Self, TypeVar
 
 import numpy as np
 from atomworks.io.transforms.categories import category_to_dict
+from atomworks.io.utils.chain import create_chain_id_generator
 from biotite.structure import (
     AtomArray,
     AtomArrayStack,
@@ -51,6 +52,7 @@ _INAPPLICABLE = "."
 _HETERO = "hetero"
 _HETERO_YES = "y"
 _HETERO_NO = "n"
+_WATER = "HOH"
 
 # Atom pairs that link consecutive polymer residues: peptide C-N and nucleic acid O3'-P.
 _BACKBONE_LINKS = (("C", "N"), ("O3'", "P"))
@@ -879,8 +881,10 @@ def annotate_deposit_ids(
     - A ligand or water listed in the deposited ``pdbx_nonpoly_scheme``
       (``_match_deposited_ligands``) takes the ids of that row the same way, and the row index
       as the ``deposit_nonpoly_row`` annotation.
-    - Any other residue keeps its ids and gets a new entity id per residue name
-      (``_new_entity_ids``), so it cannot claim a deposited entity.
+    - Any other residue (presumably some sort of non-polymer residue) (``_other_residues``) keeps
+      its author ids and gets a new entity id per residue name (``_new_entity_ids``) and a label
+      chain the deposit does not use, one per ligand residue and one for the waters of each author
+      chain, so it cannot claim a deposited entity or chain.
 
     Residues outside the polymer have no sequence position (``.``).
 
@@ -919,6 +923,11 @@ def annotate_deposit_ids(
             if position is None and residue not in ligands
         ],
     )
+    new_asym_ids = create_chain_id_generator(
+        reference_block[_STRUCT_ASYM]["id"].as_array(str).tolist()
+    )
+    # (author chain, residue index or -1 for all waters of the chain) -> new label chain
+    new_asym_of: dict[tuple[str, int], str] = {}
     # (author chain, number, insertion code), (label asym, seq, entity) per residue
     residue_ids: list[tuple[tuple[str, int, str], _Label]] = []
     for residue, (position, chain, number, code, name) in enumerate(
@@ -944,10 +953,14 @@ def annotate_deposit_ids(
             label = (str(nonpoly["asym_id"][row]), _INAPPLICABLE, str(nonpoly["entity_id"][row]))
             residue_ids.append((author, label))
         else:
+            # PDB entries give each ligand its own label chain and a chain's waters one.
+            key = (str(chain), -1 if name == _WATER else residue)
+            if key not in new_asym_of:
+                new_asym_of[key] = next(new_asym_ids)
             residue_ids.append(
                 (
                     (str(chain), int(number), str(code)),
-                    (str(chain), _INAPPLICABLE, new_entity_ids[str(name)]),
+                    (new_asym_of[key], _INAPPLICABLE, new_entity_ids[str(name)]),
                 )
             )
     residue_of_atom = get_residue_positions(atom_array, np.arange(atom_array.array_length()))
@@ -1081,6 +1094,59 @@ def _add_modeled_monomers(
         entity_poly_seq[column] = list(np.insert(column_values, source_rows + 1, new_values))
 
 
+def _add_new_ligand_rows(
+    categories: dict[str, dict[str, list[str]]], atom_array: AtomArray | AtomArrayStack
+) -> None:
+    """Add ``entity`` and ``struct_asym`` rows for ligands and waters the deposit doesn't have.
+
+    These residues carry the new entity and label chain ids ``annotate_deposit_ids`` gave
+    them. Columns other than ``id``, ``type`` and ``entity_id`` are unknown (``?``).
+
+    Parameters
+    ----------
+    categories : dict[str, dict[str, list[str]]]
+        Categories to write (``_carried_categories``). Side effect: rows are appended to its
+        ``entity`` and ``struct_asym``.
+    atom_array : AtomArray | AtomArrayStack
+        Structure annotated by ``annotate_deposit_ids``.
+    """
+    residue_atoms = _residue_atoms(atom_array)
+    new = (residue_atoms.get_annotation(_DEPOSIT_NONPOLY_ROW) == -1) & (
+        residue_atoms.get_annotation("deposit_label_seq_id") == _INAPPLICABLE
+    )
+    entity_type: dict[str, str] = {}  # entity id -> type
+    entity_of_asym: dict[str, str] = {}  # label chain -> entity id
+    for asym_id, entity_id, name in zip(
+        residue_atoms.get_annotation("deposit_label_asym_id")[new],
+        residue_atoms.get_annotation("deposit_label_entity_id")[new],
+        residue_atoms.res_name[new],
+        strict=True,
+    ):
+        entity_type[str(entity_id)] = "water" if name == _WATER else "non-polymer"
+        entity_of_asym[str(asym_id)] = str(entity_id)
+    _append_rows(categories[_ENTITY], {"id": list(entity_type), "type": list(entity_type.values())})
+    _append_rows(
+        categories[_STRUCT_ASYM],
+        {"id": list(entity_of_asym), "entity_id": list(entity_of_asym.values())},
+    )
+
+
+def _append_rows(columns: dict[str, list[str]], rows: dict[str, list[str]]) -> None:
+    """Append rows to a category, writing ``?`` in the columns that aren't in ``rows``.
+
+    Parameters
+    ----------
+    columns : dict[str, list[str]]
+        Category columns. Side effect: extended in place, with any new column added.
+    rows : dict[str, list[str]]
+        Columns of the rows to append, all of one length.
+    """
+    n_existing = len(next(iter(columns.values()), []))
+    n_new = len(next(iter(rows.values()), []))
+    for name in [*columns, *(name for name in rows if name not in columns)]:
+        columns[name] = [*columns.get(name, ["?"] * n_existing), *rows.get(name, ["?"] * n_new)]
+
+
 def _carried_chem_comp(chem_comp: CIFCategory, components: set[str]) -> dict[str, list[str]]:
     """Collect a ``chem_comp`` row for each component, from the deposited mmCIF or the CCD.
 
@@ -1177,7 +1243,8 @@ def set_deposited_structure(
     - ``label_asym_id``, ``label_seq_id`` and ``label_entity_id`` in ``atom_site`` are set to
       the deposited ids, and ``struct_conn`` bond partners are updated to match;
     - the deposited rows for the chains, entities and ligands present are copied
-      (``_carried_categories``);
+      (``_carried_categories``), and ligands the deposit lacks get new ``entity`` and
+      ``struct_asym`` rows (``_add_new_ligand_rows``);
     - a modeled monomer that differs from the deposited one at its position (MET for MSE) is
       added to ``entity_poly_seq`` (``_add_modeled_monomers``);
     - when the deposited mmCIF has ``chem_comp``, a row is copied for every component in the
@@ -1232,6 +1299,7 @@ def set_deposited_structure(
 
     # Copy the deposited rows for the chains and ligands present, plus monomers the model adds.
     categories = _carried_categories(reference_block, polymer_labels, deposit.nonpoly, ligand_rows)
+    _add_new_ligand_rows(categories, atom_array)
     _add_modeled_monomers(categories[_ENTITY_POLY_SEQ], atom_site, labels)
     if _CHEM_COMP in reference_block:
         components = set(atom_site["label_comp_id"].as_array(str))
