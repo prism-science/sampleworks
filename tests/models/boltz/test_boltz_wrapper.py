@@ -190,20 +190,26 @@ class TestBoltzNpzAtomArrayHelpers:
     """Unit tests for Boltz NPZ parsing and loading helpers."""
 
     # Per-atom ground truth for the NPZ written by ``_write_npz``. Chain A holds GLY (4 atoms)
-    # and SER (6 atoms); chain B holds CYS (6 atoms). Chain B starts at residue 2 but atom 10,
-    # and Boltz numbers residues from 0 within each chain.
-    CHAIN_IDS = ["A"] * 10 + ["B"] * 6
-    RES_IDS = [0] * 4 + [1] * 6 + [0] * 6
-    RES_NAMES = ["GLY"] * 4 + ["SER"] * 6 + ["CYS"] * 6
+    # and SER (6 atoms); chain B holds CYS (6 atoms); chain C holds three atoms of the UDP-sugar
+    # ligand UMA, whose phosphorus atom names PA and PB read as protactinium and lead.
+    # Chain B starts at residue 2 but atom 10, and Boltz numbers residues from 0 within each chain.
+    CHAIN_IDS = ["A"] * 10 + ["B"] * 6 + ["C"] * 3
+    RES_IDS = [0] * 4 + [1] * 6 + [0] * 6 + [0] * 3
+    RES_NAMES = ["GLY"] * 4 + ["SER"] * 6 + ["CYS"] * 6 + ["UMA"] * 3
     ATOM_NAMES = (
         ["N", "CA", "C", "O"]
         + ["N", "CA", "C", "O", "CB", "OG"]
         + ["N", "CA", "C", "O", "CB", "SG"]
+        + ["PA", "PB", "O1B"]
     )
     ELEMENTS = (
-        ["N", "C", "C", "O"] + ["N", "C", "C", "O", "C", "O"] + ["N", "C", "C", "O", "C", "S"]
+        ["N", "C", "C", "O"]
+        + ["N", "C", "C", "O", "C", "O"]
+        + ["N", "C", "C", "O", "C", "S"]
+        + ["P", "P", "O"]
     )
-    COORDS = np.arange(16 * 3, dtype=np.float32).reshape(16, 3) / 4  # (n_atoms, 3)
+    ATOMIC_NUMBERS = {"C": 6, "N": 7, "O": 8, "P": 15, "S": 16}
+    COORDS = np.arange(19 * 3, dtype=np.float32).reshape(19, 3) / 4  # (n_atoms, 3)
 
     def _write_npz(
         self,
@@ -227,25 +233,26 @@ class TestBoltzNpzAtomArrayHelpers:
         """
         atoms = np.zeros(len(self.ATOM_NAMES), dtype=AtomV2)
         atoms["name"] = self.ATOM_NAMES
+        atoms["element"] = [self.ATOMIC_NUMBERS[element] for element in self.ELEMENTS]
         atoms["coords"] = self.COORDS
         atoms["is_present"] = True
 
-        residues = np.zeros(3, dtype=Residue)
-        residues["name"] = ["GLY", "SER", "CYS"]
-        residues["res_idx"] = [0, 1, 0]
-        residues["atom_idx"] = [0, 4, 10]
-        residues["atom_num"] = [4, 6, 6]
-        residues["is_standard"] = True
+        residues = np.zeros(4, dtype=Residue)
+        residues["name"] = ["GLY", "SER", "CYS", "UMA"]
+        residues["res_idx"] = [0, 1, 0, 0]
+        residues["atom_idx"] = [0, 4, 10, 16]
+        residues["atom_num"] = [4, 6, 6, 3]
+        residues["is_standard"] = [True, True, True, False]
         residues["is_present"] = True
 
-        chains = np.zeros(2, dtype=Chain)
-        chains["name"] = ["A", "B"]
-        chains["asym_id"] = [0, 1]
-        chains["entity_id"] = [0, 1]
-        chains["atom_idx"] = [0, 10]
-        chains["atom_num"] = [10, 6]
-        chains["res_idx"] = [0, 2]
-        chains["res_num"] = [2, 1]
+        chains = np.zeros(3, dtype=Chain)
+        chains["name"] = ["A", "B", "C"]
+        chains["asym_id"] = [0, 1, 2]
+        chains["entity_id"] = [0, 1, 2]
+        chains["atom_idx"] = [0, 10, 16]
+        chains["atom_num"] = [10, 6, 3]
+        chains["res_idx"] = [0, 2, 3]
+        chains["res_num"] = [2, 1, 1]
 
         if include_chains:
             np.savez(out_path, atoms=atoms, residues=residues, chains=chains)

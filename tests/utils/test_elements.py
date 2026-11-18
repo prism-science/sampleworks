@@ -3,7 +3,7 @@
 import logging
 
 import pytest
-from sampleworks.utils.elements import covalent_radius
+from sampleworks.utils.elements import atomic_numbers_to_symbols, covalent_radius
 
 
 @pytest.mark.parametrize(
@@ -42,3 +42,9 @@ def test_covalent_radius_warns_on_unrecognized_symbol(symbol, caplog):
         radius = covalent_radius(symbol)
     assert radius == pytest.approx(0.50)
     assert f"'{symbol}'" in caplog.text
+
+
+def test_atomic_numbers_to_symbols():
+    """Atomic numbers map to upper-case symbols, with ``0`` (unknown) mapping to ``'X'``."""
+    symbols = atomic_numbers_to_symbols([6, 15, 17, 82, 0])
+    assert symbols.tolist() == ["C", "P", "CL", "PB", "X"]
