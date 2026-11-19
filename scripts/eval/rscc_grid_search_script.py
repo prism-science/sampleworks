@@ -36,11 +36,14 @@ from joblib import delayed, Parallel
 from loguru import logger
 from sampleworks.eval.constants import DEFAULT_SELECTION_PADDING
 from sampleworks.eval.eval_dataclasses import ProteinConfig, Trial
-from sampleworks.eval.grid_search_eval_utils import parse_eval_args, setup_evaluation_parameters
+from sampleworks.eval.grid_search_eval_utils import (
+    align_to_reference,
+    parse_eval_args,
+    setup_evaluation_parameters,
+)
 from sampleworks.eval.metrics import rscc
 from sampleworks.utils.atom_array_utils import (
     apply_selection,
-    filter_to_common_atoms,
     parse_structure,
     remove_atoms_with_any_nan_coords,
 )
@@ -48,11 +51,6 @@ from sampleworks.utils.density_utils import (
     build_density_transformer,
     run_density_transformer,
 )
-from sampleworks.utils.frame_transforms import (
-    apply_forward_transform,
-    weighted_rigid_align_differentiable,
-)
-from sampleworks.utils.framework_utils import match_batch
 from sampleworks.utils.structure_utils import (
     get_asym_unit_from_structure,
     get_reference_structure_coords,
@@ -180,47 +178,8 @@ def process_group(
                 atom_array.set_annotation("b_factor", np.full(atom_array.coord.shape[-2], 20.0))
 
             atom_array = remove_atoms_with_any_nan_coords(atom_array)
-            # Find the common atoms with non-nan coords between the reference
-            # and the refined structure.
-            ref_common, pred_common = filter_to_common_atoms(ref_atom_array, atom_array)
-
-            # Align the refined structure to the reference
-            # using weighted_rigid_align_differentiable.
-            # Convert to torch tensors with batch dimension.
-            ref_coords_torch = torch.from_numpy(ref_common.coord).float()  # [1, n_atoms, 3]
-            pred_coords_torch = torch.from_numpy(pred_common.coord).float()  # [1, n_atoms, 3]
-            ref_coords_torch = match_batch(ref_coords_torch, pred_coords_torch.shape[0])
-            if (
-                len(ref_coords_torch.shape) != 3
-                or ref_coords_torch.shape[1] != pred_coords_torch.shape[1]
-            ):
-                logger.error(
-                    f"Shape error: ref_coords_torch: {ref_coords_torch.shape}, "
-                    f"pred_coords_torch: {pred_coords_torch.shape}"
-                )
-                raise ValueError("ref_coords_torch and pred_coords_torch must have the same shape")
-
-            # Create uniform weights and mask for all common atoms
-            n_atoms = ref_coords_torch.shape[1]
-            weights = torch.ones(1, n_atoms)
-            mask = torch.ones(1, n_atoms)
-
-            # Align predicted to reference and get the transform
-            _, transform = weighted_rigid_align_differentiable(
-                true_coords=pred_coords_torch,  # coords to align
-                pred_coords=ref_coords_torch,  # target coords
-                weights=weights,
-                mask=mask,
-                return_transforms=True,
-                allow_gradients=False,
-            )
-
-            # Apply the transform to the entire refined structure (atom_array)
-            atom_array_coords_torch = torch.from_numpy(atom_array.coord)
-            aligned_coords_torch = apply_forward_transform(
-                atom_array_coords_torch, transform, rotation_only=False
-            )
-            atom_array.coord = aligned_coords_torch.numpy()
+            # Align the refined structure to the reference so its map lines up with the base map.
+            atom_array = align_to_reference(atom_array, ref_atom_array)
 
             # Compute density from the whole aligned refined structure, shared across all
             # selections. When selected_residues_only is set, this is deferred to the
