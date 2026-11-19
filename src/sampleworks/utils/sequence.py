@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import functools
 import os
-from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +14,7 @@ from atomworks.io.utils.sequence import get_1_from_3_letter_code
 from biotite.sequence import ProteinSequence
 from biotite.sequence.align import align_optimal, SubstitutionMatrix
 from biotite.sequence.io.fasta import FastaFile
-from biotite.structure import get_residue_starts
+from biotite.structure import AtomArray, AtomArrayStack, get_residue_starts
 from biotite.structure.info import residue as ccd_residue
 
 
@@ -75,6 +74,39 @@ def validate_seq_with_error(sequence: str) -> str:
     return sequence
 
 
+# Separates per-chain sequences in a multi-chain override, as in ColabFold's ``SEQ:SEQ`` input.
+CHAIN_SEQUENCE_SEPARATOR = ":"
+
+
+def split_chain_sequences(sequence: str) -> tuple[str, ...]:
+    """Split a ``SEQ:SEQ`` override into validated per-chain sequences.
+
+    Parameters
+    ----------
+    sequence : str
+        One sequence per protein chain, joined by ``CHAIN_SEQUENCE_SEPARATOR``.
+        A sequence without a separator is a single chain. Case-insensitive.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Uppercased sequences, one per chain, in the order given.
+
+    Raises
+    ------
+    ValueError
+        If any chain sequence is empty or contains a non-canonical amino acid.
+    """
+    chain_sequences = tuple(part.strip() for part in sequence.split(CHAIN_SEQUENCE_SEPARATOR))
+    if not all(chain_sequences):
+        raise ValueError(
+            f"Invalid protein sequence {sequence!r}: a chain sequence is empty. Give one "
+            f"non-empty sequence per protein chain, separated by "
+            f"{CHAIN_SEQUENCE_SEPARATOR!r}."
+        )
+    return tuple(validate_seq_with_error(chain_sequence) for chain_sequence in chain_sequences)
+
+
 def resolve_sequence_arg(
     value: str | os.PathLike[str] | None,
     root: str | os.PathLike[str] | None = None,
@@ -84,21 +116,23 @@ def resolve_sequence_arg(
     Parameters
     ----------
     value : str or os.PathLike or None
-        An amino-acid string, a path to a FASTA file (``.fasta``, ``.fa``, ``.faa``
-        or ``.fas``), or an empty value.
+        An amino-acid string (``SEQ:SEQ`` for several protein chains), a path to a
+        FASTA file (``.fasta``, ``.fa``, ``.faa`` or ``.fas``) holding one record per
+        protein chain, or an empty value.
     root : str or os.PathLike or None
         Base directory for resolving relative FASTA paths.
 
     Returns
     -------
     str or None
-        The amino-acid sequence, or ``None`` when *value* is empty.
+        The amino-acid sequence, with chains joined by ``CHAIN_SEQUENCE_SEPARATOR``,
+        or ``None`` when *value* is empty.
 
     Raises
     ------
     ValueError
-        If a FASTA file contains no sequence, more than one sequence, or the
-        resolved string is not a valid protein sequence.
+        If a FASTA file contains no sequence, a chain sequence is empty, or a
+        chain sequence is not a valid protein sequence.
     """
     if value is None:
         return None
@@ -114,17 +148,12 @@ def resolve_sequence_arg(
     _FASTA_EXTENSIONS = {".fasta", ".fa", ".faa", ".fas"}
     # Check the suffix first: stat() on a literal sequence > 255 chars raises ENAMETOOLONG.
     if path.suffix.lower() in _FASTA_EXTENSIONS and path.is_file():
-        fasta = list(islice(FastaFile.read_iter(path), 2))
-        if len(fasta) == 0:
+        records = [record_sequence.strip() for _, record_sequence in FastaFile.read_iter(path)]
+        if not any(records):
             raise ValueError(f"FASTA file contains no sequence: {path}")
-        if len(fasta) > 1:
-            # TODO: Deal with ligands and multichain
-            raise ValueError(f"FASTA file contains multiple sequences: {path}")
-        sequence = fasta[0][1].strip()
-        if not sequence:
-            raise ValueError(f"FASTA file contains no sequence: {path}")
+        sequence = CHAIN_SEQUENCE_SEPARATOR.join(records)
 
-    return validate_seq_with_error(sequence)
+    return CHAIN_SEQUENCE_SEPARATOR.join(split_chain_sequences(sequence))
 
 
 def _snap_runs_to_numbering(
@@ -218,36 +247,118 @@ def _snap_runs_to_numbering(
     return snapped
 
 
+def _align_chain_to_sequence(
+    chain_array: AtomArray | AtomArrayStack, chain_id: str, sequence: str
+) -> np.ndarray:
+    """Map each atom of one protein chain to its residue's position in ``sequence``.
+
+    Parameters
+    ----------
+    chain_array : AtomArray or AtomArrayStack
+        Atoms of a single protein chain in residue order, ``n_chain_atoms`` per model.
+    chain_id : str
+        Chain identifier, used only in error messages.
+    sequence : str
+        Validated one-letter override sequence for this chain.
+
+    Returns
+    -------
+    np.ndarray
+        Position in ``sequence`` of each atom's residue, shape ``(n_chain_atoms,)``.
+
+    Raises
+    ------
+    ValueError
+        If the chain contains non-amino-acid residues, its residue numbering
+        contradicts the sequence, or a residue cannot be aligned to the sequence.
+    """
+    starts = get_residue_starts(chain_array, add_exclusive_stop=True)
+    residue_names = chain_array.res_name[starts[:-1]]
+    residue_ids = chain_array.res_id[starts[:-1]]
+    observed_seq = "".join(
+        get_1_from_3_letter_code(n, ChainType.POLYPEPTIDE_L, use_closest_canonical=True)
+        for n in residue_names
+    )
+    non_amino_acids = [
+        (int(res_id), str(res_name))
+        for letter, res_id, res_name in zip(observed_seq, residue_ids, residue_names)
+        if letter == "X"
+    ]
+    if non_amino_acids:
+        raise ValueError(
+            f"Sequence override failed: protein chain {chain_id} contains non-amino-acid "
+            f"residues {non_amino_acids[:10]}. The CIF may be malformed (non-polymer residues "
+            f"in a protein chain)."
+        )
+
+    # Align observed → override to map each observed residue to its position
+    # in the full (potentially longer) override sequence.
+    matrix = SubstitutionMatrix.std_protein_matrix()
+    alignments = align_optimal(
+        ProteinSequence(observed_seq),
+        ProteinSequence(sequence),
+        matrix,
+        terminal_penalty=False,
+        max_number=1,
+    )
+
+    # -1 marks an observed residue with no identical partner in the override.
+    residue_seq_idx = np.full(len(residue_ids), -1, dtype=np.int64)
+    for obs_i, full_i in alignments[0].trace:
+        if obs_i != -1 and full_i != -1 and observed_seq[obs_i] == sequence[full_i]:
+            residue_seq_idx[obs_i] = full_i
+    residue_seq_idx = _snap_runs_to_numbering(observed_seq, sequence, residue_ids, residue_seq_idx)
+
+    # Unmapped residues would corrupt downstream tensor indexing in model wrappers
+    # (Protpardelle, RF3) that use seq_idx as array indices.
+    unmapped = residue_ids[residue_seq_idx < 0].tolist()
+    if unmapped:
+        raise ValueError(
+            f"Sequence override failed: {len(unmapped)} observed residue(s) of protein chain "
+            f"{chain_id} could not be aligned to the override sequence (first 10 unmapped: "
+            f"{unmapped[:10]}). The override sequence must be at least as long as, and "
+            f"compatible with, the observed structure sequence. Otherwise, the CIF's residue "
+            f"numbering or sequence may be malformed."
+        )
+    return np.repeat(residue_seq_idx, np.diff(starts))
+
+
 def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> dict[str, Any]:
-    """Return a structure with its protein-chain sequence overridden when provided.
+    """Return a structure with its protein-chain sequences overridden when provided.
 
     Parameters
     ----------
     structure : dict[str, Any]
         Atomworks-parsed structure containing a ``chain_info`` mapping.
     sequence : str or None
-        One-letter amino-acid sequence to use for the protein chains. ``None`` or
-        an empty string leaves the structure unchanged.
+        One-letter amino-acid sequence per protein chain, joined by
+        ``CHAIN_SEQUENCE_SEPARATOR`` (``SEQ:SEQ``) in the order the protein chains
+        appear in ``chain_info``. Non-protein chains (ligands, nucleic acids) keep
+        their parsed definitions. ``None`` or an empty string leaves the structure
+        unchanged.
 
     Returns
     -------
     dict[str, Any]
-        A shallow copy of ``structure`` with copied ``chain_info`` entries. The
-        original structure and its chain metadata are not changed.
+        A shallow copy of ``structure`` with copied ``chain_info`` entries and a
+        copied ``asym_unit`` carrying a ``seq_idx`` annotation: each atom's position
+        in its chain's override sequence, ``-1`` for atoms of non-protein chains.
+        The original structure and its chain metadata are not changed.
 
     Raises
     ------
     ValueError
         If a non-empty sequence is supplied but the structure has no protein
-        chains, has multiple protein chains, contains invalid amino-acid
-        characters, or if the protein chain looks malformed (non-amino-acid residues,
-        residue numbering that contradicts the sequence, or residues that cannot be
+        chains, the number of chain sequences differs from the number of protein
+        chains, a chain sequence is empty or contains invalid amino-acid characters,
+        or a protein chain looks malformed (non-amino-acid residues, residue
+        numbering that contradicts the sequence, or residues that cannot be
         aligned to the override).
     """
     if sequence is None or not sequence.strip():
         return structure
 
-    sequence = validate_seq_with_error(sequence.strip())
+    chain_sequences = split_chain_sequences(sequence)
 
     chain_info = structure.get("chain_info")
     if not chain_info:
@@ -259,82 +370,27 @@ def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> 
     if not protein_chain_ids:
         raise ValueError("A sequence override requires at least one protein chain")
 
-    if len(protein_chain_ids) != 1:
+    if len(chain_sequences) != len(protein_chain_ids):
         raise ValueError(
-            f"Sequence overrides are currently supported only for single-protein-chain "
-            f"structures, but this structure has {len(protein_chain_ids)} protein chains "
-            f"({', '.join(protein_chain_ids)}). Pass per-chain sequences once multi-chain "
-            f"support is implemented."
+            f"The sequence override has {len(chain_sequences)} chain sequence(s), but this "
+            f"structure has {len(protein_chain_ids)} protein chains "
+            f"({', '.join(protein_chain_ids)}). Give one sequence per protein chain, in that "
+            f"order, separated by {CHAIN_SEQUENCE_SEPARATOR!r}."
         )
 
-    updated_chain_info = {chain_id: dict(info) for chain_id, info in chain_info.items()}
-    updated_chain_info[protein_chain_ids[0]]["processed_entity_canonical_sequence"] = sequence
-
-    # Align observed residues to override sequence so the AtomReconciler can
-    # pair atoms correctly when missing residues are present.
     arr = structure["asym_unit"]
-    chain_id_str = protein_chain_ids[0]
     chain_ids = np.asarray(arr.chain_id)
-    res_ids = np.asarray(arr.res_id)
-    chain_mask = chain_ids == chain_id_str
-
-    # Build observed 1-letter sequence in residue order.
-    chain_array = arr[..., chain_mask]
-    starts = get_residue_starts(chain_array, add_exclusive_stop=True)
-    observed_seq = "".join(
-        get_1_from_3_letter_code(n, ChainType.POLYPEPTIDE_L, use_closest_canonical=True)
-        for n in chain_array.res_name[starts[:-1]]
-    )
-    non_amino_acids = [
-        (int(res_id), str(res_name))
-        for letter, res_id, res_name in zip(
-            observed_seq, chain_array.res_id[starts[:-1]], chain_array.res_name[starts[:-1]]
+    # -1 marks atoms outside the overridden protein chains; make_normalized_atom_id
+    # falls back to dense rank for them.
+    seq_idx = np.full(arr.array_length(), -1, dtype=np.int64)
+    updated_chain_info = {chain_id: dict(info) for chain_id, info in chain_info.items()}
+    for chain_id, chain_sequence in zip(protein_chain_ids, chain_sequences, strict=True):
+        chain_mask = chain_ids == chain_id
+        seq_idx[chain_mask] = _align_chain_to_sequence(
+            arr[..., chain_mask], chain_id, chain_sequence
         )
-        if letter == "X"
-    ]
-    if non_amino_acids:
-        raise ValueError(
-            f"Sequence override failed: protein chain {chain_id_str} contains non-amino-acid "
-            f"residues {non_amino_acids[:10]}. The CIF may be malformed (non-polymer residues "
-            f"in a protein chain)."
-        )
+        updated_chain_info[chain_id]["processed_entity_canonical_sequence"] = chain_sequence
 
-    # Align observed → override to map each observed residue to its position
-    # in the full (potentially longer) override sequence.
-    obs_prot = ProteinSequence(observed_seq)
-    full_prot = ProteinSequence(sequence)
-    matrix = SubstitutionMatrix.std_protein_matrix()
-    alignments = align_optimal(obs_prot, full_prot, matrix, terminal_penalty=False, max_number=1)
-    trace = alignments[0].trace
-
-    residue_seq_idx = np.full(len(starts) - 1, -1, dtype=np.int64)
-    for row in trace:
-        obs_i, full_i = int(row[0]), int(row[1])
-        if obs_i != -1 and full_i != -1:
-            if observed_seq[obs_i] != sequence[full_i]:
-                continue
-            residue_seq_idx[obs_i] = full_i
-    residue_seq_idx = _snap_runs_to_numbering(
-        observed_seq, sequence, chain_array.res_id[starts[:-1]], residue_seq_idx
-    )
-
-    # Every observed residue must map to the override sequence.  Unmapped
-    # residues (seq_idx == -1) would corrupt downstream tensor indexing in
-    # model wrappers (Protpardelle, RF3) that use seq_idx as array indices.
-    unmapped = chain_array.res_id[starts[:-1]][residue_seq_idx < 0].tolist()
-    if unmapped:
-        raise ValueError(
-            f"Sequence override failed: {len(unmapped)} observed residue(s) could not be "
-            f"aligned to the override sequence (first 10 unmapped: {unmapped[:10]}). The override "
-            f"sequence must be at least as long as, and compatible with, the observed "
-            f"structure sequence. Otherwise, the CIF's residue numbering or sequence may be "
-            f"malformed."
-        )
-
-    # Annotate atoms with seq_idx: aligned position for the protein chain,
-    # -1 elsewhere (make_normalized_atom_id falls back to dense rank for -1).
-    seq_idx = np.full(len(res_ids), -1, dtype=np.int64)
-    seq_idx[chain_mask] = np.repeat(residue_seq_idx, np.diff(starts))
     updated_arr = arr.copy()
     updated_arr.set_annotation("seq_idx", seq_idx)
 
