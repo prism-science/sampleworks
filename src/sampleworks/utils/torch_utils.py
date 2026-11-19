@@ -2,6 +2,9 @@
 Utility functions for working with PyTorch tensors and devices.
 """
 
+import random
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
@@ -223,3 +226,52 @@ def gaussian_prior(
     if num_atoms is None:
         raise ValueError("Either features or shape must be provided to initialize_from_prior()")
     return torch.randn((batch_size, num_atoms, 3), device=device)
+
+
+def seed_all_rngs(seed: int) -> None:
+    """Seed every global random number generator sampleworks draws from.
+
+    Covers Python's ``random``, NumPy's legacy global generator, and PyTorch on the
+    CPU and every CUDA device. Generators created explicitly (``np.random.default_rng``,
+    ``torch.Generator``) are independent of these and are not affected.
+
+    Parameters
+    ----------
+    seed : int
+        Seed applied to every global generator.
+
+    Notes
+    -----
+    Side effect: replaces the state of all global generators listed above.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)  # also seeds every CUDA device
+
+
+@contextmanager
+def seeded_rngs(seed: int) -> Iterator[None]:
+    """Seed every global random number generator for the duration of a block.
+
+    On exit, the state of each generator that :func:`seed_all_rngs` seeds is restored,
+    so a seeded block does not change the random draws of the code around it.
+
+    Parameters
+    ----------
+    seed : int
+        Seed applied to every global generator on entry.
+
+    Yields
+    ------
+    None
+    """
+    python_state = random.getstate()
+    numpy_state = np.random.get_state()
+    # Listing the devices explicitly stops fork_rng warning on multi-GPU hosts.
+    with torch.random.fork_rng(devices=range(torch.cuda.device_count())):
+        try:
+            seed_all_rngs(seed)
+            yield
+        finally:
+            random.setstate(python_state)
+            np.random.set_state(numpy_state)
