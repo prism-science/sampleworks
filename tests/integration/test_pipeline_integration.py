@@ -196,6 +196,26 @@ class TestWrapperSamplerMatrixMock:
         assert indices == list(range(num_steps))
 
 
+def _expected_direction(gradient: Tensor, gradient_normalization: bool) -> Tensor:
+    """Return the guidance direction a DPS scaler should produce for a known gradient.
+
+    Parameters
+    ----------
+    gradient
+        Analytic loss gradient, shape (batch, atoms, 3).
+    gradient_normalization
+        If True, each batch member is divided by its own Frobenius norm.
+
+    Returns
+    -------
+    Tensor
+        Expected direction, shape (batch, atoms, 3).
+    """
+    if not gradient_normalization:
+        return gradient
+    return torch.stack([member / member.flatten().norm() for member in gradient])
+
+
 class TestStepScalerMatrix:
     """Test step scalers with mock wrapper and ground truth assertions."""
 
@@ -236,28 +256,33 @@ class TestStepScalerMatrix:
         strength = scaler.guidance_strength(context)
         assert torch.allclose(strength, torch.zeros(batch_size, device=device))
 
-    def test_data_space_dps_gradient_equals_state(self, device: torch.device):
-        """DataSpaceDPSScaler gradient equals state when using MockGradientLossFunction.
+    @pytest.mark.parametrize("gradient_normalization", [False, True])
+    def test_data_space_dps_gradient_equals_state(
+        self, gradient_normalization: bool, device: torch.device
+    ):
+        """DataSpaceDPSScaler direction is grad(loss), or its per-member unit vector.
 
         MockGradientLossFunction computes loss = 0.5 * ||coords||^2,
-        so grad(loss) w.r.t. coords = coords.
+        so grad(loss) w.r.t. coords = coords. The two batch members differ in
+        scale by 100x so a whole-batch or per-atom norm gives a different answer.
         """
-        scaler = DataSpaceDPSScaler(step_size=0.1)
-        batch_size = 2
+        scaler = DataSpaceDPSScaler(step_size=0.1, gradient_normalization=gradient_normalization)
         num_atoms = 10
 
-        # Use fixed seed for reproducibility
         torch.manual_seed(123)
-        state = torch.randn(batch_size, num_atoms, 3, device=device)
+        unit_scale_state = torch.randn(num_atoms, 3, device=device)
+        state = torch.stack([unit_scale_state, 100.0 * unit_scale_state.flip(0)])
 
         context = create_step_context_with_loss(0, state, device)
 
         direction, loss = scaler.scale(state, context, model=None)
 
-        # Ground truth: direction = grad(0.5 * ||state||^2) = state
-        assert torch.allclose(direction, state, atol=1e-6)
-        assert torch.isfinite(direction).all()
-        assert torch.isfinite(loss).all()
+        assert torch.allclose(
+            direction, _expected_direction(state, gradient_normalization), rtol=1e-5, atol=1e-6
+        )
+        if gradient_normalization:
+            member_norms = torch.linalg.vector_norm(direction, dim=(-1, -2))
+            assert torch.allclose(member_norms, torch.ones(2, device=device), atol=1e-6)
 
         # Ground truth: loss = 0.5 * ||state||^2
         expected_loss = 0.5 * (state**2).sum()
@@ -309,18 +334,24 @@ class TestStepScalerMatrix:
         with pytest.raises(ValueError, match="x_t"):
             scaler.scale(state, context, model=None)
 
-    def test_noise_space_dps_gradient_chain_rule(self, device: torch.device):
+    @pytest.mark.parametrize("gradient_normalization", [False, True])
+    def test_noise_space_dps_gradient_chain_rule(
+        self, gradient_normalization: bool, device: torch.device
+    ):
         """NoiseSpaceDPSScaler gradient follows chain rule through model.
 
         With state = x_t * 0.9 + 0.1, and loss = 0.5 * ||state||^2,
-        grad(loss) w.r.t. x_t = state * 0.9 (chain rule).
+        grad(loss) w.r.t. x_t = state * 0.9 (chain rule); with normalization,
+        each batch member's gradient is scaled to unit norm. The members differ
+        in scale by 100x.
         """
-        scaler = NoiseSpaceDPSScaler(step_size=0.1)
+        scaler = NoiseSpaceDPSScaler(step_size=0.1, gradient_normalization=gradient_normalization)
         batch_size = 2
         num_atoms = 10
 
         torch.manual_seed(456)
-        x_t = torch.randn(batch_size, num_atoms, 3, device=device, requires_grad=True)
+        unit_scale_x_t = torch.randn(num_atoms, 3, device=device)
+        x_t = torch.stack([unit_scale_x_t, 100.0 * unit_scale_x_t.flip(0)]).requires_grad_(True)
         state = x_t * 0.9 + 0.1
 
         loss_function = MockGradientLossFunction()
@@ -345,9 +376,11 @@ class TestStepScalerMatrix:
 
         # Ground truth: direction = d(loss)/d(x_t) = d(loss)/d(state) * d(state)/d(x_t)
         #             = state * 0.9
-        assert torch.allclose(direction, state * 0.9, atol=1e-6)
-        assert torch.isfinite(direction).all()
-        assert torch.isfinite(loss).all()
+        expected = _expected_direction(state.detach() * 0.9, gradient_normalization)
+        assert torch.allclose(direction, expected, rtol=1e-5, atol=1e-6)
+        if gradient_normalization:
+            member_norms = torch.linalg.vector_norm(direction, dim=(-1, -2))
+            assert torch.allclose(member_norms, torch.ones(batch_size, device=device), atol=1e-6)
 
     @pytest.mark.parametrize("scaler_type", get_all_step_scalers(), ids=lambda s: s.value)
     def test_scaler_scale_returns_correct_shapes(
