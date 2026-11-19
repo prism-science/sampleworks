@@ -29,6 +29,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+SFC_BULK_SOLVENT_MODES = ("off", "combined", "per_conformer")
+SFC_SCALE_FIT_MODES = ("off", "adam")
+LUNUS_BULK_SOLVENT_MODES = ("off", "per_conformer")
+
+
 def opt(
     default: Any,
     *,
@@ -131,11 +136,18 @@ class StructureFactorOptions:
         "off",
         help="Bulk-solvent treatment: off (score |Fprotein|), combined (one mask from "
         "the combined density), or per_conformer (mean of per-conformer masks)",
-        choices=("off", "combined", "per_conformer"),
+        choices=SFC_BULK_SOLVENT_MODES,
     )
     normalize_amplitude: bool = opt(False, help="Score normalized amplitudes (|E|) instead of |F|")
     exclude_free_reflections: bool = opt(False, help="Score the working set only, dropping R-free")
     batch_partition: int = opt(10, help="Ensemble chunk size for the SFcalculator batch")
+    scale_fit: str = opt(
+        "off",
+        help="Per-resolution-bin scale (kiso, kmask, uaniso) treatment: off (SFcalculator's "
+        "default values) or adam (least-squares refit against |Fo| on every loss call; "
+        "always on the working set, ignoring exclude_free_reflections)",
+        choices=SFC_SCALE_FIT_MODES,
+    )
     sfcalculator_kwargs: dict | None = opt(
         None,
         help="Extra SFcalculator keyword arguments as JSON, e.g. '{\"n_bins\": 15}'",
@@ -181,7 +193,7 @@ class DiffuseBraggOptions:
         "off",
         help="Bulk-solvent treatment: off (score |Fprotein|) or per_conformer (a mask from "
         "each configuration's own density)",
-        choices=("off", "per_conformer"),
+        choices=LUNUS_BULK_SOLVENT_MODES,
     )
     solvent_cutoff: float | None = opt(
         None,
