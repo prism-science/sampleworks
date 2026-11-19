@@ -45,7 +45,10 @@ def parse_selection_string(selection: str) -> tuple[str | None, int | None, int 
     """Parse a selection string like 'chain A and resi 326-339'.
 
     Supports both residue ranges ('resi 10-50') and single residues ('resi 10').
-    For single residues, resi_start and resi_end will be equal.
+    For single residues, resi_start and resi_end will be equal. Keywords match in
+    any case, but the chain ID keeps its case because author chain IDs can be
+    lowercase. Residue numbers may be negative, as author numbering allows
+    (e.g. 'resi -5--1').
 
     Parameters
     ----------
@@ -60,9 +63,9 @@ def parse_selection_string(selection: str) -> tuple[str | None, int | None, int 
     # Parse "chain X and resi N-M" format and generalizations of that.
     chain = re.search(r"chain\s+(\w+)", selection, re.IGNORECASE)
     if chain is not None:
-        chain = chain.group(1).upper()
+        chain = chain.group(1)
 
-    residues = re.search(r"resi\s+(\d+)(?:-(\d+))?", selection, re.IGNORECASE)
+    residues = re.search(r"resi\s+(-?\d+)(?:-(-?\d+))?", selection, re.IGNORECASE)
     if residues is not None:
         resi_start = int(residues.group(1))
         resi_end = int(residues.group(2)) if residues.group(2) else resi_start
