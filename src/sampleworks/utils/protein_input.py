@@ -38,9 +38,10 @@ class ProteinInput:
     sequence : str or None
         Full one-letter protein sequence overriding the structure's, may be useful when
         termini or internal residues are unresolved. In the CSV this may be a
-        raw sequence or a path to a single-record FASTA file. ``None`` (empty
-        cell or missing column) keeps the sequence from the coordinates in the
-        structure file.
+        raw sequence or a path to a FASTA file. Several protein chains take one
+        sequence each, in the structure's chain order: ``SEQ:SEQ`` or one FASTA
+        record per chain. ``None`` (empty cell or missing column) keeps the
+        sequence from the coordinates in the structure file.
     loss_options : dict[str, Any]
         Loss option name to this protein's value, typed as the option declares.
         Path options are absolute in CSV-read instances, and must exist. Empty
