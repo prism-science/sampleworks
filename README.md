@@ -180,7 +180,6 @@ pixi run -e protenix sampleworks-guidance \
 | `--outer-steps`        | Optimization rounds, fresh prior noise each               | `2`     |
 | `--anchor-weight`      | Penalty on drift from the trunk baseline; `0` disables it | `0.0`   |
 | `--max-grad-norm`      | Per-latent gradient clip                                  | `1.0`   |
-| `--bond-length-weight` | Bond-length and steric-clash penalty; `0` disables it     | `5e-5`  |
 
 See [docs/IT_OPT_DESIGN.md](docs/IT_OPT_DESIGN.md) for the algorithm and the per-model gradient
 readiness table, and [docs/IT_OPT_TESTING.md](docs/IT_OPT_TESTING.md) for how to run and debug it.
@@ -225,8 +224,10 @@ guidance step size intact.
 `bond_geometry` scores no experimental data, so it is meant as a second term that keeps guidance
 from stretching bonds or packing atoms into clashes to improve the data fit. Its penalty is a sum
 over every bond and atom pair, so it usually needs a much smaller weight than the data loss. The
-weight below is IT-opt's tuned default (`--bond-length-weight`); treat it as a starting point for
-`pure_guidance` and `fk_steering`, where it has not been tuned:
+weight below was tuned for `latent_opt`, where it is the smallest that brought mean clash back to
+the unguided baseline without losing the density gain (`1e-3` reaches median clash 0 but reduces
+altloc diversity). Treat it as a starting point for `pure_guidance` and `fk_steering`, where it
+has not been tuned:
 
 ```yaml
 real_space_density:

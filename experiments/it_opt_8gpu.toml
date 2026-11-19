@@ -13,7 +13,7 @@ which-latent = "both"
 ensemble-sizes = "8"
 gradient-weights = "0.0"
 num-diffusion-steps = 200
-bond-length-weight = 5e-5
+loss-config = "experiments/losses/density_with_bond_geometry.yaml"
 align-to-input = true
 jobs-per-gpu = 2
 

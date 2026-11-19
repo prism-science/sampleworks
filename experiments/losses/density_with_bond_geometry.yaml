@@ -1,0 +1,9 @@
+# Real-space density plus the bond-geometry restraint, for IT-opt (latent_opt) presets.
+# The density map and resolution come from each protein's row in the proteins CSV.
+# 5e-5 is the smallest bond_geometry weight that brought IT-opt's mean clash back to the
+# unguided baseline without losing its density gain; 1e-3 reaches median clash 0 at the cost
+# of altloc diversity.
+real_space_density:
+  weight: 1.0
+bond_geometry:
+  weight: 5.0e-5

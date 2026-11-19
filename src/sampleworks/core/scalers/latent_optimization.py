@@ -48,7 +48,6 @@ from loguru import logger
 from torch import Tensor
 from tqdm import tqdm
 
-from sampleworks.core.losses.geometry import BondGeometryLoss
 from sampleworks.core.losses.protocol import LossFunctionProtocol, prepare_loss_if_needed
 from sampleworks.core.samplers.protocol import TrajectorySampler
 from sampleworks.core.scalers.protocol import GuidanceOutput, StepScalerProtocol
@@ -226,7 +225,6 @@ class LatentOptimization:
         optimize_pair: bool = True,
         anchor_weight_single: float = 0.0,
         anchor_weight_pair: float = 0.0,
-        bond_length_weight: float = 5e-5,  # smallest weight that fixes mean clash; see docstring
         single_attr: str = "s",
         pair_attr: str = "z",
     ):
@@ -260,17 +258,6 @@ class LatentOptimization:
             Which representations to optimize. Both by default.
         anchor_weight_single, anchor_weight_pair
             Weights of the on-manifold L2-to-baseline anchor per latent.
-        bond_length_weight
-            Weight of the coordinate-space bond-geometry penalty (bond-length + steric-clash
-            hinges; see ``BondGeometryLoss``). Pure latent opt (0) improves density fit but
-            raises clashes; this penalty curbs that. Full-40 sweep -- mean/median clash, RSCC>=0.8
-            (unguided baseline = 0.38 / 0.00 / 42%):
-                0     -> 0.47 / 0.25 / 92%   (density gained, but clashes rose)
-                5e-5  -> 0.38 / 0.25 / 92%   (mean clash back to baseline)   [DEFAULT]
-                1e-4  -> 0.39 / 0.25 / 92%
-                1e-3  -> 0.35 / 0.00 / 98%   (median clash 0; over-constrains, split 18->11%)
-            Default 5e-5: smallest weight that fixes the mean clash while keeping the density gain
-            and altloc diversity; use 1e-3 if you need median clash at 0 (accepts less spread).
         single_attr, pair_attr
             Conditioning attribute names for the single / pair representation
             (``"s"``/``"z"`` for Boltz, ``"s_trunk"``/``"z_trunk"`` for
@@ -294,7 +281,6 @@ class LatentOptimization:
         for name, value in (
             ("anchor_weight_single", anchor_weight_single),
             ("anchor_weight_pair", anchor_weight_pair),
-            ("bond_length_weight", bond_length_weight),
         ):
             if value < 0:
                 raise ValueError(f"LatentOptimization requires {name} >= 0, got {value!r}.")
@@ -302,8 +288,7 @@ class LatentOptimization:
         logger.info(
             f"Initialized LatentOptimization (IT-opt): outer_steps={outer_steps}, "
             f"num_steps={num_steps}, lr={learning_rate}, "
-            f"optimize_single={optimize_single}, optimize_pair={optimize_pair}, "
-            f"bond_length_weight={bond_length_weight}."
+            f"optimize_single={optimize_single}, optimize_pair={optimize_pair}."
         )
         self.ensemble_size = ensemble_size
         self.num_steps = num_steps
@@ -318,7 +303,6 @@ class LatentOptimization:
         self.optimize_pair = optimize_pair
         self.anchor_weight_single = anchor_weight_single
         self.anchor_weight_pair = anchor_weight_pair
-        self.bond_length_weight = bond_length_weight
         self.single_attr = single_attr
         self.pair_attr = pair_attr
 
@@ -375,15 +359,6 @@ class LatentOptimization:
             optimize_pair=self.optimize_pair,
         )
 
-        # --- optional coordinate-space geometry penalty -------------------------
-        # BondGeometryLoss penalizes stretched bonds and steric clashes in the denoised structure,
-        # curbing the overshoot where an aggressive latent update trades geometry for density fit.
-        if self.bond_length_weight > 0:
-            bond_geometry = BondGeometryLoss()
-            bond_geometry.prepare(loss_inputs, device=coords.device)
-        else:
-            bond_geometry = None
-
         # --- optimize the latents (outer resample × inner diffusion steps) ------
         # These two lists are diagnostics only -- reported in the returned metadata, never read by
         # the loop. One entry is appended per round.
@@ -406,7 +381,6 @@ class LatentOptimization:
                 loss_inputs=loss_inputs,
                 grad_enabler=grad_enabler,
                 round_index=outer,
-                bond_geometry=bond_geometry,
             )
             optimization_losses.append(round_losses)
             # relative drift of each latent from its trunk baseline -- shows which latent
@@ -531,7 +505,6 @@ class LatentOptimization:
         loss_inputs,
         grad_enabler,
         round_index,
-        bond_geometry,
     ) -> list[float]:
         """One optimization round: a full traversal of the schedule that updates the latents.
 
@@ -574,7 +547,6 @@ class LatentOptimization:
                     anchor=anchor,
                     latents=latents,
                     baselines=baselines,
-                    bond_geometry=bond_geometry,
                 )
                 losses.append(data_loss)
                 steps.set_postfix(loss=data_loss)
@@ -592,17 +564,17 @@ class LatentOptimization:
         anchor: LatentAnchor,
         latents: Sequence[Tensor],
         baselines: Sequence[Tensor],
-        bond_geometry: BondGeometryLoss | None = None,
     ) -> float:
         """Score the denoised structure, backprop to the latents, take one optimizer step.
 
         ``denoised`` is the sampler's aligned prediction and carries a graph back to
         the latent leaves. Any ``torch.optim.Optimizer`` works here; the wiring passes
         Adam because that is the reference's choice (Maddipatla et al.,
-        arXiv:2602.24007). When ``bond_geometry`` is supplied, its bond-length/clash
-        penalty is added to the loss alongside the anchor. Each latent is
+        arXiv:2602.24007). Geometry restraints such as ``BondGeometryLoss`` arrive as
+        terms of ``loss_function`` (configured with ``--loss-config``). Each latent is
         gradient-clipped **separately** so ``s``'s step is not scaled down by ``z``'s
-        much larger gradient. Returns the data-only loss for logging.
+        much larger gradient. Returns the ``loss_function`` value, without the anchor,
+        for logging.
         """
         if denoised is None:
             raise RuntimeError(
@@ -616,16 +588,6 @@ class LatentOptimization:
             occupancies=loss_inputs.occupancies,
         )
         loss = data_loss + anchor(latents, baselines)
-        # Add the coordinate-space geometry penalty (bond-length + clash) when it is enabled, so the
-        # latent update is pushed toward density fits that keep valid geometry; it backpropagates
-        # through the same denoised prediction to the latents.
-        if bond_geometry is not None:
-            loss = loss + self.bond_length_weight * bond_geometry(
-                coordinates=denoised,
-                elements=loss_inputs.elements,
-                b_factors=loss_inputs.b_factors,
-                occupancies=loss_inputs.occupancies,
-            )
 
         optimizer.zero_grad()
         loss.backward()

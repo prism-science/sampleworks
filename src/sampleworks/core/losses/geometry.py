@@ -227,10 +227,11 @@ class BondGeometryLoss:
         #   sum          1x .. Ex      every member counted, but scales the penalty with E
         #
         # We take max + mean. The max keeps the worst member's full push, so the penalty can never
-        # come out weaker than it is today -- which matters because bond_length_weight is tuned to
-        # the smallest value that fixes clashes, and mean alone could drop below that floor. The
-        # mean then gives every other clashing member a share instead of nothing, which is what
-        # max alone failed to do. sum would do that too, but its value grows with ensemble size.
+        # come out weaker than it is today -- which matters because the bond_geometry weight is
+        # tuned to the smallest value that fixes clashes, and mean alone could drop below that
+        # floor. The mean then gives every other clashing member a share instead of nothing, which
+        # is what max alone failed to do. sum would do that too, but its value grows with ensemble
+        # size.
         combined_overlap = overlap_per_member.max(dim=0).values + overlap_per_member.mean(dim=0)
         scored_overlap = combined_overlap * self._scored_pairs  # [n, n]; unscored pairs zeroed
         return scored_overlap.sum()
