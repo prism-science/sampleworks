@@ -22,6 +22,21 @@ COMMON_ARGS = [
     "output",
 ]
 
+# The CLI refuses loss input files that do not exist, so every test runs in a
+# directory that holds the (empty) files its arguments name.
+LOSS_INPUT_FILES = ("test.ccp4", "test.mtz", "1vme.mtz", "bragg.mtz", "diffuse.mtz")
+
+
+@pytest.fixture(autouse=True)
+def _in_dir_with_loss_inputs(tmp_path, monkeypatch):
+    """Run each test from a directory holding the loss input files the tests name.
+
+    Side effect: changes the working directory to ``tmp_path`` for the test.
+    """
+    for name in LOSS_INPUT_FILES:
+        (tmp_path / name).touch()
+    monkeypatch.chdir(tmp_path)
+
 
 class TestFromCliUnified:
     """Test from_cli() when model and guidance_type come from CLI args."""
@@ -41,8 +56,8 @@ class TestFromCliUnified:
         config = GuidanceConfig.from_cli(argv)
         assert config.model_name == "rf3"
         assert config.guidance_type == "fk_steering"
-        assert hasattr(config, "num_particles")
-        assert hasattr(config, "fk_lambda")
+        assert config.num_particles == 3
+        assert config.fk_lambda == 1.0
 
     def test_model_specific_args_boltz2_method(self):
         argv = [
@@ -113,19 +128,36 @@ class TestFromCliUnified:
         assert not getattr(config, "bioemu2_no_msa_server")
 
     def test_guidance_specific_args_fk(self):
+        """Every FK steering flag lands on the config with the value passed.
+
+        Each value differs from the flag's default, so a flag that is parsed
+        but never copied onto the config cannot pass by falling back to it.
+        """
         argv = [
             "--model",
             "boltz1",
             "--guidance-type",
             "fk_steering",
             "--num-particles",
-            "5",
+            "5",  # default 3
             "--fk-lambda",
-            "2.0",
+            "2.0",  # default 1.0
+            "--fk-resampling-interval",
+            "4",  # default 1
+            "--num-gd-steps",
+            "3",  # default 1
+            "--guidance-weight",
+            "0.25",  # default 0.01
+            "--guidance-interval",
+            "2",  # default 1
         ] + COMMON_ARGS
         config = GuidanceConfig.from_cli(argv)
         assert config.num_particles == 5
         assert config.fk_lambda == 2.0
+        assert config.fk_resampling_interval == 4
+        assert config.num_gd_steps == 3
+        assert config.guidance_weight == 0.25
+        assert config.guidance_interval == 2
 
     def test_guidance_specific_args_pure(self):
         argv = [
@@ -237,6 +269,9 @@ class TestFromCliDefaults:
         assert config.augmentation is False
         assert config.align_to_input is False
         assert config.ensemble_size == 4
+        # Empty means auto-detect the device and log to output-dir/run.log downstream.
+        assert config.device == ""
+        assert config.log_path == ""
 
     def test_boolean_flags(self):
         argv = [
@@ -714,6 +749,7 @@ class TestLossSelection:
             "resolution": 1.8,
             "loss_order": 2,
             "em": False,
+            "allow_torch_fallback": False,
         }
 
     def test_density_options_still_reach_the_flat_config_fields(self):
@@ -940,3 +976,56 @@ class TestLossConfigFile:
 
         assert excinfo.value.code == 2
         assert "Unknown option(s) ['looss']" in capsys.readouterr().err
+
+    def test_a_missing_input_file_in_a_config_file_is_a_usage_error(self, tmp_path, capsys):
+        argv = self.BASE + [
+            "--loss-config",
+            self.write_config(
+                tmp_path,
+                "real_space_density:\n  loss_options: {density: absent.ccp4, resolution: 1.8}\n",
+            ),
+        ]
+
+        with pytest.raises(SystemExit) as excinfo:
+            GuidanceConfig.from_cli(argv)
+
+        assert excinfo.value.code == 2
+        assert "density file does not exist: absent.ccp4" in capsys.readouterr().err
+
+
+class TestMissingInputFiles:
+    """A loss input that does not exist stops the run before a model is loaded."""
+
+    MODEL_ARGS = ["--model", "boltz2", "--guidance-type", "pure_guidance"]
+    STRUCTURE_ARGS = ["--protein", "1VME", "--structure", "test.cif"]
+
+    @pytest.mark.parametrize(
+        ("loss_args", "message"),
+        [
+            (
+                ["--density", "absent.ccp4", "--resolution", "1.8"],
+                "real_space_density loss's density file does not exist: absent.ccp4",
+            ),
+            (
+                ["--loss-type", "structure_factor", "--mtzfile", "absent.mtz"],
+                "structure_factor loss's mtzfile file does not exist: absent.mtz",
+            ),
+            (
+                [
+                    "--loss-type",
+                    "diffuse_bragg",
+                    "--bragg-target",
+                    "bragg.mtz",
+                    "--diffuse-target",
+                    "absent.mtz",
+                ],
+                "diffuse_bragg loss's diffuse_target file does not exist: absent.mtz",
+            ),
+        ],
+    )
+    def test_a_missing_input_file_is_a_usage_error(self, capsys, loss_args, message):
+        with pytest.raises(SystemExit) as excinfo:
+            GuidanceConfig.from_cli(self.MODEL_ARGS + self.STRUCTURE_ARGS + loss_args)
+
+        assert excinfo.value.code == 2
+        assert message in capsys.readouterr().err

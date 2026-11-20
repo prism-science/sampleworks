@@ -1,0 +1,24 @@
+# Sampleworks checkpoints image: every file, its upstream source and its sha256.
+# fetch.sh downloads each URL, refuses any file whose sha256 does not match, and
+# lays it out under /checkpoints/<dest>. A `.tar` dest is extracted into
+# /checkpoints instead of kept. Keep in sync with the COPY lines and the guard in
+# ../../Dockerfile.
+#
+# HuggingFace URLs are pinned to a commit, and their sha256 is the LFS oid the
+# HuggingFace API reports for that commit. RF3 and Protenix publish no
+# checksum; their sha256 was computed from the upstream file on 2026-11-20.
+#
+# RF3: the image keeps the historical filename, but the content is the
+# `_remapped` checkpoint, the one the pinned foundry (k-chrispens/foundry@689f55a,
+# checkpoint_registry.py) downloads. That foundry has no code to load the
+# pre-remap key names.
+#
+# dest	url	sha256
+boltz1_conf.ckpt	https://huggingface.co/boltz-community/boltz-1/resolve/7c1d83b779e4c65ecc37dfdf0c6b2788076f31e1/boltz1_conf.ckpt	fea245d912c570ec117b2277c2719f312a6fc109c07b6f6ef741690ee775c2f5
+ccd.pkl	https://huggingface.co/boltz-community/boltz-1/resolve/7c1d83b779e4c65ecc37dfdf0c6b2788076f31e1/ccd.pkl	2d3b2f03a3c5665944adba51e33263511e51b21c9cd05d902f9c4b7c1e58d2f4
+boltz2_conf.ckpt	https://huggingface.co/boltz-community/boltz-2/resolve/6fdef46d763fee7fbb83ca5501ccceff43b85607/boltz2_conf.ckpt	090e82ac8c92f5e943fa1b39e7410a44027bea7243c0bbb3caa67a77fc1428e1
+mols.tar	https://huggingface.co/boltz-community/boltz-2/resolve/6fdef46d763fee7fbb83ca5501ccceff43b85607/mols.tar	39e076d96dbec6b4e86982bbda16f3a53a2a60c9bdc17828d88f6f9a0c7d1fd7
+bioemu2-preview/checkpoint.ckpt	https://huggingface.co/microsoft/bioemu2/resolve/dd4b0c1b69984b68edcb6200a544213be4d75242/checkpoints/bioemu2-preview/checkpoint.ckpt	3b4ba9236b7b458f47b40b694847b6bb4110c744becd6d2c53de7b1d04c07a81
+bioemu2-preview/config.yaml	https://huggingface.co/microsoft/bioemu2/resolve/dd4b0c1b69984b68edcb6200a544213be4d75242/checkpoints/bioemu2-preview/config.yaml	90326e3b77e524420f5aad68a777355ecbbbe07bc006ddf88f7ee921b0f772e3
+rf3_foundry_01_24_latest.ckpt	https://files.ipd.uw.edu/pub/rf3/rf3_foundry_01_24_latest_remapped.ckpt	364ef592fd8042a9cf4176d045015190f8322f961ccca38d891b20ca578d3bb0
+protenix_base_default_v0.5.0.pt	https://af3-dev.tos-cn-beijing.volces.com/release_model/protenix_base_default_v0.5.0.pt	9ea20b0aba42f2256711da1d0cd081510a4b291e64375bff6b70ced70b87a5f1

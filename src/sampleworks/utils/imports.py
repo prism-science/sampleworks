@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, cast, overload, TypeVar
 
 
@@ -64,25 +65,41 @@ except (ImportError, ModuleNotFoundError):
 F = TypeVar("F", bound=Callable[..., Any])
 
 
-@overload
-def require_boltz(message: F) -> F: ...
-@overload
-def require_boltz(message: str | None = None) -> Callable[[F], F]: ...
-def require_boltz(message: F | str | None = None) -> F | Callable[[F], F]:
-    """Decorator to require Boltz model availability.
+def _skip_or_raise(error_message: str) -> None:
+    """Skip the current test under pytest, otherwise raise ``ImportError``.
 
     Parameters
     ----------
-    message: str, optional
-        Custom error message. If None, uses default message.
+    error_message: str
+        Reason reported by the skip or the exception.
 
-    Returns
-    -------
-    Callable
-        Decorator function
+    Raises
+    ------
+    ImportError
+        If pytest is not installed.
+    """
+    try:
+        import pytest
+
+        pytest.skip(error_message)
+    except ImportError:
+        raise ImportError(error_message) from None
+
+
+@dataclass(frozen=True)
+class ModelRequirement:
+    """An optional model dependency, with a decorator and a check that enforce it.
+
+    Parameters
+    ----------
+    available: bool
+        Whether the dependency imported successfully.
+    default_message: str
+        Error message used when the caller supplies none.
 
     Examples
     --------
+    >>> require_boltz = ModelRequirement(BOLTZ_AVAILABLE, "Boltz is missing").require
     >>> @require_boltz
     ... def train_boltz_model():
     ...     pass
@@ -91,426 +108,112 @@ def require_boltz(message: F | str | None = None) -> F | Callable[[F], F]:
     ... def custom_function():
     ...     pass
     """
-    if callable(message):
-        # Bare ``@require_boltz`` usage: the decorated function arrives as ``message``.
-        # Re-dispatch so both ``@require_boltz`` and ``@require_boltz("msg")`` work.
-        return require_boltz()(cast("F", message))
 
-    default_message = "Boltz model wrapper is not available. Install with: pixi install -e boltz"
+    available: bool
+    default_message: str
 
-    def decorator(func: F) -> F:
-        @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            if not BOLTZ_AVAILABLE:
-                error_msg = message or default_message
-                try:
-                    import pytest
+    @overload
+    def require(self, message: F) -> F: ...
+    @overload
+    def require(self, message: str | None = None) -> Callable[[F], F]: ...
+    def require(self, message: F | str | None = None) -> F | Callable[[F], F]:
+        """Decorate a function so it skips (under pytest) or raises when unavailable.
 
-                    pytest.skip(error_msg)
-                except ImportError:
-                    raise ImportError(error_msg) from None
-            return func(*args, **kwargs)
+        Parameters
+        ----------
+        message: str or Callable, optional
+            Custom error message. If None, uses ``default_message``. A callable here
+            is the decorated function itself, from bare ``@require`` usage.
 
-        return wrapper  # type: ignore
+        Returns
+        -------
+        Callable
+            The decorated function for bare usage, otherwise the decorator.
+        """
+        if callable(message):
+            # Re-dispatch so both ``@require`` and ``@require("msg")`` work.
+            return self.require()(cast("F", message))
 
-    return decorator
+        error_message = message or self.default_message
+
+        def decorator(func: F) -> F:
+            @functools.wraps(func)
+            def wrapper(*args: Any, **kwargs: Any) -> Any:
+                if not self.available:
+                    _skip_or_raise(error_message)
+                return func(*args, **kwargs)
+
+            return cast("F", wrapper)
+
+        return decorator
+
+    def check(self, message: str | None = None) -> None:
+        """Raise ``ImportError`` if the dependency is unavailable.
+
+        Parameters
+        ----------
+        message: str, optional
+            Custom error message. If None, uses ``default_message``.
+
+        Raises
+        ------
+        ImportError
+            If the dependency is unavailable.
+        """
+        if not self.available:
+            raise ImportError(message or self.default_message)
 
 
-@overload
-def require_protenix(message: F) -> F: ...
-@overload
-def require_protenix(message: str | None = None) -> Callable[[F], F]: ...
-def require_protenix(message: F | str | None = None) -> F | Callable[[F], F]:
-    """Decorator to require Protenix model availability.
+def _missing_wrapper_message(display_name: str, pixi_environment: str) -> str:
+    """Build the default message for a model wrapper that failed to import.
 
     Parameters
     ----------
-    message: str, optional
-        Custom error message. If None, uses default message.
+    display_name: str
+        Human-readable model name.
+    pixi_environment: str
+        Pixi environment that provides the model's dependencies.
 
     Returns
     -------
-    Callable
-        Decorator function
-
-    Examples
-    --------
-    >>> @require_protenix
-    ... def train_protenix_model():
-    ...     pass
-
-    >>> @require_protenix("Custom error message")
-    ... def custom_function():
-    ...     pass
+    str
+        Error message with install instructions.
     """
-    if callable(message):
-        # Bare ``@require_protenix`` usage: the decorated function arrives as ``message``.
-        # Re-dispatch so both ``@require_protenix`` and ``@require_protenix("msg")`` work.
-        return require_protenix()(cast("F", message))
-
-    default_message = (
-        "Protenix model wrapper is not available. Install with: pixi install -e protenix"
+    return (
+        f"{display_name} model wrapper is not available. "
+        f"Install with: pixi install -e {pixi_environment}"
     )
 
-    def decorator(func: F) -> F:
-        @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            if not PROTENIX_AVAILABLE:
-                error_msg = message or default_message
-                try:
-                    import pytest
 
-                    pytest.skip(error_msg)
-                except ImportError:
-                    raise ImportError(error_msg) from None
-            return func(*args, **kwargs)
-
-        return wrapper  # type: ignore
-
-    return decorator
-
-
-@overload
-def require_rf3(message: F) -> F: ...
-@overload
-def require_rf3(message: str | None = None) -> Callable[[F], F]: ...
-def require_rf3(message: F | str | None = None) -> F | Callable[[F], F]:
-    """Decorator to require RF3 model availability.
-
-    Parameters
-    ----------
-    message: str, optional
-        Custom error message. If None, uses default message.
-
-    Returns
-    -------
-    Callable
-        Decorator function
-
-    Examples
-    --------
-    >>> @require_rf3
-    ... def train_rf3_model():
-    ...     pass
-
-    >>> @require_rf3("Custom error message")
-    ... def custom_function():
-    ...     pass
-    """
-    if callable(message):
-        # Bare ``@require_rf3`` usage: the decorated function arrives as ``message``.
-        # Re-dispatch so both ``@require_rf3`` and ``@require_rf3("msg")`` work.
-        return require_rf3()(cast("F", message))
-
-    default_message = "RF3 model wrapper is not available. Install with: pixi install -e rf3"
-
-    def decorator(func: F) -> F:
-        @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            if not RF3_AVAILABLE:
-                error_msg = message or default_message
-                try:
-                    import pytest
-
-                    pytest.skip(error_msg)
-                except ImportError:
-                    raise ImportError(error_msg) from None
-            return func(*args, **kwargs)
-
-        return wrapper  # type: ignore
-
-    return decorator
-
-
-@overload
-def require_protpardelle(message: F) -> F: ...
-@overload
-def require_protpardelle(message: str | None = None) -> Callable[[F], F]: ...
-def require_protpardelle(message: F | str | None = None) -> F | Callable[[F], F]:
-    """Decorator to require Protpardelle model availability.
-
-    Parameters
-    ----------
-    message: str, optional
-        Custom error message. If None, uses default message.
-
-    Returns
-    -------
-    Callable
-        Decorator function
-
-    Examples
-    --------
-    >>> @require_protpardelle
-    ... def sample_protpardelle():
-    ...     pass
-
-    >>> @require_protpardelle("Custom error message")
-    ... def custom_function():
-    ...     pass
-    """
-    if callable(message):
-        # Bare ``@require_protpardelle`` usage: the decorated function arrives as ``message``.
-        # Re-dispatch so both ``@require_protpardelle`` and ``@require_protpardelle("msg")`` work.
-        return require_protpardelle()(cast("F", message))
-
-    default_message = (
-        "Protpardelle model wrapper is not available. Install with: pixi install -e protpardelle"
-    )
-
-    def decorator(func: F) -> F:
-        @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            if not PROTPARDELLE_AVAILABLE:
-                error_msg = message or default_message
-                try:
-                    import pytest
-
-                    pytest.skip(error_msg)
-                except ImportError:
-                    raise ImportError(error_msg) from None
-            return func(*args, **kwargs)
-
-        return wrapper  # type: ignore
-
-    return decorator
-
-
-@overload
-def require_bioemu2(message: F) -> F: ...
-@overload
-def require_bioemu2(message: str | None = None) -> Callable[[F], F]: ...
-def require_bioemu2(message: F | str | None = None) -> F | Callable[[F], F]:
-    """Decorator to require BioEmu2 model availability.
-
-    Parameters
-    ----------
-    message: str, optional
-        Custom error message. If None, uses default message.
-
-    Returns
-    -------
-    Callable
-        Decorator function
-
-    Examples
-    --------
-    >>> @require_bioemu2
-    ... def sample_bioemu2():
-    ...     pass
-    """
-    if callable(message):
-        # Bare ``@require_bioemu2`` usage: the decorated function arrives as ``message``.
-        return require_bioemu2()(cast("F", message))
-
-    default_message = (
-        "BioEmu2 model wrapper is not available. Install with: pixi install -e bioemu2"
-    )
-
-    def decorator(func: F) -> F:
-        @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            if not BIOEMU2_AVAILABLE:
-                error_msg = message or default_message
-                try:
-                    import pytest
-
-                    pytest.skip(error_msg)
-                except ImportError:
-                    raise ImportError(error_msg) from None
-            return func(*args, **kwargs)
-
-        return wrapper  # type: ignore
-
-    return decorator
-
-
-@overload
-def require_any_model(message: F) -> F: ...
-@overload
-def require_any_model(message: str | None = None) -> Callable[[F], F]: ...
-def require_any_model(message: F | str | None = None) -> F | Callable[[F], F]:
-    """Decorator to require at least one model wrapper availability.
-
-    Parameters
-    ----------
-    message: str, optional
-        Custom error message. If None, uses default message.
-
-    Returns
-    -------
-    Callable
-        Decorator function
-
-    Examples
-    --------
-    >>> @require_any_model
-    ... def train_any_model():
-    ...     pass
-
-    >>> @require_any_model("Need at least one model")
-    ... def custom_function():
-    ...     pass
-    """
-    if callable(message):
-        # Bare ``@require_any_model`` usage: the decorated function arrives as ``message``.
-        # Re-dispatch so both ``@require_any_model`` and ``@require_any_model("msg")`` work.
-        return require_any_model()(cast("F", message))
-
-    default_message = (
-        "No model wrappers are available. "
-        "Please install at least one model wrapper with the appropriate feature group: "
-        "'pixi install -e boltz', 'pixi install -e protpardelle', "
-        "'pixi install -e protenix', 'pixi install -e rf3', or 'pixi install -e bioemu2'"
-    )
-
-    def decorator(func: F) -> F:
-        @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            if (
-                not BOLTZ_AVAILABLE
-                and not PROTENIX_AVAILABLE
-                and not RF3_AVAILABLE
-                and not PROTPARDELLE_AVAILABLE
-                and not BIOEMU2_AVAILABLE
-            ):
-                error_msg = message or default_message
-                try:
-                    import pytest
-
-                    pytest.skip(error_msg)
-                except ImportError:
-                    raise ImportError(error_msg) from None
-            return func(*args, **kwargs)
-
-        return wrapper  # type: ignore
-
-    return decorator
-
-
-def check_boltz_available(message: str | None = None) -> None:
-    """Check if Boltz is available, raise ImportError if not.
-
-    Parameters
-    ----------
-    message: str, optional
-        Custom error message. If None, uses default message.
-
-    Raises
-    ------
-    ImportError
-        If Boltz model wrapper is not available.
-    """
-    if not BOLTZ_AVAILABLE:
-        default_message = (
-            "Boltz model wrapper is not available. Install with: pixi install -e boltz"
-        )
-        raise ImportError(message or default_message)
-
-
-def check_protenix_available(message: str | None = None) -> None:
-    """Check if Protenix is available, raise ImportError if not.
-
-    Parameters
-    ----------
-    message: str, optional
-        Custom error message. If None, uses default message.
-
-    Raises
-    ------
-    ImportError
-        If Protenix model wrapper is not available.
-    """
-    if not PROTENIX_AVAILABLE:
-        default_message = (
-            "Protenix model wrapper is not available. Install with: pixi install -e protenix"
-        )
-        raise ImportError(message or default_message)
-
-
-def check_rf3_available(message: str | None = None) -> None:
-    """Check if RF3 is available, raise ImportError if not.
-
-    Parameters
-    ----------
-    message: str, optional
-        Custom error message. If None, uses default message.
-
-    Raises
-    ------
-    ImportError
-        If RF3 model wrapper is not available.
-    """
-    if not RF3_AVAILABLE:
-        default_message = "RF3 model wrapper is not available. Install with: pixi install -e rf3"
-        raise ImportError(message or default_message)
-
-
-def check_protpardelle_available(message: str | None = None) -> None:
-    """Check if Protpardelle is available, raise ImportError if not.
-
-    Parameters
-    ----------
-    message: str, optional
-        Custom error message. If None, uses default message.
-
-    Raises
-    ------
-    ImportError
-        If Protpardelle model wrapper is not available.
-    """
-    if not PROTPARDELLE_AVAILABLE:
-        default_message = (
-            "Protpardelle model wrapper is not available. Install with: "
-            "pixi install -e protpardelle"
-        )
-        raise ImportError(message or default_message)
-
-
-def check_bioemu2_available(message: str | None = None) -> None:
-    """Check if BioEmu2 is available, raise ImportError if not.
-
-    Parameters
-    ----------
-    message: str, optional
-        Custom error message. If None, uses default message.
-
-    Raises
-    ------
-    ImportError
-        If BioEmu2 model wrapper is not available.
-    """
-    if not BIOEMU2_AVAILABLE:
-        default_message = (
-            "BioEmu2 model wrapper is not available. Install with: pixi install -e bioemu2"
-        )
-        raise ImportError(message or default_message)
-
-
-def check_any_model_available(message: str | None = None) -> None:
-    """Check if at least one model is available, raise ImportError if not.
-
-    Parameters
-    ----------
-    message: str, optional
-        Custom error message. If None, uses default message.
-
-    Raises
-    ------
-    ImportError
-        If no model wrapper is available.
-    """
-    if (
-        not BOLTZ_AVAILABLE
-        and not PROTENIX_AVAILABLE
-        and not RF3_AVAILABLE
-        and not PROTPARDELLE_AVAILABLE
-        and not BIOEMU2_AVAILABLE
-    ):
-        default_message = (
-            "No model wrappers are available. "
-            "Please install at least one model wrapper with the appropriate "
-            "feature group: 'pixi install -e boltz', 'pixi install -e protenix', "
-            "'pixi install -e rf3', 'pixi install -e protpardelle', or 'pixi install -e bioemu2'"
-        )
-        raise ImportError(message or default_message)
+_BOLTZ = ModelRequirement(BOLTZ_AVAILABLE, _missing_wrapper_message("Boltz", "boltz"))
+_PROTENIX = ModelRequirement(PROTENIX_AVAILABLE, _missing_wrapper_message("Protenix", "protenix"))
+_RF3 = ModelRequirement(RF3_AVAILABLE, _missing_wrapper_message("RF3", "rf3"))
+_PROTPARDELLE = ModelRequirement(
+    PROTPARDELLE_AVAILABLE, _missing_wrapper_message("Protpardelle", "protpardelle")
+)
+_BIOEMU2 = ModelRequirement(BIOEMU2_AVAILABLE, _missing_wrapper_message("BioEmu2", "bioemu2"))
+_ANY_MODEL = ModelRequirement(
+    BOLTZ_AVAILABLE
+    or PROTENIX_AVAILABLE
+    or RF3_AVAILABLE
+    or PROTPARDELLE_AVAILABLE
+    or BIOEMU2_AVAILABLE,
+    "No model wrappers are available. "
+    "Please install at least one model wrapper with the appropriate "
+    "feature group: 'pixi install -e boltz', 'pixi install -e protenix', "
+    "'pixi install -e rf3', 'pixi install -e protpardelle', or 'pixi install -e bioemu2'",
+)
+
+require_boltz = _BOLTZ.require
+require_protenix = _PROTENIX.require
+require_rf3 = _RF3.require
+require_protpardelle = _PROTPARDELLE.require
+require_bioemu2 = _BIOEMU2.require
+require_any_model = _ANY_MODEL.require
+
+check_boltz_available = _BOLTZ.check
+check_protenix_available = _PROTENIX.check
+check_rf3_available = _RF3.check
+check_protpardelle_available = _PROTPARDELLE.check
+check_bioemu2_available = _BIOEMU2.check
+check_any_model_available = _ANY_MODEL.check

@@ -9,6 +9,7 @@ from sampleworks.utils.imports import (
     check_boltz_available,
     check_protenix_available,
     check_rf3_available,
+    ModelRequirement,
     PROTENIX_AVAILABLE,
     PROTPARDELLE_AVAILABLE,
     require_any_model,
@@ -276,3 +277,49 @@ class TestDecoratorIntegrationWithPytest:
     def test_any_model_feature(self):
         """This test should be skipped if no models are available."""
         assert ANY_MODEL_AVAILABLE
+
+
+class TestModelRequirement:
+    """Test the factory behind every require_* decorator and check_* function."""
+
+    def test_unavailable_check_raises_default_message(self):
+        """An unavailable requirement's check raises with its default message."""
+        requirement = ModelRequirement(False, "Example model is missing")
+        with pytest.raises(ImportError, match="Example model is missing"):
+            requirement.check()
+
+    def test_unavailable_check_prefers_custom_message(self):
+        """A custom message replaces the default one."""
+        requirement = ModelRequirement(False, "Example model is missing")
+        with pytest.raises(ImportError, match="Custom message"):
+            requirement.check("Custom message")
+
+    def test_available_check_passes(self):
+        """An available requirement's check does nothing."""
+        ModelRequirement(True, "Example model is missing").check()
+
+    def test_unavailable_require_skips_bare_and_called_forms(self):
+        """Both ``@require`` and ``@require("msg")`` skip when unavailable."""
+        requirement = ModelRequirement(False, "Example model is missing")
+
+        @requirement.require
+        def bare_function():
+            return "executed"
+
+        @requirement.require("Custom message")
+        def called_function():
+            return "executed"
+
+        with pytest.raises(pytest.skip.Exception, match="Example model is missing"):
+            bare_function()
+        with pytest.raises(pytest.skip.Exception, match="Custom message"):
+            called_function()
+
+    def test_available_require_runs_function(self):
+        """An available requirement passes arguments through and returns the result."""
+
+        @ModelRequirement(True, "Example model is missing").require
+        def add(x: int, y: int) -> int:
+            return x + y
+
+        assert add(2, 3) == 5

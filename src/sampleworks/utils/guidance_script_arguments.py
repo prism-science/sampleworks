@@ -159,10 +159,17 @@ def _remap_container_path(path_str: str) -> str:
 def get_checkpoint(args: argparse.Namespace) -> str | None:
     """Resolve a model checkpoint path from an argparse namespace.
 
-    Looks for a ``model_checkpoint`` attribute on *args*.
-    Empty strings are treated as missing values.
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed arguments from a parser that registers ``--model-checkpoint``.
+
+    Returns
+    -------
+    str or None
+        The checkpoint path, or ``None`` when it was left unset or blank.
     """
-    value = getattr(args, "model_checkpoint", None)
+    value = args.model_checkpoint
     if value is not None and str(value).strip() != "":
         return str(value)
 
@@ -410,10 +417,10 @@ class GuidanceConfig:
             density=None,  # mirrored from the loss configuration in __post_init__
             model_name=model_name,
             guidance_type=guidance_type,
-            log_path=getattr(args, "log_path", None) or "",
+            log_path=args.log_path,
             output_dir=args.output_dir,
             partial_diffusion_start=args.partial_diffusion_start,
-            device=getattr(args, "device", "") or "",
+            device=args.device,
             gradient_normalization=args.gradient_normalization,
             guidance_start=args.guidance_start,
             augmentation=args.augmentation,
@@ -577,8 +584,8 @@ class GuidanceConfig:
             self.method = job.method
 
         if job.model_name == StructurePredictor.RF3:
-            self.disable_chiral_features = getattr(args, "disable_chiral_features", False)
-            self.track_chiral_features = getattr(args, "track_chiral_features", False)
+            self.disable_chiral_features = args.disable_chiral_features
+            self.track_chiral_features = args.track_chiral_features
 
         if job.model_name == StructurePredictor.BIOEMU2:
             self.bioemu2_mode = getattr(args, "bioemu2_mode", "equilibrium")
@@ -593,9 +600,7 @@ class GuidanceConfig:
             self.ensemble_size = job.ensemble_size
         elif job.scaler == GuidanceType.LATENT_OPT:
             for attr in _LATENT_OPT_ATTRS:
-                value = getattr(args, attr, None)
-                if value is not None:
-                    setattr(self, attr, value)
+                setattr(self, attr, getattr(args, attr))
             self.ensemble_size = job.ensemble_size
         else:
             self.step_size = job.gradient_weight
@@ -673,6 +678,7 @@ def loss_config_from_args(
 
     Only what was given is recorded: defaults are not materialized and required
     options are not checked, so a grid search can still fill in per-protein data.
+    Path options that were given must name existing files.
 
     Parameters
     ----------
@@ -702,13 +708,25 @@ def loss_config_from_args(
 
     if args.loss_config is None:
         try:
-            return LossConfig.single(args.loss_type, **loss_options_from_args(args))
+            config = LossConfig.single(args.loss_type, **loss_options_from_args(args))
         except ValueError as error:
             parser.error(str(error))
-    try:
-        return LossConfig.from_file(args.loss_config)
-    except (OSError, ValueError) as error:
-        parser.error(f"--loss-config {args.loss_config}: {error}")
+    else:
+        try:
+            config = LossConfig.from_file(args.loss_config)
+        except (OSError, ValueError) as error:
+            parser.error(f"--loss-config {args.loss_config}: {error}")
+
+    missing_files = config.missing_input_files()
+    if missing_files:
+        parser.error(
+            "; ".join(
+                f"the {loss} loss's {option} file does not exist: {path}"
+                for loss, files in missing_files.items()
+                for option, path in files.items()
+            )
+        )
+    return config
 
 
 def add_loss_args(parser: argparse.ArgumentParser, loss: Losses | str):
@@ -798,7 +816,7 @@ def add_generic_args(parser: argparse.ArgumentParser | GuidanceConfig):
     )
     parser.add_argument("--output-dir", type=str, default="output", help="Output directory")
     parser.add_argument(
-        "--log-path", type=str, default=None, help="Log file path (default: output-dir/run.log)"
+        "--log-path", type=str, default="", help="Log file path (default: output-dir/run.log)"
     )
     parser.add_argument(
         "--partial-diffusion-start",
@@ -808,7 +826,9 @@ def add_generic_args(parser: argparse.ArgumentParser | GuidanceConfig):
         "(0 = full diffusion). A fraction, not a step count, so it is portable across "
         "models with different schedules.",
     )
-    parser.add_argument("--device", type=str, default=None, help="Device (cuda/cpu, auto-detect)")
+    parser.add_argument(
+        "--device", type=str, default="", help="Device, e.g. cuda:0 or cpu (default: auto-detect)"
+    )
     parser.add_argument(
         "--gradient-normalization",
         action="store_true",

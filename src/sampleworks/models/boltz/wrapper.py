@@ -37,6 +37,7 @@ from sampleworks.models.protocol import GenerativeModelInput
 from sampleworks.utils.framework_utils import match_batch
 from sampleworks.utils.msa import MSAManager
 from sampleworks.utils.structure_utils import get_asym_unit_from_structure
+from sampleworks.utils.torch_utils import gaussian_prior
 
 
 def _decode_boltz_atom_name(raw_name: np.ndarray | str | bytes) -> str:
@@ -973,21 +974,11 @@ class Boltz2Wrapper:
         ValueError
             If both features and shape are None.
         """
-        if shape is not None:
-            if len(shape) != 2 or shape[1] != 3:
-                raise ValueError("shape must be of the form (num_atoms, 3)")
-            return torch.randn((batch_size, *shape), device=self.device)
-        if features is None or features.conditioning is None:
-            raise ValueError("Either features or shape must be provided to initialize_from_prior()")
-
-        cond = features.conditioning
-        feats = cond.feats
-        atom_mask = feats.get("atom_pad_mask")
-        atom_mask = cast(Tensor, atom_mask)
-
-        num_atoms = int(atom_mask.sum())
-
-        return torch.randn((batch_size, num_atoms, 3), device=self.device)
+        num_atoms = None
+        if features is not None and features.conditioning is not None:
+            atom_mask = cast(Tensor, features.conditioning.feats.get("atom_pad_mask"))
+            num_atoms = int(atom_mask.sum())
+        return gaussian_prior(batch_size, num_atoms, self.device, shape=shape)
 
 
 class Boltz1Wrapper:
@@ -1305,21 +1296,11 @@ class Boltz1Wrapper:
         ValueError
             If both features and shape are None.
         """
-        if shape is not None:
-            if len(shape) != 2 or shape[1] != 3:
-                raise ValueError("shape must be of the form (num_atoms, 3)")
-            return torch.randn((batch_size, *shape), device=self.device)
-        if features is None or features.conditioning is None:
-            raise ValueError("Either features or shape must be provided to initialize_from_prior()")
-
-        cond = features.conditioning
-        feats = cond.feats
-        atom_mask = feats.get("atom_pad_mask")
-        atom_mask = cast(Tensor, atom_mask)
-
-        num_atoms = int(atom_mask.sum())
-
-        return torch.randn((batch_size, num_atoms, 3), device=self.device)
+        num_atoms = None
+        if features is not None and features.conditioning is not None:
+            atom_mask = cast(Tensor, features.conditioning.feats.get("atom_pad_mask"))
+            num_atoms = int(atom_mask.sum())
+        return gaussian_prior(batch_size, num_atoms, self.device, shape=shape)
 
     def _pairformer_pass(
         self, features: dict[str, Any], recycling_steps: int = 3

@@ -38,7 +38,7 @@ from sampleworks.models.protocol import GenerativeModelInput
 from sampleworks.utils.framework_utils import match_batch
 from sampleworks.utils.guidance_constants import StructurePredictor
 from sampleworks.utils.msa import MSAManager
-from sampleworks.utils.torch_utils import send_tensors_in_dict_to_device
+from sampleworks.utils.torch_utils import gaussian_prior, send_tensors_in_dict_to_device
 
 
 @dataclass(frozen=True, slots=True)
@@ -700,13 +700,7 @@ class ProtenixWrapper:
         ValueError
             If both features and shape are None, or if shape is invalid.
         """
-        if shape is not None:
-            if len(shape) != 2 or shape[1] != 3:
-                raise ValueError("shape must be of the form (num_atoms, 3)")
-            return torch.randn((batch_size, *shape), device=self.device)
-
-        if features is None or features.conditioning is None:
-            raise ValueError("Either features or shape must be provided to initialize_from_prior()")
-
-        cond = features.conditioning
-        return torch.randn((batch_size, cond.num_atoms, 3), device=self.device)
+        num_atoms = None
+        if features is not None and features.conditioning is not None:
+            num_atoms = features.conditioning.num_atoms
+        return gaussian_prior(batch_size, num_atoms, self.device, shape=shape)

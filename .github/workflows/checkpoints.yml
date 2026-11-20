@@ -1,0 +1,120 @@
+name: Build checkpoints image
+
+# Rebuilds the checkpoints image from the upstream sources in
+# docker/checkpoint-image/manifest.tsv, verifying every file's sha256, and pushes it
+# to Harbor's private `diffuse` project. docker.yml consumes it through the
+# SAMPLEWORKS_CHECKPOINTS_IMAGE repository variable, which a repo admin sets to
+# the digest-pinned path this run prints in its summary.
+#
+# Harbor is reachable only over Astera's tailnet: the job joins it as an
+# ephemeral tag:ci-n device through the `harbor-publish` environment's Tailscale
+# trust credential, which needs an OIDC token (id-token: write).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docker/checkpoint-image/**
+      - .github/workflows/checkpoints.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checkpoints-image
+  cancel-in-progress: false
+
+jobs:
+  checkpoints:
+    name: Checkpoints image
+    runs-on: ubuntu-latest
+    environment: harbor-publish
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 120
+    env:
+      ASTERA_REGISTRY: ${{ secrets.ASTERA_REGISTRY }}
+      IMAGE_NAME: diffuse/sampleworks-checkpoints
+
+    steps:
+      - name: Validate Astera registry configured
+        run: |
+          # The Harbor credentials go to whatever host this names; refuse an
+          # empty value (login-action would default to Docker Hub) or a public one.
+          if [ -z "${ASTERA_REGISTRY}" ]; then
+            echo "ASTERA_REGISTRY repository secret must be set."
+            exit 1
+          fi
+          case "${ASTERA_REGISTRY}" in
+            docker.io|index.docker.io|registry-1.docker.io)
+              echo "ASTERA_REGISTRY must be the internal registry, not a public one."
+              exit 1 ;;
+          esac
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift || true
+          docker system prune -af || true
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+
+      - name: Join Astera tailnet
+        uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
+        with:
+          oauth-client-id: ${{ vars.TS_CI_CLIENT_ID }}
+          audience: ${{ vars.TS_CI_AUDIENCE }}
+          tags: tag:ci-n
+
+      - name: Wait for Harbor
+        run: |
+          for _ in $(seq 1 12); do
+            curl -fsS --max-time 5 "https://${ASTERA_REGISTRY}/api/v2.0/ping" && exit 0
+            sleep 5
+          done
+          echo "Astera registry unreachable over the tailnet."
+          exit 1
+
+      - name: Login to Harbor
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
+        with:
+          registry: ${{ env.ASTERA_REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      # Tags in `diffuse` are immutable, so the tag is unique to the run.
+      - name: Image tag
+        id: tag
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: echo "tag=sha-${GITHUB_SHA::7}-r${RUN_NUMBER}.${RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push checkpoints image
+        id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
+        with:
+          context: docker/checkpoint-image
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.ASTERA_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }}
+          provenance: false
+
+      - name: Checkpoints image digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          echo "Checkpoints image pushed with digest ${DIGEST}"
+          {
+            echo "Pushed \`${IMAGE_NAME}:${{ steps.tag.outputs.tag }}\` (registry host omitted)."
+            echo
+            echo "Set the SAMPLEWORKS_CHECKPOINTS_IMAGE repository variable to \`${IMAGE_NAME}@${DIGEST}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
