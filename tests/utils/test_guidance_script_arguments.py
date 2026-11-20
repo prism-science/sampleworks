@@ -467,6 +467,19 @@ def test_job_result_migrates_legacy_model_pickle() -> None:
 # ============================================================================
 
 
+def test_deposit_cif_flag_reaches_the_config(tmp_path: Path):
+    """--deposit-cif lands on the GuidanceConfig and in its metadata."""
+    density = tmp_path / "d.ccp4"
+    density.touch()
+    argv = ["--protein", "1vme", "--structure", "s.cif", "--density", str(density)]
+    argv += ["--resolution", "1.8", "--deposit-cif", "deposit.cif"]
+
+    config = GuidanceConfig.from_cli(argv, model_name="boltz2", guidance_type="pure_guidance")
+
+    assert config.deposit_cif == "deposit.cif"
+    assert config.as_dict()["deposit_cif"] == "deposit.cif"
+
+
 def test_latent_opt_cli_flags_reach_the_config(tmp_path: Path):
     """Every --guidance-type latent_opt flag must land on the GuidanceConfig.
 
