@@ -17,9 +17,9 @@ from sampleworks.eval.eval_dataclasses import ProteinConfig
 from sampleworks.models.protocol import GenerativeModelInput
 from sampleworks.utils import atom_array_utils
 from sampleworks.utils.atom_array_utils import (
-    _closest_canonical_amino_acid,
     apply_selection,
     BLANK_ALTLOC_IDS,
+    closest_canonical_amino_acid,
 )
 from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.framework_utils import match_batch
@@ -104,13 +104,15 @@ class SampleworksProcessedStructure:
         if self.model_atom_array is not None and self.atom_array.b_factor is not None:
             struct_b_factors = torch.as_tensor(
                 cast(np.ndarray, self.atom_array.b_factor)[
-                    self.reconciler.struct_indices.detach().cpu().numpy()
+                    self.reconciler.input_indices.detach().cpu().numpy()
                 ],
                 device=loss_inputs.b_factors.device,
                 dtype=loss_inputs.b_factors.dtype,
             )
-            model_indices = self.reconciler.model_indices.to(device=loss_inputs.b_factors.device)
-            updated_b_factors[..., model_indices] = struct_b_factors
+            predicted_indices = self.reconciler.predicted_indices.to(
+                device=loss_inputs.b_factors.device
+            )
+            updated_b_factors[..., predicted_indices] = struct_b_factors
 
         return replace(
             loss_inputs,
@@ -210,8 +212,8 @@ def process_structure_to_trajectory_input(
         reconciler = AtomReconciler.from_arrays(model_atom_array, atom_array)
         if reconciler.has_mismatch:
             logger.info(
-                f"Model/structure atoms need reconciliation: model={reconciler.n_model}, "
-                f"structure={reconciler.n_struct}, common={reconciler.n_common}"
+                f"Model/structure atoms need reconciliation: model={reconciler.n_predicted}, "
+                f"structure={reconciler.n_input}, common={reconciler.n_common}"
             )
     else:
         reconciler = AtomReconciler.identity(len(atom_array))
@@ -251,7 +253,7 @@ def process_structure_to_trajectory_input(
             dtype=coords_from_prior.dtype,
             device=coords_from_prior.device,
         )
-        model_reference_coords = reconciler.struct_to_model(struct_coords, model_template)
+        model_reference_coords = reconciler.input_to_predicted(struct_coords, model_template)
     else:
         model_reference_coords = struct_coords
 
@@ -411,7 +413,7 @@ def canonicalize_mixed_altloc_residues(
     oxygens). This function makes such positions stackable by
 
     1. renaming every residue at a mixed position to their shared canonical parent (via
-       :func:`_closest_canonical_amino_acid`) and clearing ``hetero``, but only when *all*
+       :func:`closest_canonical_amino_acid`) and clearing ``hetero``, but only when *all*
        residue names at that position resolve to the *same* canonical parent, and
     2. dropping atoms that are not shared by every altloc at a canonicalized position, so each
        conformer ends with an identical atom set. The modified-only atoms are removed while both
@@ -466,7 +468,7 @@ def canonicalize_mixed_altloc_residues(
     #    stackable anyway, so it's better to leave those untouched and warn.
     canonical_parent_by_position: dict[tuple, str] = {}
     for position in mixed_positions:
-        parents = {_closest_canonical_amino_acid(name) for name in res_names_by_position[position]}
+        parents = {closest_canonical_amino_acid(name) for name in res_names_by_position[position]}
         if len(parents) == 1 and (parent := parents.pop()) is not None:
             canonical_parent_by_position[position] = parent
         else:

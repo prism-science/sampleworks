@@ -13,6 +13,7 @@ Code reuse is paramount. Whenever possible, locate high-quality implementations 
 - Keep functions short and single-purpose: a function that needs section comments is typically several functions.
 - Name by role, in full. Model output is `predicted_*` and the input structure is `input_*`; avoid locals like `model`, `names`, `differ`.
 - Define domain jargon on first use (e.g. "microheterogeneity (two residue names at one position)").
+- Write comments and docstrings for a reader who knows structural biology but not this codebase. Describe what the code does in the field's terms (residues, chains, sequence alignment), not in terms the code coins for itself (e.g. "spans", "columns", "registered").
 - Comment any sentinel values (`-1`, past-the-end indices) where they are produced.
 - A helper either always copies or always mutates; it never returns its input on some paths and a copy on others.
 - Don't encode structured data in strings; use tuples or structured arrays. Prefer to return a `NamedTuple` or dataclass rather than a tuple of more than three values.

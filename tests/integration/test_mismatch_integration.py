@@ -18,7 +18,6 @@ from sampleworks.core.samplers.protocol import StepParams
 from sampleworks.core.scalers.fk_steering import FKSteering
 from sampleworks.core.scalers.pure_guidance import PureGuidance
 from sampleworks.core.scalers.step_scalers import DataSpaceDPSScaler, NoiseSpaceDPSScaler
-from sampleworks.utils.atom_array_utils import make_normalized_atom_id
 from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.frame_transforms import apply_forward_transform
 from sampleworks.utils.guidance_script_arguments import GuidanceConfig
@@ -179,16 +178,16 @@ def _build_real_case(
         Real mismatch case with filtered atom arrays.
     """
     model_raw = cast(AtomArray, ensure_atom_array_stack(model_structure["asym_unit"])[0])
-    model_atom_array = cast(AtomArray, model_raw[get_valid_atom_mask(model_raw)])
+    predicted_atom_array = cast(AtomArray, model_raw[get_valid_atom_mask(model_raw)])
 
     struct_raw = cast(AtomArray, ensure_atom_array_stack(struct_structure["asym_unit"])[0])
-    struct_atom_array = cast(AtomArray, struct_raw[get_valid_atom_mask(struct_raw)])
+    input_atom_array = cast(AtomArray, struct_raw[get_valid_atom_mask(struct_raw)])
 
     return MismatchCase(
         id=id,
         description=description,
-        model_atom_array=model_atom_array,
-        struct_atom_array=struct_atom_array,
+        predicted_atom_array=predicted_atom_array,
+        input_atom_array=input_atom_array,
         expected_n_common=expected_n_common,
         expected_has_mismatch=True,
     )
@@ -299,16 +298,18 @@ def _model_reference_from_case(case: MismatchCase, reconciler: AtomReconciler) -
     case
         Mismatch case.
     reconciler
-        Reconciler built from ``case.model_atom_array`` and ``case.struct_atom_array``.
+        Reconciler built from ``case.predicted_atom_array`` and ``case.input_atom_array``.
 
     Returns
     -------
     torch.Tensor
         Model-space reference coordinates with shape ``(1, n_model, 3)``.
     """
-    struct_coords = torch.as_tensor(case.struct_atom_array.coord, dtype=torch.float32).unsqueeze(0)
-    model_template = torch.as_tensor(case.model_atom_array.coord, dtype=torch.float32).unsqueeze(0)
-    return reconciler.struct_to_model(struct_coords, model_template)
+    struct_coords = torch.as_tensor(case.input_atom_array.coord, dtype=torch.float32).unsqueeze(0)
+    model_template = torch.as_tensor(
+        case.predicted_atom_array.coord, dtype=torch.float32
+    ).unsqueeze(0)
+    return reconciler.input_to_predicted(struct_coords, model_template)
 
 
 @pytest.fixture(scope="session")
@@ -346,8 +347,8 @@ def mismatch_case_catalog(
     catalog["identity_no_mismatch"] = MismatchCase(
         id="identity_no_mismatch",
         description="Model and structure are already identical.",
-        model_atom_array=no_mismatch_atom_array.copy(),
-        struct_atom_array=no_mismatch_atom_array.copy(),
+        predicted_atom_array=no_mismatch_atom_array.copy(),
+        input_atom_array=no_mismatch_atom_array.copy(),
         expected_n_common=5,
         expected_has_mismatch=False,
     )
@@ -357,7 +358,7 @@ def mismatch_case_catalog(
         description="Real pair from 2YL0 density-input CIF versus full PDB.",
         model_structure=structure_2yl0_density,
         struct_structure=structure_2yl0,
-        expected_n_common=677,
+        expected_n_common=947,
     )
     catalog["from_5sop"] = _build_real_case(
         id="from_5sop",
@@ -486,55 +487,58 @@ class TestReconcilerConstruction:
     def test_common_count_matches_expected(self, mismatch_case: MismatchCase):
         """Common atom count matches the case ground truth."""
         reconciler = AtomReconciler.from_arrays(
-            mismatch_case.model_atom_array,
-            mismatch_case.struct_atom_array,
+            mismatch_case.predicted_atom_array,
+            mismatch_case.input_atom_array,
         )
         assert reconciler.n_common == mismatch_case.expected_n_common
 
     def test_mismatch_flag_correct(self, mismatch_case: MismatchCase):
         """Mismatch flag matches case expectation."""
         reconciler = AtomReconciler.from_arrays(
-            mismatch_case.model_atom_array,
-            mismatch_case.struct_atom_array,
+            mismatch_case.predicted_atom_array,
+            mismatch_case.input_atom_array,
         )
         assert reconciler.has_mismatch == mismatch_case.expected_has_mismatch
 
     def test_indices_within_bounds(self, mismatch_case: MismatchCase):
         """Model and structure index arrays stay inside valid bounds."""
         reconciler = AtomReconciler.from_arrays(
-            mismatch_case.model_atom_array,
-            mismatch_case.struct_atom_array,
+            mismatch_case.predicted_atom_array,
+            mismatch_case.input_atom_array,
         )
 
-        assert torch.all(reconciler.model_indices >= 0)
-        assert torch.all(reconciler.model_indices < reconciler.n_model)
-        assert torch.all(reconciler.struct_indices >= 0)
-        assert torch.all(reconciler.struct_indices < reconciler.n_struct)
+        assert torch.all(reconciler.predicted_indices >= 0)
+        assert torch.all(reconciler.predicted_indices < reconciler.n_predicted)
+        assert torch.all(reconciler.input_indices >= 0)
+        assert torch.all(reconciler.input_indices < reconciler.n_input)
 
     def test_common_atoms_have_matching_identity(self, mismatch_case: MismatchCase):
-        """Every reconciled common pair has matching normalized atom identity."""
+        """Every reconciled common pair joins the same atom of the same residue type."""
         reconciler = AtomReconciler.from_arrays(
-            mismatch_case.model_atom_array,
-            mismatch_case.struct_atom_array,
+            mismatch_case.predicted_atom_array,
+            mismatch_case.input_atom_array,
         )
 
-        model_ids = make_normalized_atom_id(mismatch_case.model_atom_array)
-        struct_ids = make_normalized_atom_id(mismatch_case.struct_atom_array)
+        def identities(atoms: AtomArray, indices: torch.Tensor) -> list[tuple[str, str]]:
+            # MSE pairs with MET (SE with SD), as in the reconciler.
+            res_names = np.where(atoms.res_name == "MSE", "MET", atoms.res_name)
+            atom_names = np.where(atoms.atom_name == "SE", "SD", atoms.atom_name)
+            idx = indices.detach().cpu().numpy()
+            return list(zip(res_names[idx], atom_names[idx], strict=True))
 
-        np.testing.assert_array_equal(
-            model_ids[reconciler.model_indices.detach().cpu().numpy()],
-            struct_ids[reconciler.struct_indices.detach().cpu().numpy()],
-        )
+        assert identities(
+            mismatch_case.predicted_atom_array, reconciler.predicted_indices
+        ) == identities(mismatch_case.input_atom_array, reconciler.input_indices)
 
 
 class TestCoordinateProjection:
-    """Coordinate projection invariants for struct_to_model mapping."""
+    """Coordinate projection invariants for input_to_predicted mapping."""
 
     def test_common_atoms_roundtrip(self, mismatch_case: MismatchCase):
         """Common structure coordinates copy exactly into model indices."""
         reconciler = AtomReconciler.from_arrays(
-            mismatch_case.model_atom_array,
-            mismatch_case.struct_atom_array,
+            mismatch_case.predicted_atom_array,
+            mismatch_case.input_atom_array,
         )
 
         struct_coords = torch.arange(
@@ -543,26 +547,26 @@ class TestCoordinateProjection:
         ).reshape(1, mismatch_case.n_struct, 3)
         template = torch.full((1, mismatch_case.n_model, 3), -7.0)
 
-        projected = reconciler.struct_to_model(struct_coords, template)
+        projected = reconciler.input_to_predicted(struct_coords, template)
 
         torch.testing.assert_close(
-            projected[0, reconciler.model_indices],
-            struct_coords[0, reconciler.struct_indices],
+            projected[0, reconciler.predicted_indices],
+            struct_coords[0, reconciler.input_indices],
         )
 
     def test_non_common_atoms_retain_template(self, mismatch_case: MismatchCase):
         """Model only atoms preserve template coordinates after projection."""
         reconciler = AtomReconciler.from_arrays(
-            mismatch_case.model_atom_array,
-            mismatch_case.struct_atom_array,
+            mismatch_case.predicted_atom_array,
+            mismatch_case.input_atom_array,
         )
 
         struct_coords = torch.randn(1, mismatch_case.n_struct, 3)
         template = torch.full((1, mismatch_case.n_model, 3), 13.5)
-        projected = reconciler.struct_to_model(struct_coords, template)
+        projected = reconciler.input_to_predicted(struct_coords, template)
 
         common_mask = torch.zeros(mismatch_case.n_model, dtype=torch.bool)
-        common_mask[reconciler.model_indices] = True
+        common_mask[reconciler.predicted_indices] = True
 
         if torch.any(~common_mask):
             torch.testing.assert_close(
@@ -573,13 +577,13 @@ class TestCoordinateProjection:
     def test_projection_is_differentiable(self, mismatch_case: MismatchCase):
         """Projection keeps a valid autograd path from outputs to struct coordinates."""
         reconciler = AtomReconciler.from_arrays(
-            mismatch_case.model_atom_array,
-            mismatch_case.struct_atom_array,
+            mismatch_case.predicted_atom_array,
+            mismatch_case.input_atom_array,
         )
 
         struct_coords = torch.randn(2, mismatch_case.n_struct, 3, requires_grad=True)
         template = torch.randn(2, mismatch_case.n_model, 3)
-        projected = reconciler.struct_to_model(struct_coords, template)
+        projected = reconciler.input_to_predicted(struct_coords, template)
 
         grad = torch.autograd.grad(projected.sum(), struct_coords)[0]
         assert grad is not None
@@ -588,13 +592,13 @@ class TestCoordinateProjection:
     def test_batch_dims_propagate(self, mismatch_case: MismatchCase):
         """Projection supports arbitrary leading batch dimensions."""
         reconciler = AtomReconciler.from_arrays(
-            mismatch_case.model_atom_array,
-            mismatch_case.struct_atom_array,
+            mismatch_case.predicted_atom_array,
+            mismatch_case.input_atom_array,
         )
 
         struct_coords = torch.randn(3, 2, mismatch_case.n_struct, 3)
         template = torch.zeros(3, 2, mismatch_case.n_model, 3)
-        projected = reconciler.struct_to_model(struct_coords, template)
+        projected = reconciler.input_to_predicted(struct_coords, template)
 
         assert projected.shape == (3, 2, mismatch_case.n_model, 3)
 
@@ -605,8 +609,8 @@ class TestAlignment:
     def test_known_rotation_recovery(self, mismatch_case: MismatchCase):
         """Known rigid transforms are recovered with near zero RMSD on common atoms."""
         reconciler = AtomReconciler.from_arrays(
-            mismatch_case.model_atom_array,
-            mismatch_case.struct_atom_array,
+            mismatch_case.predicted_atom_array,
+            mismatch_case.input_atom_array,
         )
         reference = _model_reference_from_case(mismatch_case, reconciler)
 
@@ -624,15 +628,15 @@ class TestAlignment:
         transformed = reference @ rotation.T + translation
         aligned, _ = reconciler.align(transformed, reference)
 
-        common = reconciler.model_indices
+        common = reconciler.predicted_indices
         rmsd = _rmsd(aligned[..., common, :], reference[..., common, :])
         assert rmsd.item() < 1e-4
 
     def test_non_common_atoms_transform_rigidly(self, mismatch_case: MismatchCase):
         """Returned alignment matches applying the recovered rigid transform to all atoms."""
         reconciler = AtomReconciler.from_arrays(
-            mismatch_case.model_atom_array,
-            mismatch_case.struct_atom_array,
+            mismatch_case.predicted_atom_array,
+            mismatch_case.input_atom_array,
         )
         reference = _model_reference_from_case(mismatch_case, reconciler)
 
@@ -661,7 +665,7 @@ class TestPreprocessingPipeline:
         """Processed input coordinates always use model atom count."""
         wrapper = MismatchCaseWrapper(mismatch_case)
         structure = {
-            "asym_unit": mismatch_case.struct_atom_array.copy(),
+            "asym_unit": mismatch_case.input_atom_array.copy(),
             "metadata": {"id": mismatch_case.id},
         }
         processed, _ = _preprocess(wrapper, structure)
@@ -672,7 +676,7 @@ class TestPreprocessingPipeline:
         """Common model slots hold structure coordinates after preprocessing."""
         wrapper = MismatchCaseWrapper(mismatch_case)
         structure = {
-            "asym_unit": mismatch_case.struct_atom_array.copy(),
+            "asym_unit": mismatch_case.input_atom_array.copy(),
             "metadata": {"id": mismatch_case.id},
         }
         processed, _ = _preprocess(wrapper, structure)
@@ -680,9 +684,9 @@ class TestPreprocessingPipeline:
 
         atom_coords = cast(np.ndarray, processed.atom_array.coord)
         torch.testing.assert_close(
-            processed.input_coords[0, reconciler.model_indices],
+            processed.input_coords[0, reconciler.predicted_indices],
             torch.as_tensor(
-                atom_coords[reconciler.struct_indices.detach().cpu().numpy()],
+                atom_coords[reconciler.input_indices.detach().cpu().numpy()],
                 dtype=processed.input_coords.dtype,
             ),
         )
@@ -691,7 +695,7 @@ class TestPreprocessingPipeline:
         """Loss input tensors all have model atom count."""
         wrapper = MismatchCaseWrapper(mismatch_case)
         structure = {
-            "asym_unit": mismatch_case.struct_atom_array.copy(),
+            "asym_unit": mismatch_case.input_atom_array.copy(),
             "metadata": {"id": mismatch_case.id},
         }
         processed, _ = _preprocess(wrapper, structure)
@@ -705,21 +709,21 @@ class TestPreprocessingPipeline:
 
     def test_b_factor_override(self, mismatch_case: MismatchCase):
         """Structure B-factors override model template values on common atoms."""
-        struct_atom_array = mismatch_case.struct_atom_array.copy()
+        input_atom_array = mismatch_case.input_atom_array.copy()
         struct_b_factors = np.linspace(5.0, 35.0, mismatch_case.n_struct, dtype=np.float32)
-        struct_atom_array.set_annotation("b_factor", struct_b_factors)
+        input_atom_array.set_annotation("b_factor", struct_b_factors)
 
         case_with_updated_struct = MismatchCase(
             id=mismatch_case.id,
             description=mismatch_case.description,
-            model_atom_array=mismatch_case.model_atom_array.copy(),
-            struct_atom_array=struct_atom_array,
+            predicted_atom_array=mismatch_case.predicted_atom_array.copy(),
+            input_atom_array=input_atom_array,
             expected_n_common=mismatch_case.expected_n_common,
             expected_has_mismatch=mismatch_case.expected_has_mismatch,
         )
         wrapper = MismatchCaseWrapper(case_with_updated_struct)
         structure = {
-            "asym_unit": struct_atom_array.copy(),
+            "asym_unit": input_atom_array.copy(),
             "metadata": {"id": mismatch_case.id},
         }
 
@@ -728,11 +732,11 @@ class TestPreprocessingPipeline:
         reconciler = processed.reconciler
 
         expected_common_b_factors = torch.as_tensor(
-            struct_b_factors[reconciler.struct_indices.detach().cpu().numpy()],
+            struct_b_factors[reconciler.input_indices.detach().cpu().numpy()],
             dtype=loss_inputs.b_factors.dtype,
         )
         torch.testing.assert_close(
-            loss_inputs.b_factors[0, reconciler.model_indices],
+            loss_inputs.b_factors[0, reconciler.predicted_indices],
             expected_common_b_factors,
         )
 
@@ -745,19 +749,19 @@ class TestPreprocessingPipeline:
         inputs (the structure's values on common atoms, see ``test_b_factor_override``), and
         occupancy from neither. The model atom array itself is read, never written.
         """
-        struct_atom_array = mismatch_case.struct_atom_array.copy()
-        struct_atom_array.set_annotation(
+        input_atom_array = mismatch_case.input_atom_array.copy()
+        input_atom_array.set_annotation(
             "b_factor", np.linspace(5.0, 35.0, mismatch_case.n_struct, dtype=np.float32)
         )
         case = MismatchCase(
             id=mismatch_case.id,
             description=mismatch_case.description,
-            model_atom_array=mismatch_case.model_atom_array.copy(),
-            struct_atom_array=struct_atom_array,
+            predicted_atom_array=mismatch_case.predicted_atom_array.copy(),
+            input_atom_array=input_atom_array,
             expected_n_common=mismatch_case.expected_n_common,
             expected_has_mismatch=mismatch_case.expected_has_mismatch,
         )
-        structure = {"asym_unit": struct_atom_array.copy(), "metadata": {"id": case.id}}
+        structure = {"asym_unit": input_atom_array.copy(), "metadata": {"id": case.id}}
 
         processed, _ = _preprocess(MismatchCaseWrapper(case), structure)
         loss_inputs = processed.to_loss_inputs(device="cpu")
@@ -774,7 +778,7 @@ class TestPreprocessingPipeline:
         for category in ["atom_name", "res_id", "chain_id", "element"]:
             np.testing.assert_array_equal(
                 prepared.get_annotation(category),
-                mismatch_case.model_atom_array.get_annotation(category),
+                mismatch_case.predicted_atom_array.get_annotation(category),
                 err_msg=f"annotation {category!r} should come from the model atom array",
             )
         np.testing.assert_allclose(prepared.coord, loss_inputs.input_coords[0].numpy())
@@ -830,12 +834,12 @@ class TestSamplerStep:
         """Sampler outputs keep model space shape for mismatch and identity cases."""
         wrapper = MismatchCaseWrapper(mismatch_case)
         reconciler = AtomReconciler.from_arrays(
-            mismatch_case.model_atom_array,
-            mismatch_case.struct_atom_array,
+            mismatch_case.predicted_atom_array,
+            mismatch_case.input_atom_array,
         )
         reference = _model_reference_from_case(mismatch_case, reconciler)
 
-        features = wrapper.featurize({"asym_unit": mismatch_case.struct_atom_array.copy()})
+        features = wrapper.featurize({"asym_unit": mismatch_case.input_atom_array.copy()})
         state = torch.randn(2, mismatch_case.n_model, 3)
         context = self._context_with_reference(reconciler, reference)
 
@@ -846,12 +850,12 @@ class TestSamplerStep:
         """Alignment lowers RMSD on common atoms versus an unaligned sampler run."""
         wrapper = MismatchCaseWrapper(mismatch_case)
         reconciler = AtomReconciler.from_arrays(
-            mismatch_case.model_atom_array,
-            mismatch_case.struct_atom_array,
+            mismatch_case.predicted_atom_array,
+            mismatch_case.input_atom_array,
         )
         reference = _model_reference_from_case(mismatch_case, reconciler)
 
-        features = wrapper.featurize({"asym_unit": mismatch_case.struct_atom_array.copy()})
+        features = wrapper.featurize({"asym_unit": mismatch_case.input_atom_array.copy()})
         state = torch.randn(1, mismatch_case.n_model, 3)
         context = self._context_with_reference(reconciler, reference)
 
@@ -873,7 +877,7 @@ class TestSamplerStep:
         assert output_aligned.denoised is not None
         assert output_unaligned.denoised is not None
 
-        common = reconciler.model_indices
+        common = reconciler.predicted_indices
         rmsd_aligned = _rmsd(output_aligned.denoised[..., common, :], reference[..., common, :])
         rmsd_unaligned = _rmsd(output_unaligned.denoised[..., common, :], reference[..., common, :])
 
@@ -895,12 +899,12 @@ class TestSamplerStep:
         """
         wrapper = MismatchCaseWrapper(mismatch_case)
         reconciler = AtomReconciler.from_arrays(
-            mismatch_case.model_atom_array,
-            mismatch_case.struct_atom_array,
+            mismatch_case.predicted_atom_array,
+            mismatch_case.input_atom_array,
         )
         reference = _model_reference_from_case(mismatch_case, reconciler)
 
-        features = wrapper.featurize({"asym_unit": mismatch_case.struct_atom_array.copy()})
+        features = wrapper.featurize({"asym_unit": mismatch_case.input_atom_array.copy()})
         state = torch.randn(1, mismatch_case.n_model, 3)
         loss_inputs = _model_space_loss_inputs(mismatch_case.n_model)
         t = 2.0
@@ -956,12 +960,12 @@ class TestSamplerStep:
         """Denoised output tensor stays in model atom space."""
         wrapper = MismatchCaseWrapper(mismatch_case)
         reconciler = AtomReconciler.from_arrays(
-            mismatch_case.model_atom_array,
-            mismatch_case.struct_atom_array,
+            mismatch_case.predicted_atom_array,
+            mismatch_case.input_atom_array,
         )
         reference = _model_reference_from_case(mismatch_case, reconciler)
 
-        features = wrapper.featurize({"asym_unit": mismatch_case.struct_atom_array.copy()})
+        features = wrapper.featurize({"asym_unit": mismatch_case.input_atom_array.copy()})
         state = torch.randn(1, mismatch_case.n_model, 3)
         context = self._context_with_reference(reconciler, reference)
 
@@ -984,7 +988,7 @@ class TestTrajectoryScalers:
         """Execute a trajectory scaler run for one case and return GuidanceOutput."""
         wrapper = MismatchCaseWrapper(case, device=torch.device(device))
         structure = {
-            "asym_unit": case.struct_atom_array.copy(),
+            "asym_unit": case.input_atom_array.copy(),
             "metadata": {"id": case.id},
         }
         config = EDMSamplerConfig(augmentation=False, align_to_input=True, device=device)
@@ -1041,16 +1045,16 @@ class TestTrajectoryScalers:
         metadata = result.metadata or {}
 
         if mismatch_case.expected_has_mismatch:
-            model_atom_array = metadata.get("model_atom_array")
-            struct_atom_array = metadata.get("struct_atom_array")
+            predicted_atom_array = metadata.get("model_atom_array")
+            input_atom_array = metadata.get("struct_atom_array")
             reconciler = metadata.get("reconciler")
-            assert model_atom_array is not None
-            assert struct_atom_array is not None
+            assert predicted_atom_array is not None
+            assert input_atom_array is not None
             assert isinstance(reconciler, AtomReconciler)
-            assert len(model_atom_array) == reconciler.n_model
-            assert len(struct_atom_array) == reconciler.n_struct
-            assert reconciler.model_indices.device.type == "cpu"
-            assert reconciler.struct_indices.device.type == "cpu"
+            assert len(predicted_atom_array) == reconciler.n_predicted
+            assert len(input_atom_array) == reconciler.n_input
+            assert reconciler.predicted_indices.device.type == "cpu"
+            assert reconciler.input_indices.device.type == "cpu"
         else:
             assert metadata.get("model_atom_array") is None
             assert metadata.get("struct_atom_array") is None
@@ -1074,8 +1078,8 @@ class TestTrajectoryScalers:
         reconciler = metadata.get("reconciler")
         assert isinstance(reconciler, AtomReconciler)
         assert result.final_state.device.type == "cuda"
-        assert reconciler.model_indices.device.type == "cpu"
-        assert reconciler.struct_indices.device.type == "cpu"
+        assert reconciler.predicted_indices.device.type == "cpu"
+        assert reconciler.input_indices.device.type == "cpu"
 
     @pytest.mark.parametrize("scaler_type", ["pure_guidance", "fk_steering"])
     def test_trajectory_shapes_consistent(
@@ -1150,7 +1154,7 @@ class TestSave:
         when the two differ. Additionally, losses should be recorded correctly in these cases."""
         n_struct, n_model = 5, 8
         refined = {"asym_unit": build_test_atom_array(n_atoms=n_struct)}
-        model_atom_array = build_test_atom_array(n_atoms=n_model, with_occupancy=False)
+        predicted_atom_array = build_test_atom_array(n_atoms=n_model, with_occupancy=False)
         final_state = torch.randn(1, n_model, 3, generator=torch.Generator().manual_seed(0))
 
         args = GuidanceConfig(
@@ -1170,7 +1174,7 @@ class TestSave:
             traj_denoised=[],
             traj_next_step=[],
             final_state=final_state,
-            model_atom_array=model_atom_array,
+            model_atom_array=predicted_atom_array,
         )
 
         saved = ensure_atom_array_stack(load_any(tmp_path / "refined.cif"))
