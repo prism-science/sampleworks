@@ -444,7 +444,7 @@ CI configuration variables:
 | `SAMPLEWORKS_CHECKPOINTS_IMAGE`  | **Required.** Digest-pinned Harbor path of the checkpoints image, without the registry host, as printed in the `checkpoints.yml` summary |
 | `SAMPLEWORKS_CUDA_BASE_IMAGE`    | Optional digest-pinned CUDA base override                                                                                                |
 
-The checkpoints image is rebuilt from upstream sources: `docker/checkpoints/manifest.tsv`
+The checkpoints image is rebuilt from upstream sources: `docker/checkpoint-image/manifest.tsv`
 lists every file's URL and sha256, and the build fails on any mismatch.
 
 One CI secret, `ASTERA_REGISTRY`, holds the internal registry host. It is a
@@ -477,7 +477,7 @@ docker build --platform linux/amd64 \
 
 For local public builds, pass `CHECKPOINTS_IMAGE` as a digest-pinned checkpoints
 image ref, or build one first with
-`docker build --platform linux/amd64 -t sampleworks-checkpoints:local docker/checkpoints`.
+`docker build --platform linux/amd64 -t sampleworks-checkpoints:local docker/checkpoint-image`.
 In CI, both runtime builds pull from and push to Harbor over Astera's tailnet.
 
 ## Development
