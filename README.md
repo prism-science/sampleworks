@@ -378,7 +378,7 @@ synced branch changes `pyproject.toml` or `pixi.lock`, `run_experiments` stops
 with a clear error instead of mutating the baked environment. For dependency
 debugging only, opt into an on-pod pixi update with
 `RUNTIME_PIXI=1 run_experiments ...`; reproducible scientist runs should use a
-rebuilt `pixi-with-checkpoints:sampleworks` image instead.
+rebuilt image instead (a new `sampleworks` pin in the actl catalog).
 
 ## Running preset analyses on ACTL (`run_analysis`)
 

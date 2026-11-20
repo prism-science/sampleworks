@@ -2,8 +2,14 @@ name: Build and Push Docker Images
 
 # Two-image split:
 #   1. Public pixi-with-checkpoints image from Dockerfile -> public registry.
-#   2. Private Astera overlay from Dockerfile.astera -> Harbor, based on the
-#      exact public image SHA tag built in step 1.
+#   2. Private Astera overlay from Dockerfile.astera -> Harbor's private
+#      `diffuse` project, based on the exact public image digest built in step 1.
+#
+# Both run on GitHub-hosted runners. Harbor is reachable only over Astera's
+# tailnet: the astera job joins it as an ephemeral tag:ci-n device through the
+# `harbor-publish` environment's Tailscale trust credential (TS_CI_CLIENT_ID,
+# TS_CI_AUDIENCE), which can reach Harbor and nothing else, and pushes with the
+# environment's Harbor robot (HARBOR_USERNAME, HARBOR_PASSWORD).
 
 on:
   push:
@@ -17,7 +23,10 @@ env:
   # public registry path.
   PUBLIC_REGISTRY: ${{ vars.SAMPLEWORKS_PUBLIC_REGISTRY || 'docker.io' }}
   PUBLIC_IMAGE_NAME: ${{ vars.SAMPLEWORKS_PUBLIC_IMAGE || 'diffuseproject/pixi-with-checkpoints' }}
-  CHECKPOINTS_DOCKERHUB_IMAGE: ${{ vars.SAMPLEWORKS_CHECKPOINTS_DOCKERHUB_IMAGE || 'docker.io/diffuseproject/sampleworks-checkpoints:latest' }}
+  # Digest-pinned. Docker Hub is the checkpoints image's source of truth: the
+  # Harbor copy it used to be synced from was not carried over to Astera's new
+  # cluster. This is the digest last synced and verified (2026-10-28).
+  CHECKPOINTS_IMAGE: ${{ vars.SAMPLEWORKS_CHECKPOINTS_IMAGE || 'docker.io/diffuseproject/sampleworks-checkpoints@sha256:ff1dd2b42c3afd593e034cf81df1bf1862c27ae491f46cc10e105629f1102781' }}
   CUDA_BASE_IMAGE: ${{ vars.SAMPLEWORKS_CUDA_BASE_IMAGE || 'nvidia/cuda:12.4.1-devel-ubuntu22.04@sha256:da6791294b0b04d7e65d87b7451d6f2390b4d36225ab0701ee7dfec5769829f5' }}
 
   # Only the registry HOST is secret (repo secret ASTERA_REGISTRY); image paths
@@ -26,112 +35,14 @@ env:
   # keeping the secret to the bare host masks it inside every longer image ref
   # while leaving digests readable when a build fails. It is set per job because
   # workflow-level env cannot read the secrets context.
-  CHECKPOINTS_SOURCE_PATH: ${{ vars.SAMPLEWORKS_CHECKPOINTS_SOURCE_PATH }}
-  ASTERA_IMAGE_NAME: library/pixi-with-checkpoints
-  # Pin to an `-immutable` tag's digest. quay rebuilds the moving tags
-  # (`latest`, `v1.22`, ...) and garbage-collects their old digests, which
-  # is how the previous pin vanished ("manifest unknown") on 2026-08-24 and
-  # failed every main build until this change. The `-immutable` tags are
-  # published once and kept.
-  SKOPEO_IMAGE: quay.io/skopeo/stable:v1.22.2-immutable@sha256:4a16d57b37617a04b3d643079a477a2848efe892dffcdf0ce56df4262b65f810
+  ASTERA_IMAGE_NAME: diffuse/pixi-with-checkpoints
 
   DOCKER_METADATA_SHORT_SHA_LENGTH: 7
 
 jobs:
-  sync_checkpoints:
-    name: Sync checkpoints to Docker Hub
-    runs-on: diffuse-sh-builder
-    permissions:
-      contents: read
-    env:
-      ASTERA_REGISTRY: ${{ secrets.ASTERA_REGISTRY }}
-      CHECKPOINTS_SOURCE_IMAGE: ${{ secrets.ASTERA_REGISTRY }}/${{ vars.SAMPLEWORKS_CHECKPOINTS_SOURCE_PATH }}
-    outputs:
-      checkpoints_digest: ${{ steps.verify_checkpoints.outputs.checkpoints_digest }}
-
-    steps:
-      - name: Copy checkpoint image to Docker Hub
-        env:
-          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
-          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: |
-          # Check the parts, not the composed ref: an unset ASTERA_REGISTRY
-          # still yields a non-empty "/library/...@sha256:..." that would pass
-          # both the emptiness and the digest-pinned checks below.
-          if [ -z "${ASTERA_REGISTRY}" ] || [ -z "${CHECKPOINTS_SOURCE_PATH}" ]; then
-            echo "ASTERA_REGISTRY secret and SAMPLEWORKS_CHECKPOINTS_SOURCE_PATH variable must be set."
-            exit 1
-          fi
-          # skopeo receives HARBOR_USERNAME/PASSWORD as --src-creds for this
-          # host, so a public registry here would leak them to a third party.
-          case "${ASTERA_REGISTRY}" in
-            docker.io|index.docker.io|registry-1.docker.io|"${PUBLIC_REGISTRY}")
-              echo "ASTERA_REGISTRY must be the internal registry, not a public one."
-              exit 1 ;;
-          esac
-          if [ -z "${CHECKPOINTS_DOCKERHUB_IMAGE}" ]; then
-            echo "Docker Hub destination image ref must be set."
-            exit 1
-          fi
-          if [ "${CHECKPOINTS_SOURCE_PATH}" = "${CHECKPOINTS_SOURCE_PATH%@*}" ]; then
-            echo "SAMPLEWORKS_CHECKPOINTS_SOURCE_PATH must be digest-pinned."
-            exit 1
-          fi
-          if [ -z "${HARBOR_USERNAME}" ] || [ -z "${HARBOR_PASSWORD}" ]; then
-            echo "HARBOR_USERNAME and HARBOR_PASSWORD secrets are required to pull checkpoint image."
-            exit 1
-          fi
-          if [ -z "${DOCKERHUB_USERNAME}" ] || [ -z "${DOCKERHUB_TOKEN}" ]; then
-            echo "DOCKERHUB_USERNAME and DOCKERHUB_TOKEN secrets are required to push checkpoint image."
-            exit 1
-          fi
-
-          docker run --rm \
-            --entrypoint /bin/sh \
-            -e CHECKPOINTS_SOURCE_IMAGE \
-            -e CHECKPOINTS_DOCKERHUB_IMAGE \
-            -e HARBOR_USERNAME \
-            -e HARBOR_PASSWORD \
-            -e DOCKERHUB_USERNAME \
-            -e DOCKERHUB_TOKEN \
-            "${SKOPEO_IMAGE}" \
-            -ceu 'skopeo copy --preserve-digests \
-              --src-creds "${HARBOR_USERNAME}:${HARBOR_PASSWORD}" \
-              --dest-creds "${DOCKERHUB_USERNAME}:${DOCKERHUB_TOKEN}" \
-              "docker://${CHECKPOINTS_SOURCE_IMAGE}" \
-              "docker://${CHECKPOINTS_DOCKERHUB_IMAGE}"'
-
-      - name: Verify Docker Hub checkpoint digest
-        id: verify_checkpoints
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: |
-          expected_digest="${CHECKPOINTS_SOURCE_IMAGE##*@}"
-          actual_digest="$(docker run --rm \
-            --entrypoint /bin/sh \
-            -e CHECKPOINTS_DOCKERHUB_IMAGE \
-            -e DOCKERHUB_USERNAME \
-            -e DOCKERHUB_TOKEN \
-            "${SKOPEO_IMAGE}" \
-            -ceu 'skopeo inspect \
-              --creds "${DOCKERHUB_USERNAME}:${DOCKERHUB_TOKEN}" \
-              --format "{{.Digest}}" \
-              "docker://${CHECKPOINTS_DOCKERHUB_IMAGE}"')"
-
-          if [ "${actual_digest}" != "${expected_digest}" ]; then
-            echo "Docker Hub checkpoint digest mismatch: expected ${expected_digest}, got ${actual_digest}"
-            exit 1
-          fi
-
-          echo "checkpoints_digest=${actual_digest}" >> "$GITHUB_OUTPUT"
-
   public:
     name: Public pixi-with-checkpoints image
-    runs-on: diffuse-sh-builder
-    needs: sync_checkpoints
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
@@ -142,6 +53,14 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+
+      # The image bakes the model checkpoints; the hosted runner's default free
+      # space is not enough.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift || true
+          docker system prune -af || true
+          df -h /
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
@@ -164,22 +83,14 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern=v{{version}}
 
-      - name: Resolve mirrored checkpoint image input
+      - name: Validate checkpoint image input
         id: checkpoint-ref
-        env:
-          CHECKPOINTS_DIGEST: ${{ needs.sync_checkpoints.outputs.checkpoints_digest }}
         run: |
-          if [ -z "${CHECKPOINTS_DIGEST}" ]; then
-            echo "sync-checkpoints did not produce a checkpoint digest."
+          if [ "${CHECKPOINTS_IMAGE}" = "${CHECKPOINTS_IMAGE%@sha256:*}" ]; then
+            echo "CHECKPOINTS_IMAGE must be digest-pinned (@sha256:...), got: ${CHECKPOINTS_IMAGE}"
             exit 1
           fi
-          if [ "${CHECKPOINTS_DIGEST}" = "${CHECKPOINTS_DIGEST#sha256:}" ]; then
-            echo "sync-checkpoints produced a non-sha256 digest: ${CHECKPOINTS_DIGEST}"
-            exit 1
-          fi
-          dockerhub_ref="${CHECKPOINTS_DOCKERHUB_IMAGE%@*}"
-          dockerhub_ref="${dockerhub_ref%:*}"
-          echo "image=${dockerhub_ref}@${CHECKPOINTS_DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "image=${CHECKPOINTS_IMAGE}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push public image
         id: public-build
@@ -204,8 +115,11 @@ jobs:
 
   astera:
     name: Astera EXT image
-    runs-on: diffuse-sh-builder
+    runs-on: ubuntu-latest
     needs: public
+    # Holds the Tailscale trust credential and the Harbor robot; deployable
+    # from main and v* tags only.
+    environment: harbor-publish
     permissions:
       contents: read
     env:
@@ -216,6 +130,14 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+
+      # The image bakes the model checkpoints; the hosted runner's default free
+      # space is not enough.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift || true
+          docker system prune -af || true
+          df -h /
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
@@ -234,6 +156,22 @@ jobs:
               echo "ASTERA_REGISTRY must be the internal registry, not a public one."
               exit 1 ;;
           esac
+
+      - name: Join Astera tailnet
+        uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
+        with:
+          oauth-client-id: ${{ vars.TS_CI_CLIENT_ID }}
+          audience: ${{ vars.TS_CI_AUDIENCE }}
+          tags: tag:ci-n
+
+      - name: Wait for Harbor
+        run: |
+          for _ in $(seq 1 12); do
+            curl -fsS --max-time 5 "https://${ASTERA_REGISTRY}/api/v2.0/ping" && exit 0
+            sleep 5
+          done
+          echo "Astera registry unreachable over the tailnet."
+          exit 1
 
       - name: Login to Harbor
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
@@ -254,10 +192,11 @@ jobs:
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6
         with:
           images: ${{ env.ASTERA_REGISTRY }}/${{ env.ASTERA_IMAGE_NAME }}
+          # Tags in the `diffuse` project are immutable: no moving tags
+          # (latest, sampleworks). A release tag's commit was already pushed as
+          # sha-<short> from main, so tag builds push only the version tags.
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=sampleworks,enable={{is_default_branch}}
-            type=sha,prefix=sha-
+            type=sha,prefix=sha-,enable=${{ github.ref_type != 'tag' }}
             type=semver,pattern={{version}}
             type=semver,pattern=v{{version}}
 
@@ -286,9 +225,13 @@ jobs:
           labels: ${{ steps.astera-meta.outputs.labels }}
           build-args: |
             PIXI_WITH_CHECKPOINTS_IMAGE=${{ env.PUBLIC_REGISTRY }}/${{ env.PUBLIC_IMAGE_NAME }}@${{ needs.public.outputs.image-digest }}
-          cache-from: type=registry,ref=${{ env.ASTERA_REGISTRY }}/${{ env.ASTERA_IMAGE_NAME }}:buildcache
-          cache-to: type=registry,ref=${{ env.ASTERA_REGISTRY }}/${{ env.ASTERA_IMAGE_NAME }}:buildcache,mode=max,ignore-error=true
           provenance: false
 
       - name: Astera image digest
-        run: echo "Astera image pushed with digest ${{ steps.astera-build.outputs.digest }}"
+        env:
+          DIGEST: ${{ steps.astera-build.outputs.digest }}
+          TAGS: ${{ steps.astera-meta.outputs.tags }}
+        run: |
+          echo "Astera image pushed with digest ${DIGEST}"
+          tag="$(printf '%s\n' "${TAGS}" | head -1)"
+          echo "actl catalog ref: \`${tag#*/}@${DIGEST}\` (registry host omitted)" >> "$GITHUB_STEP_SUMMARY"
