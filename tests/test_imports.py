@@ -1,6 +1,10 @@
 """Tests for the centralized imports module."""
 
+import importlib
+import importlib.util
+
 import pytest
+from sampleworks.utils import imports
 from sampleworks.utils.imports import (
     BOLTZ_AVAILABLE,
     check_any_model_available,
@@ -18,20 +22,49 @@ from sampleworks.utils.imports import (
 )
 
 
+def _protpardelle_package_is_usable() -> bool:
+    """Report whether Protpardelle is installed with its model parameters set up.
+
+    Returns
+    -------
+    bool
+        ``False`` when the package is missing, or when ``protpardelle.env`` raises
+        the ``OSError`` it uses to signal a missing ``model_params`` directory.
+    """
+    if importlib.util.find_spec("protpardelle") is None:
+        return False
+    try:
+        importlib.import_module("protpardelle.env")
+    except OSError:
+        return False
+    return True
+
+
 class TestAvailabilityFlags:
-    """Test that availability flags are properly set."""
+    """Availability flags agree with what the environment actually has installed."""
 
-    def test_boltz_available_is_bool(self):
-        """BOLTZ_AVAILABLE should be a boolean."""
-        assert isinstance(BOLTZ_AVAILABLE, bool)
+    @pytest.mark.parametrize(
+        ("flag_name", "package"),
+        [
+            ("BOLTZ_AVAILABLE", "boltz"),
+            ("PROTENIX_AVAILABLE", "protenix"),
+            ("RF3_AVAILABLE", "rf3"),
+        ],
+    )
+    def test_flag_is_set_exactly_when_the_model_package_is_installed(
+        self, flag_name: str, package: str
+    ):
+        """An installed model whose wrapper fails to import must not read as absent.
 
-    def test_protenix_available_is_bool(self):
-        """PROTENIX_AVAILABLE should be a boolean."""
-        assert isinstance(PROTENIX_AVAILABLE, bool)
+        The flag gates every test of that model, so a wrapper broken by an upstream
+        rename would otherwise skip them all and leave the suite green.
+        """
+        package_is_installed = importlib.util.find_spec(package) is not None
+        assert getattr(imports, flag_name) is package_is_installed
 
-    def test_rf3_available_is_bool(self):
-        """RF3_AVAILABLE should be a boolean."""
-        assert isinstance(RF3_AVAILABLE, bool)
+    def test_protpardelle_flag_is_set_exactly_when_protpardelle_is_usable(self):
+        """PROTPARDELLE_AVAILABLE follows the package and its model_params setup."""
+        assert imports.PROTPARDELLE_AVAILABLE is _protpardelle_package_is_usable()
 
 
 class TestCheckFunctions:
