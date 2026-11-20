@@ -1,15 +1,17 @@
 name: Build and Push Docker Images
 
-# Two-image split:
-#   1. Public pixi-with-checkpoints image from Dockerfile -> public registry.
-#   2. Private Astera overlay from Dockerfile.astera -> Harbor's private
-#      `diffuse` project, based on the exact public image digest built in step 1.
+# Two-image split, both pushed to Harbor's private `diffuse` project:
+#   1. pixi-with-checkpoints from Dockerfile (target `public`), built on the
+#      checkpoints image that checkpoints.yml rebuilds from upstream sources.
+#   2. The Astera overlay from Dockerfile.astera, based on the exact digest
+#      built in step 1.
 #
 # Both run on GitHub-hosted runners. Harbor is reachable only over Astera's
-# tailnet: the astera job joins it as an ephemeral tag:ci-n device through the
+# tailnet: each job joins it as an ephemeral tag:ci-n device through the
 # `harbor-publish` environment's Tailscale trust credential (TS_CI_CLIENT_ID,
-# TS_CI_AUDIENCE), which can reach Harbor and nothing else, and pushes with the
-# environment's Harbor robot (HARBOR_USERNAME, HARBOR_PASSWORD).
+# TS_CI_AUDIENCE, exchanged for a GitHub OIDC token, hence id-token: write),
+# which can reach Harbor and nothing else, and pushes with the environment's
+# Harbor robot (HARBOR_USERNAME, HARBOR_PASSWORD).
 
 on:
   push:
@@ -19,14 +21,10 @@ on:
   workflow_dispatch:
 
 env:
-  # Override these with repository variables if Diffuse Hub uses a different
-  # public registry path.
-  PUBLIC_REGISTRY: ${{ vars.SAMPLEWORKS_PUBLIC_REGISTRY || 'docker.io' }}
-  PUBLIC_IMAGE_NAME: ${{ vars.SAMPLEWORKS_PUBLIC_IMAGE || 'diffuseproject/pixi-with-checkpoints' }}
-  # Digest-pinned. Docker Hub is the checkpoints image's source of truth: the
-  # Harbor copy it used to be synced from was not carried over to Astera's new
-  # cluster. This is the digest last synced and verified (2026-10-28).
-  CHECKPOINTS_IMAGE: ${{ vars.SAMPLEWORKS_CHECKPOINTS_IMAGE || 'docker.io/diffuseproject/sampleworks-checkpoints@sha256:ff1dd2b42c3afd593e034cf81df1bf1862c27ae491f46cc10e105629f1102781' }}
+  PUBLIC_IMAGE_NAME: diffuse/pixi-with-checkpoints-public
+  # Harbor path pinned by digest, without the registry host, as printed by
+  # checkpoints.yml. Required: there is no fallback image.
+  CHECKPOINTS_IMAGE: ${{ vars.SAMPLEWORKS_CHECKPOINTS_IMAGE }}
   CUDA_BASE_IMAGE: ${{ vars.SAMPLEWORKS_CUDA_BASE_IMAGE || 'nvidia/cuda:12.4.1-devel-ubuntu22.04@sha256:da6791294b0b04d7e65d87b7451d6f2390b4d36225ab0701ee7dfec5769829f5' }}
 
   # Only the registry HOST is secret (repo secret ASTERA_REGISTRY); image paths
@@ -43,8 +41,14 @@ jobs:
   public:
     name: Public pixi-with-checkpoints image
     runs-on: ubuntu-latest
+    # Holds the Tailscale trust credential and the Harbor robot; deployable
+    # from main and v* tags only.
+    environment: harbor-publish
     permissions:
       contents: read
+      id-token: write
+    env:
+      ASTERA_REGISTRY: ${{ secrets.ASTERA_REGISTRY }}
     outputs:
       image-digest: ${{ steps.public-build.outputs.digest }}
 
@@ -65,32 +69,72 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
 
-      - name: Login to public registry
+      - name: Validate Astera registry configured
+        run: |
+          # The Harbor credentials go to whatever host this names; refuse an
+          # empty value (login-action would default to Docker Hub) or a public one.
+          if [ -z "${ASTERA_REGISTRY}" ]; then
+            echo "ASTERA_REGISTRY repository secret must be set."
+            exit 1
+          fi
+          case "${ASTERA_REGISTRY}" in
+            docker.io|index.docker.io|registry-1.docker.io)
+              echo "ASTERA_REGISTRY must be the internal registry, not a public one."
+              exit 1 ;;
+          esac
+
+      - name: Join Astera tailnet
+        uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
+        with:
+          oauth-client-id: ${{ vars.TS_CI_CLIENT_ID }}
+          audience: ${{ vars.TS_CI_AUDIENCE }}
+          tags: tag:ci-n
+
+      - name: Wait for Harbor
+        run: |
+          for _ in $(seq 1 12); do
+            curl -fsS --max-time 5 "https://${ASTERA_REGISTRY}/api/v2.0/ping" && exit 0
+            sleep 5
+          done
+          echo "Astera registry unreachable over the tailnet."
+          exit 1
+
+      - name: Login to Harbor
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
         with:
-          registry: ${{ env.PUBLIC_REGISTRY }}
-          username: ${{ secrets.SAMPLEWORKS_PUBLIC_REGISTRY_USERNAME || secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.SAMPLEWORKS_PUBLIC_REGISTRY_PASSWORD || secrets.DOCKERHUB_TOKEN }}
+          registry: ${{ env.ASTERA_REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
 
+      # Tags in `diffuse` are immutable: no moving tags, and a release tag's
+      # commit was already pushed as sha-<short> from main.
       - name: Docker metadata for public image
         id: public-meta
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6
         with:
-          images: ${{ env.PUBLIC_REGISTRY }}/${{ env.PUBLIC_IMAGE_NAME }}
+          images: ${{ env.ASTERA_REGISTRY }}/${{ env.PUBLIC_IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix=sha-
+            type=sha,prefix=sha-,enable=${{ github.ref_type != 'tag' }}
             type=semver,pattern={{version}}
             type=semver,pattern=v{{version}}
 
       - name: Validate checkpoint image input
         id: checkpoint-ref
         run: |
-          if [ "${CHECKPOINTS_IMAGE}" = "${CHECKPOINTS_IMAGE%@sha256:*}" ]; then
-            echo "CHECKPOINTS_IMAGE must be digest-pinned (@sha256:...), got: ${CHECKPOINTS_IMAGE}"
+          if [ -z "${CHECKPOINTS_IMAGE}" ]; then
+            echo "Set the SAMPLEWORKS_CHECKPOINTS_IMAGE repository variable to the path@digest checkpoints.yml printed."
             exit 1
           fi
-          echo "image=${CHECKPOINTS_IMAGE}" >> "$GITHUB_OUTPUT"
+          if [ "${CHECKPOINTS_IMAGE}" = "${CHECKPOINTS_IMAGE%@sha256:*}" ]; then
+            echo "SAMPLEWORKS_CHECKPOINTS_IMAGE must be digest-pinned (@sha256:...), got: ${CHECKPOINTS_IMAGE}"
+            exit 1
+          fi
+          case "${CHECKPOINTS_IMAGE%%/*}" in
+            *.*|*:*|localhost)
+              echo "SAMPLEWORKS_CHECKPOINTS_IMAGE is a Harbor path without the registry host, got: ${CHECKPOINTS_IMAGE}"
+              exit 1 ;;
+          esac
+          echo "image=${ASTERA_REGISTRY}/${CHECKPOINTS_IMAGE}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push public image
         id: public-build
@@ -106,8 +150,6 @@ jobs:
           build-args: |
             BASE_IMAGE=${{ env.CUDA_BASE_IMAGE }}
             CHECKPOINTS_IMAGE=${{ steps.checkpoint-ref.outputs.image }}
-          cache-from: type=registry,ref=${{ env.PUBLIC_REGISTRY }}/${{ env.PUBLIC_IMAGE_NAME }}:buildcache
-          cache-to: type=registry,ref=${{ env.PUBLIC_REGISTRY }}/${{ env.PUBLIC_IMAGE_NAME }}:buildcache,mode=max,ignore-error=true
           provenance: false
 
       - name: Public image digest
@@ -122,6 +164,7 @@ jobs:
     environment: harbor-publish
     permissions:
       contents: read
+      id-token: write
     env:
       ASTERA_REGISTRY: ${{ secrets.ASTERA_REGISTRY }}
 
@@ -152,7 +195,7 @@ jobs:
             exit 1
           fi
           case "${ASTERA_REGISTRY}" in
-            docker.io|index.docker.io|registry-1.docker.io|"${PUBLIC_REGISTRY}")
+            docker.io|index.docker.io|registry-1.docker.io)
               echo "ASTERA_REGISTRY must be the internal registry, not a public one."
               exit 1 ;;
           esac
@@ -179,13 +222,6 @@ jobs:
           registry: ${{ env.ASTERA_REGISTRY }}
           username: ${{ secrets.HARBOR_USERNAME }}
           password: ${{ secrets.HARBOR_PASSWORD }}
-
-      - name: Login to public registry
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
-        with:
-          registry: ${{ env.PUBLIC_REGISTRY }}
-          username: ${{ secrets.SAMPLEWORKS_PUBLIC_REGISTRY_USERNAME || secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.SAMPLEWORKS_PUBLIC_REGISTRY_PASSWORD || secrets.DOCKERHUB_TOKEN }}
 
       - name: Docker metadata for Astera image
         id: astera-meta
@@ -224,7 +260,7 @@ jobs:
           tags: ${{ steps.astera-meta.outputs.tags }}
           labels: ${{ steps.astera-meta.outputs.labels }}
           build-args: |
-            PIXI_WITH_CHECKPOINTS_IMAGE=${{ env.PUBLIC_REGISTRY }}/${{ env.PUBLIC_IMAGE_NAME }}@${{ needs.public.outputs.image-digest }}
+            PIXI_WITH_CHECKPOINTS_IMAGE=${{ env.ASTERA_REGISTRY }}/${{ env.PUBLIC_IMAGE_NAME }}@${{ needs.public.outputs.image-digest }}
           provenance: false
 
       - name: Astera image digest
