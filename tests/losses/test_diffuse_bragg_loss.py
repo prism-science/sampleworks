@@ -1,19 +1,17 @@
 """Tests specific to the combined Bragg + diffuse loss.
 
-The generic loss tests (output shape, determinism, recovery and gradient flow for
-a single conformer, batch handling) live in ``test_loss_function_contract.py``,
-where this loss is registered as the ``diffuse_bragg`` bundle. That bundle scores
-the Bragg term alone, because the contract tests use one conformer and the diffuse
-term, ``<|F|²> − |<F>|²`` over the ensemble, is identically zero for one conformer.
+The generic loss tests live in ``test_loss_function_contract.py``. There this
+loss is registered twice: as the single-conformer ``diffuse_bragg`` bundle, which
+scores the Bragg term alone because the diffuse term, ``<|F|²> − |<F>|²`` over
+the ensemble, is identically zero for one conformer; and as one ensemble bundle
+per Bragg weight, on the two-configuration fixtures in ``conftest.py``, which
+``TestLossEnsemble`` checks for recovery, monotonic displacement, a gradient on
+every configuration and a downhill gradient.
 
-This file tests what needs a real ensemble, using the two-configuration fixtures
-in ``conftest.py`` (#495 tracks moving these checks into the contract): the loss
-is ~0 for the true ensemble, rises as the ensemble is displaced, and puts a
-gradient on every configuration, each at every mixture of the two terms; the
-diffuse gradient points downhill; and a sign-flipped diffuse pattern is not
-mistaken for a match. It also covers the options this loss alone has: the
-convex weight, separate Bragg and diffuse reflection lists, R-free handling and
-bulk solvent.
+This file tests what is particular to this loss: a sign-flipped diffuse pattern
+is not mistaken for a match, and the options this loss alone has: the convex
+weight, separate Bragg and diffuse reflection lists, R-free handling and bulk
+solvent.
 
 The targets are written by the lunus generator in-process rather than read from a
 checked-in file, so the fixtures cannot drift from the generator that made them.
@@ -69,93 +67,8 @@ def score(loss_function, atom_array, coords, requires_grad=False):
 
 
 # ---------------------------------------------------------------------------
-# Ensemble terms, at each mixture
+# The diffuse scale fit
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("weight", [1.0, 0.0, 0.5])
-def test_recovers_the_ensemble_it_was_generated_from(
-    diffuse_bragg_ensemble, diffuse_bragg_losses, weight
-):
-    """~0 loss when the model is the two-configuration truth, at every mixture.
-
-    Measured on 1vme (2 configurations, 86499 reflections): 2e-14 pure Bragg,
-    6e-10 pure diffuse. Bragg reaches float32 epsilon because that is what the
-    MTZ stores; diffuse is looser because the anisotropic component is what
-    survives subtracting a large radial background, which amplifies the relative
-    error of the intensities it came from.
-    """
-    atom_array, coords = diffuse_bragg_ensemble
-    loss, _ = score(diffuse_bragg_losses[weight], atom_array, coords)
-    assert torch.isfinite(loss)
-    assert loss.item() < 1e-6
-
-
-@pytest.mark.parametrize("weight", [1.0, 0.0, 0.5])
-def test_loss_increases_with_ensemble_displacement(
-    diffuse_bragg_ensemble, diffuse_bragg_losses, weight
-):
-    """Monotonic in how far the ensemble has been moved from the truth.
-
-    The displacement is a fixed random direction scaled up, so the sequence
-    probes one path away from the minimum rather than several unrelated points.
-    A term dominated by its own numerical noise would fail here while still
-    passing the recovery test above.
-    """
-    atom_array, coords = diffuse_bragg_ensemble
-    direction = np.random.default_rng(0).normal(size=coords.shape)
-    losses = [
-        score(diffuse_bragg_losses[weight], atom_array, coords + amplitude * direction)[0].item()
-        for amplitude in (0.0, 0.02, 0.05, 0.1, 0.2)
-    ]
-
-    assert all(np.isfinite(losses))
-    assert losses == sorted(losses), f"loss is not monotonic in displacement: {losses}"
-    assert losses[-1] > 1e3 * max(losses[0], 1e-12), (
-        f"a 0.2 A displacement barely moved the loss: {losses}"
-    )
-
-
-@pytest.mark.parametrize("weight", [1.0, 0.0, 0.5])
-def test_every_configuration_receives_a_gradient(
-    diffuse_bragg_ensemble, diffuse_bragg_losses, weight
-):
-    """backward() puts finite, non-zero gradients on every configuration.
-
-    Checked per configuration because an ensemble axis that collapsed -- all
-    members receiving the same gradient, or only the first receiving any --
-    would still produce a plausible scalar loss.
-    """
-    atom_array, coords = diffuse_bragg_ensemble
-    displaced = coords + 0.1 * np.random.default_rng(1).normal(size=coords.shape)
-    loss, x = score(diffuse_bragg_losses[weight], atom_array, displaced, requires_grad=True)
-    loss.backward()
-
-    assert x.grad is not None
-    assert torch.isfinite(x.grad).all()
-    for i in range(coords.shape[0]):
-        assert x.grad[i].abs().max() > 0, f"configuration {i} received no gradient"
-
-
-def test_diffuse_gradient_points_downhill(diffuse_bragg_ensemble, diffuse_bragg_losses):
-    """A small step along -grad of the pure-diffuse loss lowers it.
-
-    The contract checks the sign for Bragg at one conformer; the diffuse term's
-    gradient only exists for an ensemble, and a wrong sign there would drive
-    guidance away from the data while every magnitude check passed.
-    """
-    atom_array, coords = diffuse_bragg_ensemble
-    loss_function = diffuse_bragg_losses[0.0]
-    displaced = coords + 0.1 * np.random.default_rng(2).normal(size=coords.shape)
-    loss, x = score(loss_function, atom_array, displaced, requires_grad=True)
-    loss.backward()
-
-    step = 1e-3 / x.grad.abs().max().item()
-    lowered, _ = score(loss_function, atom_array, displaced - step * x.grad.detach().numpy())
-
-    assert lowered.item() < loss.item(), (
-        f"stepping along -grad raised the loss: {loss.item():.6e} -> {lowered.item():.6e}"
-    )
 
 
 def test_anticorrelated_diffuse_is_not_a_match(
