@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import cast, TYPE_CHECKING
 
 import einx
@@ -12,6 +12,7 @@ from jaxtyping import Float
 from loguru import logger
 
 from sampleworks.core.samplers.protocol import SamplerSchedule, SamplerStepOutput, StepParams
+from sampleworks.core.samplers.schedule import NoiseScheduleConfig
 from sampleworks.models.protocol import FlowModelWrapper, GenerativeModelInput
 from sampleworks.utils.frame_transforms import (
     align_to_reference_frame,
@@ -62,22 +63,8 @@ class EDMSamplerConfig:
 
     Parameters
     ----------
-    sigma_data
-        Assumed standard deviation of the training data distribution.
-        Used to scale the noise schedule:
-        :math:`\sigma(t) = \sigma_\text{data} \cdot
-        (s_\max^{1/\rho} + t(s_\min^{1/\rho} - s_\max^{1/\rho}))^\rho`.
-    s_max
-        Upper bound of the noise schedule in units of :math:`\sigma_\text{data}`.
-        Controls the starting (maximum) noise level.
-    s_min
-        Lower bound of the noise schedule in units of :math:`\sigma_\text{data}`.
-        Controls the ending (minimum) noise level.
-    p
-        Exponent :math:`\rho` controlling the shape of the noise schedule
-        interpolation between ``s_max`` and ``s_min``.  Higher values
-        concentrate more steps at lower noise levels.  Called ``rho`` in
-        Karras et al., Table 5.
+    schedule
+        Noise levels and spacing of the schedule; see :class:`NoiseScheduleConfig`.
     gamma_min
         Minimum sigma threshold below which stochastic noise inflation
         (:math:`\gamma`) is disabled (set to 0).  Prevents adding noise
@@ -110,10 +97,7 @@ class EDMSamplerConfig:
         Torch device for schedule tensor allocation.
     """
 
-    sigma_data: float = 16.0
-    s_max: float = 160.0
-    s_min: float = 4e-4
-    p: float = 7.0
+    schedule: NoiseScheduleConfig = field(default_factory=NoiseScheduleConfig)
     gamma_min: float = 0.2  # this is not the default value from AF3! AF3 uses 1.0
     gamma_0: float = 0.8
     noise_scale: float = 1.003
@@ -123,16 +107,6 @@ class EDMSamplerConfig:
     alignment_reverse_diffusion: bool = False
     scale_guidance_to_diffusion: bool = True
     device: str | torch.device = "cpu"
-
-    def __post_init__(self) -> None:
-        if self.p == 0:
-            raise ValueError("p must be nonzero (used as exponent denominator in schedule formula)")
-        if self.s_max <= 0 or self.s_min <= 0:
-            raise ValueError(f"s_max ({self.s_max}) and s_min ({self.s_min}) must be positive")
-        if self.s_min >= self.s_max:
-            raise ValueError(f"s_min ({self.s_min}) must be less than s_max ({self.s_max})")
-        if self.sigma_data <= 0:
-            raise ValueError(f"sigma_data ({self.sigma_data}) must be positive")
 
 
 class AF3EDMSampler:
@@ -162,8 +136,8 @@ class AF3EDMSampler:
         ----------
         config : EDMSamplerConfig
             Configuration object containing all schedule hyperparameters
-            (``sigma_data``, ``s_max``, ``s_min``, ``p``, ``gamma_min``,
-            ``gamma_0``, ``noise_scale``, ``step_scale``) and runtime flags
+            (``schedule``, ``gamma_min``, ``gamma_0``, ``noise_scale``,
+            ``step_scale``) and runtime flags
             (``augmentation``, ``align_to_input``,
             ``alignment_reverse_diffusion``, ``scale_guidance_to_diffusion``,
             ``device``).
@@ -208,16 +182,11 @@ class AF3EDMSampler:
             )
 
     def compute_schedule(self, num_steps: int) -> EDMSchedule:
-        r"""Compute sigma-based schedule using RF3's EDM formula.
+        """Compute the sigma-based schedule with AF3-style churn.
 
-        Uses the formula:
-
-        .. math::
-
-            \sigma = \sigma_{\text{data}} \cdot
-            \left(s_{\max}^{1/p} + t \cdot (s_{\min}^{1/p} - s_{\max}^{1/p})\right)^p
-
-        where :math:`t` goes from 0 to 1 over ``num_steps``.
+        Noise levels come from ``config.schedule`` (see
+        :meth:`NoiseScheduleConfig.sigma`), with :math:`t` going from 0 to 1
+        over ``num_steps``.
 
         Parameters
         ----------
@@ -230,19 +199,7 @@ class AF3EDMSampler:
             Schedule object with `sigma_tm`, `sigma_t`, `gamma`, `t_hat`, and `dt` arrays.
         """
         t_values = torch.linspace(0, 1, num_steps + 1, device=self.config.device)
-
-        sigmas = (
-            self.config.sigma_data
-            * (
-                self.config.s_max ** (1 / self.config.p)
-                + t_values
-                * (
-                    self.config.s_min ** (1 / self.config.p)
-                    - self.config.s_max ** (1 / self.config.p)
-                )
-            )
-            ** self.config.p
-        )
+        sigmas = self.config.schedule.sigma(t_values)
 
         gammas = torch.where(
             sigmas > self.config.gamma_min,

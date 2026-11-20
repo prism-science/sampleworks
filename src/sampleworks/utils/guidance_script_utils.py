@@ -27,6 +27,7 @@ from loguru import logger
 from sampleworks.core.losses.config import build_loss
 from sampleworks.core.losses.registry import LossBuildContext
 from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
+from sampleworks.core.samplers.schedule import NoiseScheduleConfig
 from sampleworks.core.scalers.fk_steering import FKSteering
 from sampleworks.core.scalers.latent_optimization import LatentOptimization  # IT-opt wiring (added)
 from sampleworks.core.scalers.protocol import StepScalerProtocol
@@ -727,6 +728,7 @@ def _run_guidance(args: GuidanceConfig, model_wrapper, device):
     if args.num_diffusion_steps is not None and args.num_diffusion_steps <= 0:
         raise ValueError("num_diffusion_steps must be > 0")
 
+    noise_schedule = NoiseScheduleConfig()
     edm_sampler_kwargs = {}  # i.e. use defaults.
     if "Protenix" in wrapper_class_name:
         from sampleworks.models.protenix.wrapper import annotate_structure_for_protenix
@@ -765,12 +767,10 @@ def _run_guidance(args: GuidanceConfig, model_wrapper, device):
         from sampleworks.models.protpardelle.wrapper import annotate_structure_for_protpardelle
 
         structure = annotate_structure_for_protpardelle(structure)
+        noise_schedule = NoiseScheduleConfig(sigma_data=10.3, s_max=80, s_min=0.001)
         edm_sampler_kwargs = {
-            "s_max": 80,
-            "s_min": 0.001,
             "gamma_0": 0.08,
             "gamma_min": 0.00,
-            "sigma_data": 10.3,
             "step_scale": 1.0,
         }
     else:
@@ -782,6 +782,7 @@ def _run_guidance(args: GuidanceConfig, model_wrapper, device):
 
     # Create sampler with model-appropriate settings
     sampler_config = EDMSamplerConfig(
+        schedule=noise_schedule,
         device=str(device),
         augmentation=args.augmentation,
         align_to_input=args.align_to_input,
