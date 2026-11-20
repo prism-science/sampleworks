@@ -13,8 +13,8 @@ a bonded-pair length hinge plus a non-bonded steric-clash hinge. Both take the v
 part; the bond term then raises it to ``bond_power`` (default 2) while the clash term stays linear,
 matching the reference. The one deliberate divergence is how ``collision_loss`` reduces the
 ensemble axis; see the comment there. It is registered as the ``bond_geometry`` loss, so it combines
-with a data loss through a loss configuration file, and ``LatentOptimization`` adds it to its
-per-step loss directly.
+with a data loss through a loss configuration file. See for example:
+experiments/losses/density_with_bond_geometry.yaml
 """
 
 from __future__ import annotations
