@@ -42,6 +42,7 @@ from sampleworks.utils.imports import (
 from sampleworks.utils.structure_utils import SampleworksProcessedStructure
 from sampleworks.utils.torch_utils import try_gpu
 
+from tests import random_init
 from tests.mocks import MockFlowModelWrapper, MockStepScaler
 from tests.mocks.losses import MockGradientLossFunction
 
@@ -391,6 +392,22 @@ def get_slow_wrappers() -> list[StructurePredictor]:
 def get_fixture_name_for_wrapper(info: ComponentInfo) -> str:
     """Get the pytest fixture name for a wrapper info."""
     return f"{info.name}_wrapper"
+
+
+def get_random_init_fixture_name_for_wrapper(info: ComponentInfo) -> str:
+    """Get the name of the fixture that builds a wrapper's model with random weights.
+
+    Parameters
+    ----------
+    info : ComponentInfo
+        The wrapper's registry entry.
+
+    Returns
+    -------
+    str
+        Fixture name, e.g. ``"boltz2_random_wrapper"``.
+    """
+    return f"{info.name}_random_wrapper"
 
 
 def create_model_wrapper_from_type(
@@ -806,6 +823,89 @@ def protpardelle_wrapper(protpardelle_checkpoint_path: Path, device: torch.devic
         config_path=str(Path(config_path).expanduser().resolve()),
         checkpoint_path=protpardelle_checkpoint_path,
         device=device,
+    )
+
+
+# Random-weight wrappers: the released architectures without the checkpoints, for tests
+# of wrapper behavior that does not depend on trained weights (see tests/random_init.py).
+
+
+@pytest.fixture(scope="session")
+def boltz1_random_wrapper(device: torch.device):
+    if not BOLTZ_AVAILABLE:
+        pytest.skip("Boltz dependencies not installed in this environment")
+    cache = random_init.find_boltz_cache("boltz1", "ccd.pkl")
+    if cache is None:
+        pytest.skip("Boltz1 CCD data (ccd.pkl) not found; set BOLTZ_CACHE")
+    # The wrapper reads its data from the checkpoint's directory; the file is never opened.
+    return Boltz1Wrapper(
+        checkpoint_path=cache / "random_init.ckpt",
+        use_msa_manager=True,
+        device=device,
+        model=random_init.random_boltz1(),
+    )
+
+
+@pytest.fixture(scope="session")
+def boltz2_random_wrapper(device: torch.device):
+    if not BOLTZ_AVAILABLE:
+        pytest.skip("Boltz dependencies not installed in this environment")
+    cache = random_init.find_boltz_cache("boltz2", "mols")
+    if cache is None:
+        pytest.skip("Boltz2 molecule data (mols/) not found; set BOLTZ_CACHE")
+    # The wrapper reads its data from the checkpoint's directory; the file is never opened.
+    return Boltz2Wrapper(
+        checkpoint_path=cache / "random_init.ckpt",
+        use_msa_manager=True,
+        device=device,
+        model=random_init.random_boltz2(),
+    )
+
+
+@pytest.fixture(scope="session")
+def protenix_random_wrapper(tmp_path_factory: pytest.TempPathFactory, device: torch.device):
+    if not PROTENIX_AVAILABLE:
+        pytest.skip("Protenix dependencies not installed in this environment")
+    checkpoint = random_init.write_random_protenix_checkpoint(
+        tmp_path_factory.mktemp("protenix_random_init")
+    )
+    torch.manual_seed(0)
+    wrapper = ProtenixWrapper(
+        checkpoint_path=checkpoint, args_str="--load_strict false", device=device
+    )
+    random_init.fill_zero_initialized_parameters(wrapper.model)
+    return wrapper
+
+
+@pytest.fixture(scope="session")
+def rf3_random_wrapper(tmp_path_factory: pytest.TempPathFactory):  # will run on Fabric device
+    if not RF3_AVAILABLE:
+        pytest.skip("RF3 dependencies not installed in this environment")
+    checkpoint = random_init.write_random_rf3_checkpoint(tmp_path_factory.mktemp("rf3_random_init"))
+    torch.manual_seed(0)
+    wrapper = RF3Wrapper(checkpoint_path=checkpoint)
+    random_init.fill_zero_initialized_parameters(wrapper.model)
+    return wrapper
+
+
+@pytest.fixture(scope="session")
+def protpardelle_random_wrapper(device: torch.device):
+    if not PROTPARDELLE_AVAILABLE:
+        pytest.skip("Protpardelle dependencies not installed in this environment")
+    from protpardelle.configs import TrainingConfig
+    from protpardelle.core.models import Protpardelle
+    from protpardelle.utils import load_config
+
+    config_path = Path(str(files("sampleworks.data").joinpath("cc89_epoch415.yaml")))
+    torch.manual_seed(0)
+    model = Protpardelle(load_config(config_path, TrainingConfig), device=device)
+    random_init.fill_zero_initialized_parameters(model)
+    # With a pre-built model, the checkpoint path is only kept for record-keeping.
+    return ProtpardelleWrapper(
+        config_path=config_path,
+        checkpoint_path=config_path.with_suffix(".pth"),
+        device=device,
+        model=model.to(device).eval(),
     )
 
 

@@ -1,0 +1,116 @@
+# Boltz1 architecture: the `hyper_parameters` of https://huggingface.co/boltz-community/boltz-1/resolve/main/boltz1_conf.ckpt
+# restricted to Boltz1.__init__ arguments. Tests build a randomly initialized
+# model from these instead of loading the checkpoint (see tests/random_init.py).
+alpha_pae: 1
+atom_feature_dim: 389
+atom_s: 128
+atom_z: 16
+atoms_per_window_keys: 128
+atoms_per_window_queries: 32
+compile_confidence: false
+compile_pairformer: false
+compile_structure: false
+confidence_imitate_trunk: true
+confidence_model_args:
+  add_s_input_to_s: true
+  add_s_to_z_prod: true
+  add_z_input_to_z: true
+  confidence_args:
+    num_pae_bins: 64
+    num_pde_bins: 64
+    num_plddt_bins: 50
+  max_dist: 22
+  num_dist_bins: 64
+  use_s_diffusion: true
+confidence_prediction: true
+diffusion_loss_args:
+  add_smooth_lddt_loss: true
+  ligand_loss_weight: 10.0
+  nucleotide_loss_weight: 5.0
+diffusion_process_args:
+  P_mean: -1.2
+  P_std: 1.5
+  alignment_reverse_diff: true
+  coordinate_augmentation: true
+  gamma_0: 0.8
+  gamma_min: 1.0
+  noise_scale: 1.0
+  rho: 7
+  self_conditioning: true
+  self_conditioning_inference: false
+  self_conditioning_training: false
+  sigma_data: 16.0
+  sigma_max: 160.0
+  sigma_min: 0.0004
+  step_scale: 1.0
+  synchronize_sigmas: true
+  use_inference_model_cache: true
+ema: true
+ema_decay: 0.999
+embedder_args:
+  atom_encoder_depth: 3
+  atom_encoder_heads: 4
+ligand_rmsd_weight: 10.0
+max_dist: 22.0
+min_dist: 2.0
+msa_args:
+  activation_checkpointing: true
+  msa_blocks: 4
+  msa_dropout: 0.15
+  msa_s: 64
+  offload_to_cpu: false
+  pairwise_head_width: 32
+  pairwise_num_heads: 4
+  postpone_outer_product: true
+  z_dropout: 0.25
+no_atom_encoder: false
+no_msa: false
+nucleotide_rmsd_weight: 5.0
+num_bins: 64
+pairformer_args:
+  activation_checkpointing: true
+  dropout: 0.25
+  num_blocks: 48
+  num_heads: 16
+  offload_to_cpu: false
+  post_layer_norm: false
+predict_args: null
+score_model_args:
+  activation_checkpointing: true
+  atom_decoder_depth: 3
+  atom_decoder_heads: 4
+  atom_encoder_depth: 3
+  atom_encoder_heads: 4
+  conditioning_transition_layers: 2
+  dim_fourier: 256
+  offload_to_cpu: false
+  sigma_data: 16
+  token_transformer_depth: 24
+  token_transformer_heads: 16
+structure_prediction_training: false
+token_s: 384
+token_z: 128
+training_args:
+  adam_beta_1: 0.9
+  adam_beta_2: 0.95
+  adam_eps: 1.0e-08
+  base_lr: 0.0
+  confidence_loss_weight: 0.003
+  diffusion_loss_weight: 4.0
+  diffusion_multiplicity: 16
+  diffusion_samples: 1
+  distogram_loss_weight: 0.03
+  lr_decay_every_n_steps: 50000
+  lr_decay_factor: 0.95
+  lr_scheduler: af3
+  lr_start_decay_after_n_steps: 50000
+  lr_warmup_no_steps: 1000
+  max_lr: 0.0018
+  recycling_steps: 3
+  sampling_steps: 200
+  symmetry_correction: true
+validation_args:
+  diffusion_samples: 5
+  recycling_steps: 3
+  sampling_steps: 200
+  symmetry_correction: true

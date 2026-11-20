@@ -1,0 +1,166 @@
+# Boltz2 architecture: the `hyper_parameters` of https://huggingface.co/boltz-community/boltz-2/resolve/main/boltz2_conf.ckpt
+# restricted to Boltz2.__init__ arguments. Tests build a randomly initialized
+# model from these instead of loading the checkpoint (see tests/random_init.py).
+affinity_prediction: false
+aggregate_distogram: true
+alpha_pae: 1
+atom_feature_dim: 388
+atom_s: 128
+atom_z: 16
+atoms_per_window_keys: 128
+atoms_per_window_queries: 32
+bond_type_feature: true
+checkpoint_diffusion_conditioning: true
+compile_confidence: false
+compile_msa: false
+compile_pairformer: false
+compile_structure: false
+compile_templates: false
+conditioning_cutoff_max: 20.0
+conditioning_cutoff_min: 4.0
+confidence_model_args:
+  add_s_input_to_s: true
+  add_s_to_z_prod: true
+  add_z_input_to_z: true
+  confidence_args:
+    num_pae_bins: 64
+    num_pde_bins: 64
+    num_plddt_bins: 50
+    relative_confidence: none
+    use_separate_heads: true
+  max_dist: 22
+  no_trunk_feats: false
+  num_dist_bins: 64
+  pairformer_args:
+    dropout: 0.25
+    num_blocks: 8
+    num_heads: 16
+  use_gaussian: false
+  use_miniformer: false
+  use_s_diffusion: false
+confidence_prediction: true
+cyclic_pos_enc: true
+diffusion_loss_args:
+  add_bond_loss: false
+  add_smooth_lddt_loss: true
+  filter_by_plddt: 0.0
+  ligand_loss_weight: 10.0
+  nucleotide_loss_weight: 5.0
+diffusion_process_args:
+  P_mean: -1.2
+  P_std: 1.5
+  alignment_reverse_diff: true
+  coordinate_augmentation: true
+  gamma_0: 0.8
+  gamma_min: 1.0
+  mse_rotational_alignment: true
+  noise_scale: 1.0
+  rho: 7
+  sigma_data: 16.0
+  sigma_max: 160.0
+  sigma_min: 0.0004
+  step_scale: 1.0
+  step_scale_random:
+  - 1.0
+  - 1.1
+  - 1.2
+  - 1.3
+  - 1.4
+  - 1.5
+  synchronize_sigmas: false
+ema: true
+ema_decay: 0.999
+embedder_args:
+  add_cyclic_flag: true
+  add_method_conditioning: true
+  add_modified_flag: true
+  add_mol_type_feat: true
+  atom_encoder_depth: 3
+  atom_encoder_heads: 4
+exclude_ions_from_lddt: true
+fix_sym_check: true
+log_loss_every_steps: 50
+max_dist: 22.0
+min_dist: 2.0
+msa_args:
+  activation_checkpointing: true
+  miniformer_blocks: false
+  msa_blocks: 4
+  msa_dropout: 0.15
+  msa_s: 64
+  pairwise_head_width: 32
+  pairwise_num_heads: 4
+  use_paired_feature: true
+  use_trifast: true
+  z_dropout: 0.25
+num_bins: 64
+num_val_datasets: 4
+pairformer_args:
+  activation_checkpointing: true
+  dropout: 0.25
+  num_blocks: 64
+  num_heads: 16
+  post_layer_norm: false
+  use_trifast: true
+predict_args: null
+predict_bfactor: true
+score_model_args:
+  activation_checkpointing: true
+  atom_decoder_depth: 3
+  atom_decoder_heads: 4
+  atom_encoder_depth: 3
+  atom_encoder_heads: 4
+  conditioning_transition_layers: 2
+  dim_fourier: 256
+  sigma_data: 16
+  token_transformer_depth: 24
+  token_transformer_heads: 16
+  transformer_post_ln: false
+skip_run_structure: false
+structure_prediction_training: false
+template_args:
+  activation_checkpointing: true
+  template_blocks: 2
+  template_dim: 64
+  use_trifast: true
+token_level_confidence: true
+token_s: 384
+token_z: 128
+training_args:
+  adam_beta_1: 0.9
+  adam_beta_2: 0.95
+  adam_eps: 1.0e-08
+  affinity_loss_weight: 0.003
+  base_lr: 0.0
+  bfactor_loss_weight: 0.001
+  confidence_loss_weight: 0.3
+  diffusion_loss_weight: 4.0
+  diffusion_multiplicity: 32
+  diffusion_samples: 1
+  distogram_loss_weight: 0.03
+  lr_decay_every_n_steps: 50000
+  lr_decay_factor: 0.95
+  lr_scheduler: af3
+  lr_start_decay_after_n_steps: 50000
+  lr_warmup_no_steps: 1000
+  max_lr: 0.001
+  recycling_steps: 3
+  sampling_steps: 50
+  sampling_steps_random:
+  - 20
+  - 50
+  - 200
+  symmetry_correction: true
+  weight_decay: 0.003
+  weight_decay_exclude: true
+use_atom_backbone_feat: false
+use_no_atom_char: false
+use_residue_feats_atoms: false
+use_templates: true
+use_templates_v2: true
+validation_args:
+  diffusion_samples: 5
+  recycling_steps: 3
+  run_confidence_sequentially: true
+  sampling_steps: 200
+  symmetry_correction: true
