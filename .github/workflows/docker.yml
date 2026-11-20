@@ -62,9 +62,13 @@ jobs:
       # space is not enough.
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift || true
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /opt/hostedtoolcache \
+            /usr/local/share/boost /usr/share/swift /usr/local/share/powershell /usr/local/share/chromium \
+            /usr/lib/jvm /opt/microsoft /opt/google /opt/az /usr/share/az_* /usr/local/julia* /usr/share/miniconda || true
+          sudo apt-get clean || true
           docker system prune -af || true
           df -h /
+          free -h
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
@@ -152,6 +156,12 @@ jobs:
             CHECKPOINTS_IMAGE=${{ steps.checkpoint-ref.outputs.image }}
           provenance: false
 
+      - name: Disk and memory after build
+        if: always()
+        run: |
+          df -h /
+          free -h
+
       - name: Public image digest
         run: echo "Public image pushed with digest ${{ steps.public-build.outputs.digest }}"
 
@@ -178,9 +188,13 @@ jobs:
       # space is not enough.
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift || true
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /opt/hostedtoolcache \
+            /usr/local/share/boost /usr/share/swift /usr/local/share/powershell /usr/local/share/chromium \
+            /usr/lib/jvm /opt/microsoft /opt/google /opt/az /usr/share/az_* /usr/local/julia* /usr/share/miniconda || true
+          sudo apt-get clean || true
           docker system prune -af || true
           df -h /
+          free -h
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
@@ -262,6 +276,12 @@ jobs:
           build-args: |
             PIXI_WITH_CHECKPOINTS_IMAGE=${{ env.ASTERA_REGISTRY }}/${{ env.PUBLIC_IMAGE_NAME }}@${{ needs.public.outputs.image-digest }}
           provenance: false
+
+      - name: Disk and memory after build
+        if: always()
+        run: |
+          df -h /
+          free -h
 
       - name: Astera image digest
         env:
