@@ -378,7 +378,7 @@ synced branch changes `pyproject.toml` or `pixi.lock`, `run_experiments` stops
 with a clear error instead of mutating the baked environment. For dependency
 debugging only, opt into an on-pod pixi update with
 `RUNTIME_PIXI=1 run_experiments ...`; reproducible scientist runs should use a
-rebuilt `pixi-with-checkpoints:sampleworks` image instead.
+rebuilt image instead (a new `sampleworks` pin in the actl catalog).
 
 ## Running preset analyses on ACTL (`run_analysis`)
 
@@ -423,17 +423,15 @@ Sampleworks now has a two-layer image split:
 
 Image names:
 
-| Purpose                    | Image                                                                          |
-| -------------------------- | ------------------------------------------------------------------------------ |
-| Public Sampleworks runtime | `diffuseproject/pixi-with-checkpoints`                                         |
-| Astera/ACTL runtime        | `sampleworks` alias; run `actl pod images` for the resolved, digest-pinned ref |
+| Purpose                    | Image (Harbor `diffuse` project)                                                   |
+| -------------------------- | ---------------------------------------------------------------------------------- |
+| Model checkpoints          | `diffuse/sampleworks-checkpoints`, built by `checkpoints.yml`                      |
+| Sampleworks runtime        | `diffuse/pixi-with-checkpoints-public`                                             |
+| Astera/ACTL runtime        | `sampleworks` alias; run `actl pod images` for the resolved, digest-pinned ref     |
 
-CI publishes these tags:
-
-| Image         | Tags                                                                         |
-| ------------- | ---------------------------------------------------------------------------- |
-| Public        | `latest` on `main`, `sha-<short-sha>`, release semver tags                   |
-| Astera/Harbor | `latest` and `sampleworks` on `main`, `sha-<short-sha>`, release semver tags |
+Tags in the `diffuse` project are immutable, so CI publishes no moving tags:
+both runtime images get `sha-<short-sha>` on `main` and the semver tags on a
+release, and the checkpoints image gets a tag unique to its run.
 
 The Astera image is always built from the exact public `sha-<short-sha>` image
 produced earlier in the same workflow run, then adds EXT, Dynamic PDB CLI, and
@@ -441,13 +439,13 @@ small workspace tools on top.
 
 CI configuration variables:
 
-| Variable                                  | Purpose                                                                                                                                              |
-| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SAMPLEWORKS_PUBLIC_REGISTRY`             | Public registry host; defaults to `docker.io`                                                                                                        |
-| `SAMPLEWORKS_PUBLIC_IMAGE`                | Public image path; defaults to `diffuseproject/pixi-with-checkpoints`                                                                                |
-| `SAMPLEWORKS_CHECKPOINTS_DOCKERHUB_IMAGE` | Optional public Docker Hub checkpoint mirror destination tag; defaults to `docker.io/diffuseproject/sampleworks-checkpoints:latest`                  |
-| `SAMPLEWORKS_CUDA_BASE_IMAGE`             | Optional digest-pinned CUDA base override                                                                                                            |
-| `SAMPLEWORKS_CHECKPOINTS_SOURCE_PATH`     | **Required.** Digest-pinned path of the private checkpoint image CI mirrors to Docker Hub, without the registry host (e.g. `library/foo@sha256:...`) |
+| Variable                         | Purpose                                                                                                                                  |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `SAMPLEWORKS_CHECKPOINTS_IMAGE`  | **Required.** Digest-pinned Harbor path of the checkpoints image, without the registry host, as printed in the `checkpoints.yml` summary |
+| `SAMPLEWORKS_CUDA_BASE_IMAGE`    | Optional digest-pinned CUDA base override                                                                                                |
+
+The checkpoints image is rebuilt from upstream sources: `docker/checkpoint-image/manifest.tsv`
+lists every file's URL and sha256, and the build fails on any mismatch.
 
 One CI secret, `ASTERA_REGISTRY`, holds the internal registry host. It is a
 secret rather than a variable because this repo is public, which makes its
@@ -461,7 +459,7 @@ Build the public image locally:
 ```bash
 docker build --platform linux/amd64 \
   --build-arg CHECKPOINTS_IMAGE=<checkpoint-image-ref> \
-  -t diffuseproject/pixi-with-checkpoints:local \
+  -t pixi-with-checkpoints:local \
   .
 ```
 
@@ -472,16 +470,15 @@ repository secret):
 ```bash
 docker build --platform linux/amd64 \
   -f Dockerfile.astera \
-  --build-arg PIXI_WITH_CHECKPOINTS_IMAGE=diffuseproject/pixi-with-checkpoints:local \
-  -t "${ASTERA_REGISTRY}/library/pixi-with-checkpoints:local" \
+  --build-arg PIXI_WITH_CHECKPOINTS_IMAGE=pixi-with-checkpoints:local \
+  -t "${ASTERA_REGISTRY}/diffuse/pixi-with-checkpoints:local" \
   .
 ```
 
-For local public builds, pass `CHECKPOINTS_IMAGE` as a public, digest-pinned
-checkpoint image ref. In CI, the Docker workflow first mirrors the private Harbor
-checkpoint source to Docker Hub, verifies the digest, and passes the resulting
-digest-pinned Docker Hub ref to the public build so that build never needs Harbor
-credentials.
+For local public builds, pass `CHECKPOINTS_IMAGE` as a digest-pinned checkpoints
+image ref, or build one first with
+`docker build --platform linux/amd64 -t sampleworks-checkpoints:local docker/checkpoint-image`.
+In CI, both runtime builds pull from and push to Harbor over Astera's tailnet.
 
 ## Development
 
