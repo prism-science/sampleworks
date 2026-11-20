@@ -1,5 +1,6 @@
 import re
 import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast, Literal, overload
@@ -9,7 +10,7 @@ import numpy as np
 from atomworks import parse
 from atomworks.io.transforms.atom_array import ensure_atom_array_stack
 from atomworks.io.utils.ccd import ChainType, UNKNOWN_AA
-from atomworks.io.utils.io_utils import load_any
+from atomworks.io.utils.io_utils import infer_pdb_file_type, load_any
 from atomworks.io.utils.sequence import get_1_from_3_letter_code, get_3_from_1_letter_code
 from biotite.structure import AtomArray, AtomArrayStack, filter_amino_acids, filter_polymer, stack
 from biotite.structure.io.pdbx import CIFFile, set_structure
@@ -145,7 +146,7 @@ def get_mask_from_old_selection_string(
     return mask
 
 
-def parse_structure(path: str | Path) -> dict[str, Any]:
+def parse_structure(path: str | Path, extra_fields: list[str] | None = None) -> dict[str, Any]:
     """Parse a structure with the options used by Sampleworks production kwargs in
     guidance.
 
@@ -153,6 +154,9 @@ def parse_structure(path: str | Path) -> dict[str, Any]:
     ----------
     path : str | Path
         Path to a PDB or mmCIF structure file.
+    extra_fields : list[str] | None
+        ``atom_site`` columns to load as annotations on top of atomworks' defaults
+        (which already include ``auth_seq_id``), e.g. ``["auth_asym_id"]``.
 
     Returns
     -------
@@ -165,6 +169,84 @@ def parse_structure(path: str | Path) -> dict[str, Any]:
         hydrogen_policy="remove",
         add_missing_atoms=False,
         ccd_mirror_path=None,
+        extra_fields=extra_fields,
+    )
+
+
+def use_author_numbering(atom_array: AtomArray | AtomArrayStack) -> AtomArray | AtomArrayStack:
+    """Relabel ``res_id`` and ``chain_id`` from the author columns of a loaded mmCIF.
+
+    Atomworks loads mmCIF with ``use_author_fields=False``, so ``res_id`` and ``chain_id`` are
+    ``label_seq_id`` and ``label_asym_id``. Evaluation selections and atom pairing use the
+    author numbering, ``auth_seq_id`` and ``auth_asym_id``, which a reference and an output
+    share even when their label columns differ, so the evaluators call this right after
+    loading.
+
+    Side effect: ``res_id`` and ``chain_id`` are overwritten in place wherever the
+    ``auth_seq_id`` and ``auth_asym_id`` annotations exist (load with them in ``extra_fields``).
+    An array without those annotations is left as it was.
+
+    Parameters
+    ----------
+    atom_array : AtomArray | AtomArrayStack
+        Loaded structure. A stack shares its per-atom annotations across models.
+
+    Returns
+    -------
+    AtomArray | AtomArrayStack
+        The same object, relabeled.
+
+    Raises
+    ------
+    ValueError
+        If any atom's ``auth_seq_id`` is not an integer. Keeping the label number for such
+        atoms would mix two numberings in one array.
+    """
+    categories = atom_array.get_annotation_categories()
+    if "auth_seq_id" in categories:
+        auth_seq_id = np.asarray(atom_array.auth_seq_id).astype(str)
+        is_integer = np.char.isdigit(np.char.lstrip(auth_seq_id, "-"))
+        if not is_integer.all():
+            non_integer_values = sorted(set(auth_seq_id[~is_integer]))
+            raise ValueError(
+                f"{np.count_nonzero(~is_integer)} atoms have a non-integer auth_seq_id "
+                f"({non_integer_values[:5]}); author numbering needs an integer on every atom."
+            )
+        atom_array.res_id = auth_seq_id.astype(int)
+    if "auth_asym_id" in categories:
+        atom_array.chain_id = np.asarray(atom_array.auth_asym_id).astype(str)
+    return atom_array
+
+
+def load_with_author_numbering(
+    path: Path | str, extra_fields: Sequence[str] = ("occupancy", "b_factor")
+) -> AtomArray | AtomArrayStack:
+    """Load every altloc of a structure file, numbered by its author columns.
+
+    Selection strings are written in author numbering, so every loader whose result a
+    selection is applied to, or generated from, loads through here.
+
+    Parameters
+    ----------
+    path : Path | str
+        Path to the structure file (PDB, mmCIF, etc.)
+    extra_fields : Sequence[str]
+        Annotations to load besides the author columns. Altlocs load properly only with
+        ``occupancy`` among them.
+
+    Returns
+    -------
+    AtomArray | AtomArrayStack
+        Loaded structure with ``res_id`` and ``chain_id`` on the author numbering
+        (``use_author_numbering``).
+    """
+    structure_path = Path(path)
+    requested_fields = list(extra_fields)
+    if infer_pdb_file_type(structure_path) in ("cif", "bcif"):
+        # A PDB file has only the author numbering, and biotite's PDB reader rejects the fields.
+        requested_fields += ["auth_seq_id", "auth_asym_id"]
+    return use_author_numbering(
+        load_any(structure_path, altloc="all", extra_fields=requested_fields)
     )
 
 
@@ -181,10 +263,10 @@ def load_structure_with_altlocs(path: Path, model: int = 0) -> AtomArray:
     Returns
     -------
     AtomArray
-        Loaded structure with occupancy and B-factor data
+        Loaded structure with occupancy and B-factor data, on the author numbering
+        (``load_with_author_numbering``).
     """
-    # Currently, we need to specify extra_fields=["occupancy"] to load altlocs properly
-    atom_array = load_any(path, altloc="all", extra_fields=["occupancy", "b_factor"])
+    atom_array = load_with_author_numbering(path)
     if isinstance(atom_array, AtomArrayStack):
         atom_array = cast(AtomArray, atom_array[model])
     return atom_array
@@ -963,14 +1045,15 @@ def load_conformer_pairs(
     Returns
     -------
     atom_array : AtomArray
-        The structure (model 0 of an ensemble) for resolving selections and altloc masks.
+        The structure (model 0 of an ensemble) for resolving selections and altloc masks, on
+        the author numbering (``load_with_author_numbering``).
     conformer_ids : list[str]
         Altloc IDs, or ``model_<i>`` labels for an ensemble.
     pair_arrays : dict[tuple[str, str], tuple[AtomArrayStack, AtomArrayStack]]
         ``(id_i, id_j) -> (conformer_i, conformer_j)`` for ``i < j``, each a one-frame stack
         with matched atoms. Empty when fewer than two conformers exist.
     """
-    structure = load_any(path, altloc="all", extra_fields=["occupancy", "b_factor"])
+    structure = load_with_author_numbering(path)
     if isinstance(structure, AtomArrayStack) and structure.stack_depth() > 1:
         conformer_ids = [f"model_{i}" for i in range(structure.stack_depth())]
         pair_arrays = {

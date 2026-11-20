@@ -8,7 +8,6 @@ from typing import Any, cast, overload
 import numpy as np
 import torch
 from atomworks.io.transforms.atom_array import ensure_atom_array_stack
-from atomworks.io.utils.io_utils import load_any
 from biotite.structure import AtomArray, AtomArrayStack, from_template
 from loguru import logger
 
@@ -20,6 +19,7 @@ from sampleworks.utils.atom_array_utils import (
     _closest_canonical_amino_acid,
     apply_selection,
     BLANK_ALTLOC_IDS,
+    load_with_author_numbering,
 )
 from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.framework_utils import match_batch
@@ -538,7 +538,7 @@ def get_reference_atomarraystack(
         return None, None
 
     # Same loading as load_structure_with_altlocs, which keeps only the first model.
-    ref_struct = load_any(ref_path, altloc="all", extra_fields=["occupancy", "b_factor"])
+    ref_struct = load_with_author_numbering(ref_path)
     # A modified residue (e.g. CSO) recorded as an altloc at the same position as its canonical
     # form (e.g. CYS) makes map_altlocs_to_stack fail: the conformers disagree on res_name/hetero
     # so biotite.stack() rejects them. Canonicalize these residues to get map_altlocs_to_stack to

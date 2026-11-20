@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from .script_loader import load_script
+from tests.script_loader import load_script
 
 
 _SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "patch_output_cif_files.py"

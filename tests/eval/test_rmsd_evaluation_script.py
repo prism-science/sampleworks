@@ -5,12 +5,13 @@ Integration tests for ``scripts/eval/rmsd_evaluation_script.py``.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
+
+from tests.script_loader import load_script
 
 
 _SCRIPT_PATH = (
@@ -21,11 +22,7 @@ _SCRIPT_PATH = (
 @pytest.fixture
 def rmsd_script():
     """Import the script module by path so tests don't require it on ``sys.path``."""
-    spec = importlib.util.spec_from_file_location("rmsd_evaluation_script", _SCRIPT_PATH)
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    return load_script(_SCRIPT_PATH)
 
 
 def _make_args(fx, occupancies: list[float] | None = None) -> argparse.Namespace:
