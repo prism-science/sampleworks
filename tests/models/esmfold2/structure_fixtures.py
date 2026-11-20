@@ -1,20 +1,47 @@
 """Atomworks structure fixtures for ESMFold2 tests."""
 
+import copy
 from pathlib import Path
 from typing import Any
 
 import pytest
 from atomworks import parse
+from biotite.structure import get_residue_starts
 
 
 @pytest.fixture
 def single_chain_structure(resources_dir: Path) -> dict[str, Any]:
-    """Parse the single-chain 6B8X structure with production parser options."""
+    """Parse 6B8X without atom completion or formal-charge correction."""
     return parse(
         filename=resources_dir / "6b8x" / "6b8x_final.pdb",
         hydrogen_policy="remove",
         add_missing_atoms=False,
+        fix_formal_charges=False,
     )
+
+
+@pytest.fixture
+def short_structure(single_chain_structure: dict[str, Any]) -> dict[str, Any]:
+    """Keep the first 18 residues of the experimental structure and its sequence."""
+    structure = single_chain_structure
+    atoms = structure["asym_unit"][0]
+    stop = get_residue_starts(atoms, add_exclusive_stop=True)[18]
+    structure["asym_unit"] = atoms[:stop]
+    info = structure["chain_info"]["A"]
+    info["processed_entity_canonical_sequence"] = info["processed_entity_canonical_sequence"][:18]
+    return structure
+
+
+@pytest.fixture
+def other_short_structure(short_structure: dict[str, Any]) -> dict[str, Any]:
+    """Copy the last ten residues of short_structure into an independent input."""
+    structure = copy.deepcopy(short_structure)
+    atoms = structure["asym_unit"]
+    start = get_residue_starts(atoms)[-10]
+    structure["asym_unit"] = atoms[start:]
+    info = structure["chain_info"]["A"]
+    info["processed_entity_canonical_sequence"] = info["processed_entity_canonical_sequence"][-10:]
+    return structure
 
 
 @pytest.fixture

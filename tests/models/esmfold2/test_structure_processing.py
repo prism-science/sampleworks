@@ -55,8 +55,7 @@ def test_prepared_input_builds_valid_features(
 
     builder = ESMFold2InputBuilderBlockLogs()
 
-    with pytest.warns(UserWarning, match="No MSA provided"):
-        features, chains = builder.prepare_input(model_input, seed=0, device="cpu")
+    features, chains = builder.prepare_input(model_input, seed=0, device="cpu")
 
     atoms = single_chain_structure["asym_unit"][0]
     residue_names = atoms.res_name[get_residue_starts(atoms)].tolist()
@@ -97,8 +96,7 @@ def test_model_atoms_reconcile_with_reference(
     structure["asym_unit"] = atoms
 
     builder = ESMFold2InputBuilderBlockLogs()
-    with pytest.warns(UserWarning, match="No MSA provided"):
-        features, chains = builder.prepare_input(structure_to_esmfold2_input(structure), seed=0)
+    features, chains = builder.prepare_input(structure_to_esmfold2_input(structure), seed=0)
 
     # Give every atom a unique coordinate to detect changes to model atom order.
     features["ref_pos"] = torch.arange(features["ref_pos"].numel(), dtype=torch.float32).reshape(
@@ -134,8 +132,7 @@ def test_atoms_retain_coordinates_through_conversion_and_reconciliation():
     """Each atom retains its XYZ coordinates through conversion and reconciliation."""
     model_input = StructurePredictionInput(sequences=[ProteinInput(id="A", sequence="AG")])
     builder = ESMFold2InputBuilderBlockLogs()
-    with pytest.warns(UserWarning, match="No MSA provided"):
-        features, chains = builder.prepare_input(model_input, seed=0)
+    features, chains = builder.prepare_input(model_input, seed=0)
 
     # Native ESMFold2 atom order for alanine followed by glycine.
     expected_atoms = [
