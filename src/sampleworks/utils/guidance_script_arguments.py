@@ -782,10 +782,11 @@ def add_generic_args(parser: argparse.ArgumentParser | GuidanceConfig):
         "--sequence",
         type=str,
         default=None,
-        help="Reference sequence, e.g. the deposited PDB sequence (amino-acid string or path "
-        "to a single-record .fasta/.fa/.faa/.fas file). The structure predictor receives this "
-        "sequence, so unmodeled regions are generated. Only single-protein-chain structures are "
-        "supported currently.",
+        help="Reference sequence, e.g. the deposited PDB sequence: an amino-acid string, or a "
+        "path to a .fasta/.fa/.faa/.fas file. For several protein chains give one sequence per "
+        "chain, in the structure's chain order: SEQ:SEQ, or one FASTA record per chain. Ligands "
+        "keep their definitions from the structure. The structure predictor receives this "
+        "sequence, so unmodeled regions are generated.",
     )
     parser.add_argument("--output-dir", type=str, default="output", help="Output directory")
     parser.add_argument(

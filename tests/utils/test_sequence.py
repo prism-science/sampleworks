@@ -106,12 +106,6 @@ def test_empty_sequence_preserves_structure_identity(structure_6b8x: dict):
     assert apply_sequence_override(structure_6b8x, "   ") is structure_6b8x
 
 
-def test_multichain_sequence_override_raises(structure_1vme: dict):
-    """Multi-chain structures should reject a single-string override."""
-    with pytest.raises(ValueError, match="single-protein-chain"):
-        apply_sequence_override(structure_1vme, "ACDE")
-
-
 def test_longer_override_accepted_with_seq_idx(structure_6b8x: dict):
     """A longer override should be accepted and annotate atoms with seq_idx.
 
@@ -572,3 +566,95 @@ def test_ligand_in_protein_chain_raises_malformed(structure_1vme_density_input: 
         apply_sequence_override(structure_1vme_density_input, sequence.replace("X", ""))
 
     assert "FEO" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Multi-chain overrides: one ":"-separated sequence per protein chain
+# ---------------------------------------------------------------------------
+
+
+def _two_chain_structure(chain_a: str, chain_b: str) -> dict:
+    """One CA atom per residue on protein chains A and B, numbered from 1."""
+    from atomworks.enums import ChainType
+    from biotite.sequence import ProteinSequence
+    from biotite.structure import AtomArray
+
+    one_letter = chain_a + chain_b
+    atoms = AtomArray(len(one_letter))
+    atoms.chain_id = np.array(["A"] * len(chain_a) + ["B"] * len(chain_b))
+    atoms.res_id = np.array([*range(1, len(chain_a) + 1), *range(1, len(chain_b) + 1)])
+    atoms.res_name = np.array([ProteinSequence.convert_letter_1to3(c) for c in one_letter])
+    atoms.atom_name[:] = "CA"
+    return {
+        "asym_unit": atoms,
+        "chain_info": {
+            chain_id: {
+                "chain_type": ChainType.POLYPEPTIDE_L,
+                "processed_entity_canonical_sequence": sequence,
+            }
+            for chain_id, sequence in (("A", chain_a), ("B", chain_b))
+        },
+    }
+
+
+def test_multichain_override_assigns_sequences_in_chain_order():
+    """The n-th ``:``-separated sequence overrides the n-th protein chain."""
+    structure = _two_chain_structure("MKL", "WYF")
+
+    updated = apply_sequence_override(structure, "MKLG:WYFHH")
+
+    chain_info = updated["chain_info"]
+    assert chain_info["A"]["processed_entity_canonical_sequence"] == "MKLG"
+    assert chain_info["B"]["processed_entity_canonical_sequence"] == "WYFHH"
+    np.testing.assert_array_equal(updated["asym_unit"].seq_idx, [0, 1, 2, 0, 1, 2])
+
+
+def test_multichain_override_in_wrong_chain_order_raises():
+    """Sequences that do not match their chain's residues fail to align."""
+    with pytest.raises(ValueError, match="could not be aligned"):
+        apply_sequence_override(_two_chain_structure("MKL", "WYF"), "WYFG:MKLG")
+
+
+@pytest.mark.parametrize("sequence", ["ACDE", "ACDE:ACDE:ACDE"])
+def test_multichain_override_with_wrong_chain_count_raises(structure_1vme: dict, sequence: str):
+    """The number of sequences must equal the number of protein chains."""
+    with pytest.raises(ValueError, match="2 protein chains"):
+        apply_sequence_override(structure_1vme, sequence)
+
+
+def test_multichain_override_with_ligands(structure_1vme: dict):
+    """Both 1VME protein chains align to their overrides; ligand chains are left alone."""
+    from atomworks.enums import ChainType
+    from atomworks.io.utils.sequence import get_1_from_3_letter_code
+
+    chain_info = structure_1vme["chain_info"]
+    protein_chain_ids = [cid for cid, info in chain_info.items() if info["chain_type"].is_protein()]
+    overrides = {
+        "A": chain_info["A"]["processed_entity_canonical_sequence"] + "GGG",
+        "B": chain_info["B"]["processed_entity_canonical_sequence"] + "AAAA",
+    }
+    assert protein_chain_ids == ["A", "B"]
+
+    updated = apply_sequence_override(structure_1vme, f"{overrides['A']}:{overrides['B']}")
+
+    arr = updated["asym_unit"]
+    is_protein = np.isin(arr.chain_id, protein_chain_ids)
+    assert np.all(arr.seq_idx[~is_protein] == -1)
+    for chain_id, override in overrides.items():
+        assert updated["chain_info"][chain_id]["processed_entity_canonical_sequence"] == override
+        chain = arr[..., arr.chain_id == chain_id]
+        observed = [
+            get_1_from_3_letter_code(n, ChainType.POLYPEPTIDE_L, use_closest_canonical=True)
+            for n in chain.res_name
+        ]
+        assert [override[i] for i in chain.seq_idx] == observed
+    for chain_id, info in chain_info.items():
+        if not info["chain_type"].is_protein():
+            assert updated["chain_info"][chain_id] == info
+
+
+@pytest.mark.parametrize("sequence", ["ACD::EFG", "ACD:", ":ACD"])
+def test_override_with_empty_chain_sequence_raises(sequence: str):
+    """An empty chain between separators is rejected rather than silently skipped."""
+    with pytest.raises(ValueError, match="empty"):
+        apply_sequence_override(_two_chain_structure("ACD", "EFG"), sequence)
