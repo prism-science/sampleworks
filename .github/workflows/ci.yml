@@ -71,7 +71,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        environment: [boltz-dev, protenix-dev, rf3-dev, protpardelle-dev]
+        environment: [boltz-dev, protenix-dev, rf3-dev, protpardelle-dev, bioemu2-dev]
 
     name: typecheck (${{ matrix.environment }})
 
@@ -96,7 +96,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        environment: [boltz-dev, protenix-dev, rf3-dev, protpardelle-dev]
+        environment: [boltz-dev, protenix-dev, rf3-dev, protpardelle-dev, bioemu2-dev]
 
     name: tests (${{ matrix.environment }})
 

@@ -6,7 +6,7 @@
 #   docker run pixi-with-checkpoints -e boltz run_grid_search.py --proteins /data/proteins.csv ...
 #   docker run pixi-with-checkpoints bash  # interactive shell
 #
-# Available pixi environments: boltz, protenix, rf3, analysis
+# Available pixi environments: boltz, protenix, rf3, bioemu2, analysis
 #
 # Examples:
 #   # Run grid search with RF3
@@ -36,7 +36,7 @@ IMPORTANT:
     Always use --shm-size=16g (or larger) to avoid shared memory errors with DataLoaders.
 
 OPTIONS:
-    -e, --env <env>     Pixi environment to use (boltz, protenix, rf3, analysis)
+    -e, --env <env>     Pixi environment to use (boltz, protenix, rf3, bioemu2, analysis)
     -h, --help          Show this help message
     bash                Start an interactive shell
 
@@ -44,6 +44,7 @@ ENVIRONMENTS:
     boltz       For boltz1 and boltz2 models
     protenix    For protenix model
     rf3         For RF3 model
+    bioemu2     For BioEmu2 model (checkpoint not baked in; pass --model-checkpoint)
     analysis    For scripts/eval analysis jobs
 
 EXAMPLES:
@@ -114,7 +115,7 @@ GRID SEARCH ARGUMENTS (run_grid_search.py):
       --proteins FILE             CSV file with columns: structure,density,resolution,name
 
     Model selection:
-      --models MODEL              Model to use (boltz1, boltz2, protenix, rf3)
+      --models MODEL              Model to use (boltz1, boltz2, protenix, rf3, bioemu2)
                                   Note: Only one model per run currently supported
 
     Guidance configuration:
@@ -221,7 +222,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         -e|--env)
             if [ -z "$2" ] || [[ "$2" == -* ]]; then
-                echo "Error: -e/--env requires an environment name (boltz, protenix, rf3, analysis)"
+                echo "Error: -e/--env requires an environment name (boltz, protenix, rf3, bioemu2, analysis)"
                 exit 1
             fi
             ENV="$2"
@@ -241,7 +242,7 @@ done
 
 # Validate environment
 if [[ -z "$ENV" ]]; then
-    echo "Error: Environment not specified. Use -e <env> where env is boltz, protenix, rf3, or analysis"
+    echo "Error: Environment not specified. Use -e <env> where env is boltz, protenix, rf3, bioemu2, or analysis"
     echo ""
     echo "Usage: docker run pixi-with-checkpoints -e <env> <script> [args...]"
     echo ""
@@ -253,10 +254,10 @@ if [[ -z "$ENV" ]]; then
 fi
 
 case $ENV in
-    boltz|protenix|rf3|analysis)
+    boltz|protenix|rf3|bioemu2|analysis)
         ;;
     *)
-        echo "Error: Invalid environment '$ENV'. Must be one of: boltz, protenix, rf3, analysis"
+        echo "Error: Invalid environment '$ENV'. Must be one of: boltz, protenix, rf3, bioemu2, analysis"
         exit 1
         ;;
 esac

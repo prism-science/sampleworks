@@ -1,0 +1,38 @@
+# Copied from microsoft/bioemu2 tests/assets/tiny_config.yaml (MIT License, commit 06be369).
+# A tiny random-weight BioMoaCModel that runs on CPU (trimul_variant: full).
+_target_: bioemu2.biomoa.models.score_model.BioMoaCModel
+atom_s: 20
+atom_z: 4
+atom_attention_heads: 4
+atoms_per_window_queries: 32
+atoms_per_window_keys: 32
+token_s: 12
+token_z: 11
+s_input_dim: 83
+token_attention_heads: 3
+a_s: 21
+a_z: 11
+diffusion_transformer_depth: 1
+dim_fourier: 7
+conditioning_transition_layers: 1
+relpos_cfg: {}
+use_lns: true
+num_bins_distogram: 5
+max_atoms: null
+compile_score: false
+use_dynamics_conditioning: true
+sequence_embedder:
+  _target_: bioemu2.biomoa.modules.pairmixer.PairMixerSequenceEmbedder
+  token_s: 12
+  token_z: 11
+  s_input_dim: 83
+  msa_s: 5
+  msa_blocks: 1
+  num_blocks: 1
+  trimul_variant: full
+  opm_variant: vanilla
+edm_schedule:
+  _target_: bioemu2.biomoa.models.edm_schedule.EDMSchedule
+  sigma_min: 0.01
+  sigma_max: 0.1
+  sigma_data: 16.0

@@ -12,6 +12,7 @@ BOLTZ_AVAILABLE = False
 PROTENIX_AVAILABLE = False
 RF3_AVAILABLE = False
 PROTPARDELLE_AVAILABLE = False
+BIOEMU2_AVAILABLE = False
 
 try:
     from sampleworks.models.boltz.wrapper import Boltz1Wrapper, Boltz2Wrapper
@@ -51,6 +52,14 @@ try:
     PROTPARDELLE_AVAILABLE = True
     del ProtpardelleWrapper
 except (ImportError, ModuleNotFoundError, OSError):
+    pass
+
+try:
+    from sampleworks.models.bioemu2.wrapper import BioEmu2Wrapper
+
+    BIOEMU2_AVAILABLE = True
+    del BioEmu2Wrapper
+except (ImportError, ModuleNotFoundError):
     pass
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -182,22 +191,29 @@ _RF3 = ModelRequirement(RF3_AVAILABLE, _missing_wrapper_message("RF3", "rf3"))
 _PROTPARDELLE = ModelRequirement(
     PROTPARDELLE_AVAILABLE, _missing_wrapper_message("Protpardelle", "protpardelle")
 )
+_BIOEMU2 = ModelRequirement(BIOEMU2_AVAILABLE, _missing_wrapper_message("BioEmu2", "bioemu2"))
 _ANY_MODEL = ModelRequirement(
-    BOLTZ_AVAILABLE or PROTENIX_AVAILABLE or RF3_AVAILABLE or PROTPARDELLE_AVAILABLE,
+    BOLTZ_AVAILABLE
+    or PROTENIX_AVAILABLE
+    or RF3_AVAILABLE
+    or PROTPARDELLE_AVAILABLE
+    or BIOEMU2_AVAILABLE,
     "No model wrappers are available. "
     "Please install at least one model wrapper with the appropriate "
     "feature group: 'pixi install -e boltz', 'pixi install -e protenix', "
-    "'pixi install -e rf3', or 'pixi install -e protpardelle'",
+    "'pixi install -e rf3', 'pixi install -e protpardelle', or 'pixi install -e bioemu2'",
 )
 
 require_boltz = _BOLTZ.require
 require_protenix = _PROTENIX.require
 require_rf3 = _RF3.require
 require_protpardelle = _PROTPARDELLE.require
+require_bioemu2 = _BIOEMU2.require
 require_any_model = _ANY_MODEL.require
 
 check_boltz_available = _BOLTZ.check
 check_protenix_available = _PROTENIX.check
 check_rf3_available = _RF3.check
 check_protpardelle_available = _PROTPARDELLE.check
+check_bioemu2_available = _BIOEMU2.check
 check_any_model_available = _ANY_MODEL.check
