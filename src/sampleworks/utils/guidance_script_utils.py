@@ -902,7 +902,6 @@ def _run_guidance(args: GuidanceConfig, model_wrapper, device):
         t_start = args.partial_diffusion_start
         which_latent = args.which_latent  # This is "single", "pair", or "both".
         anchor_weight = args.anchor_weight
-        bond_length_weight = args.bond_length_weight
         # GuidanceConfig exposes the model as `model_name` (not `args.model`); normalize to the
         # lowercase key the DEFAULT_*_REP_ATTR maps use (as checkpoint resolution does below).
         model_key = str(args.model_name).lower().replace("structurepredictor.", "")
@@ -929,7 +928,6 @@ def _run_guidance(args: GuidanceConfig, model_wrapper, device):
             pair_attr=pair_attr,
             anchor_weight_single=anchor_weight if which_latent in ("single", "both") else 0.0,
             anchor_weight_pair=anchor_weight if which_latent in ("pair", "both") else 0.0,
-            bond_length_weight=bond_length_weight,
         )
 
         logger.info(f"Running latent optimization ({which_latent}) on model {model_key}")

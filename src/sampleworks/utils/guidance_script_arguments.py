@@ -232,7 +232,6 @@ _LATENT_OPT_ATTRS = (
     "outer_steps",
     "anchor_weight",
     "max_grad_norm",
-    "bond_length_weight",
 )
 
 # Attributes set dynamically by add_*_args helpers that should be copied
@@ -1089,14 +1088,6 @@ def add_latent_opt_args(parser: argparse.ArgumentParser | GuidanceConfig):
     )
     parser.add_argument(
         "--max-grad-norm", type=float, default=1.0, help="Per-latent gradient-clip threshold"
-    )
-    parser.add_argument(
-        "--bond-length-weight",
-        type=float,
-        default=5e-5,
-        help="Weight of the coordinate-space bond-geometry penalty (bond-length + steric-clash "
-        "hinges) added to the IT-opt loss. Default 5e-5 = smallest weight that fixes mean clash "
-        "while keeping density fit and diversity; use 1e-3 for median clash 0; 0 disables it",
     )
 
 

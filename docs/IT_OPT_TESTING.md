@@ -124,7 +124,7 @@ Raise `num_steps` (→200), `outer_steps` (→2–4), `ensemble_size`; turn on `
 | `latent.grad is None` / zero (Level 0) | Injected latent isn't a `requires_grad` copy reaching the trunk (§1a); or you optimized a latent the model doesn't route to. | Confirm `requires_grad=True`; use `single_attr="s_trunk"`, `pair_attr="z_trunk"` for Protenix. |
 | `z` grad non-zero but structures don't respond | Stale `pair_z` cache (§1b). | `enable_diffusion_shared_vars_cache=False`, or optimize single-only first. |
 | Optimization loss is flat | LR too small; anchor too strong (latents pinned); or gradient fully clipped. | Raise `learning_rate`; lower `anchor_weight_*`; raise `max_grad_norm`. Log the pre-clip grad norm. |
-| Loss drops but structures degrade | Latent drifted off-manifold. | Raise `anchor_weight_*`; fewer steps/rounds; raise `bond_length_weight`. |
+| Loss drops but structures degrade | Latent drifted off-manifold. | Raise `anchor_weight_*`; fewer steps/rounds; raise the `bond_geometry` weight in the loss config. |
 | NaNs | Augmentation/churn stochasticity, or bf16 latents. | `EDMSamplerConfig(augmentation=False)`; keep latents float32; lower LR. |
 | `ValueError: no optimizable latent on the conditioning` | Wrong attr names (Boltz `"s"`/`"z"` on Protenix). | Use `s_trunk`/`z_trunk`. |
 | `ValueError: State atom count != loss_inputs atom count` | Loss built from a different atom set than the model's. | Use the same structure/density the CLI takes. |
@@ -150,7 +150,7 @@ from the grid-search / save machinery.
 - [utils/guidance_constants.py](../src/sampleworks/utils/guidance_constants.py) — `GuidanceType.LATENT_OPT`.
 - [utils/guidance_script_arguments.py](../src/sampleworks/utils/guidance_script_arguments.py) —
   `add_latent_opt_args` (`--which-latent`, `--learning-rate`, `--outer-steps`, `--anchor-weight`,
-  `--max-grad-norm`, `--bond-length-weight`); the six names are also in `_DYNAMIC_ATTRS` so
+  `--max-grad-norm`); the five names are also in `_DYNAMIC_ATTRS` so
   `GuidanceConfig.from_cli` copies them onto the config.
 - [utils/guidance_script_utils.py](../src/sampleworks/utils/guidance_script_utils.py) — the
   `LATENT_OPT` dispatch, the Protenix cache-off decision, and the `save_trajectory` case.

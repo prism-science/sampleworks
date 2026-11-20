@@ -24,7 +24,7 @@ PROTEINS_CSV = "${DATA_DIR}/proteins.csv"
 # "0.01 0.1 0.2", which would expand one job per protein into twelve. gradient-weights only
 # feeds the step scaler, which latent_opt does not use, so its value is arbitrary.
 # align-to-input matches the scratch runner, which set it unconditionally; the grid defaults it
-# off. bond-length-weight is named explicitly because the scratch runner defaulted it to 0.0.
+# off. The bond-geometry restraint comes in through loss-config, weighted against the density loss.
 [shared_args]
 proteins = "${PROTEINS_CSV}"
 model = "protenix"
@@ -33,7 +33,7 @@ which-latent = "both"
 ensemble-sizes = "8"
 gradient-weights = "0.0"
 num-diffusion-steps = 200
-bond-length-weight = 5e-5
+loss-config = "experiments/losses/density_with_bond_geometry.yaml"
 align-to-input = true
 
 [[jobs]]

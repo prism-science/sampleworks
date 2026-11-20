@@ -519,8 +519,6 @@ def test_latent_opt_cli_flags_reach_the_config(tmp_path: Path):
             "0.7",  # default 0.0
             "--max-grad-norm",
             "2.0",  # default 1.0
-            "--bond-length-weight",
-            "0.001",  # default 5e-5
         ],
         model_name="protenix",
         guidance_type="latent_opt",
@@ -531,7 +529,6 @@ def test_latent_opt_cli_flags_reach_the_config(tmp_path: Path):
     assert config.outer_steps == 5
     assert config.anchor_weight == pytest.approx(0.7)
     assert config.max_grad_norm == pytest.approx(2.0)
-    assert config.bond_length_weight == pytest.approx(0.001)
 
 
 # Loss configuration on GuidanceConfig
