@@ -425,7 +425,7 @@ def test_explicit_bond_is_not_scored_as_a_clash(explicitly_bonded_sulfurs):
     coords = pair_coords(ideal_length)
 
     assert make_loss(single_atom_residues("S")).collision_loss(coords) > 0
-    assert make_loss(explicitly_bonded_sulfurs)(coords) == 0.0
+    assert score(make_loss(explicitly_bonded_sulfurs), coords) == 0.0
 
 
 def test_explicit_bond_is_held_at_its_ideal_length(explicitly_bonded_sulfurs):
