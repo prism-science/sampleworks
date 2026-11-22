@@ -982,25 +982,65 @@ class TestUseAuthorNumbering:
         assert list(cast(np.ndarray, result.res_id)) == [-11, -10, 365, 366]
         assert list(cast(np.ndarray, result.chain_id)) == ["P"] * 4
 
+    def test_keeps_the_replaced_ids_as_label_annotations(self):
+        """The res_id and chain_id that were loaded stay on the array under the label names."""
+        atom_array = _labeled_array()
+        atom_array.set_annotation("auth_seq_id", np.array(["-11", "-10", "365", "366"]))
+        atom_array.set_annotation("auth_asym_id", np.array(["P", "P", "P", "P"]))
+
+        result = use_author_numbering(atom_array)
+
+        assert list(result.get_annotation("label_seq_id")) == [1, 2, 3, 4]
+        assert list(result.get_annotation("label_asym_id")) == ["A"] * 4
+
+    def test_second_call_keeps_the_label_annotations(self):
+        """Relabeling twice does not put the author ids into the label annotations."""
+        atom_array = _labeled_array()
+        atom_array.set_annotation("auth_seq_id", np.array(["-11", "-10", "365", "366"]))
+        atom_array.set_annotation("auth_asym_id", np.array(["P", "P", "P", "P"]))
+
+        result = use_author_numbering(use_author_numbering(atom_array))
+
+        assert list(cast(np.ndarray, result.res_id)) == [-11, -10, 365, 366]
+        assert list(cast(np.ndarray, result.chain_id)) == ["P"] * 4
+        assert list(result.get_annotation("label_seq_id")) == [1, 2, 3, 4]
+        assert list(result.get_annotation("label_asym_id")) == ["A"] * 4
+
     @pytest.mark.parametrize("non_integer", [".", "?", "100A"])
     def test_non_integer_author_number_raises(self, non_integer: str):
         """One atom without an integer auth_seq_id fails the whole relabeling."""
         atom_array = _labeled_array()
         atom_array.set_annotation("auth_seq_id", np.array(["10", non_integer, "12", "13"]))
+        atom_array.set_annotation("auth_asym_id", np.array(["P", "P", "P", "P"]))
 
         with pytest.raises(ValueError, match="non-integer auth_seq_id"):
             use_author_numbering(atom_array)
 
         assert list(cast(np.ndarray, atom_array.res_id)) == [1, 2, 3, 4]
+        assert list(cast(np.ndarray, atom_array.chain_id)) == ["A"] * 4
+        assert "label_seq_id" not in atom_array.get_annotation_categories()
 
-    def test_without_author_annotations_is_unchanged(self):
-        """An array loaded without the author columns comes back as it was."""
+    @pytest.mark.parametrize(
+        ("present_annotations", "missing_annotation"),
+        [
+            ((), "auth_seq_id"),
+            (("auth_seq_id",), "auth_asym_id"),
+            (("auth_asym_id",), "auth_seq_id"),
+        ],
+    )
+    def test_missing_author_annotation_raises(
+        self, present_annotations: tuple[str, ...], missing_annotation: str
+    ):
+        """An array loaded without both author columns is an error, not a silent no-op."""
         atom_array = _labeled_array()
+        for name in present_annotations:
+            atom_array.set_annotation(name, np.array(["5", "6", "7", "8"]))
 
-        result = use_author_numbering(atom_array)
+        with pytest.raises(ValueError, match=f"no {missing_annotation}"):
+            use_author_numbering(atom_array)
 
-        assert list(cast(np.ndarray, result.res_id)) == [1, 2, 3, 4]
-        assert list(cast(np.ndarray, result.chain_id)) == ["A"] * 4
+        assert list(cast(np.ndarray, atom_array.res_id)) == [1, 2, 3, 4]
+        assert list(cast(np.ndarray, atom_array.chain_id)) == ["A"] * 4
 
     def test_stack_shares_the_relabeling(self):
         """A stack's models share per-atom annotations, so every model is relabeled."""
@@ -1015,3 +1055,5 @@ class TestUseAuthorNumbering:
         for model in result:
             assert list(cast(np.ndarray, model.res_id)) == [5, 6, 7, 8]
             assert list(cast(np.ndarray, model.chain_id)) == ["B"] * 4
+            assert list(model.get_annotation("label_seq_id")) == [1, 2, 3, 4]
+            assert list(model.get_annotation("label_asym_id")) == ["A"] * 4

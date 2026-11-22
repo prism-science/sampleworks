@@ -182,14 +182,17 @@ def use_author_numbering(atom_array: AtomArray | AtomArrayStack) -> AtomArray | 
     share even when their label columns differ, so the evaluators call this right after
     loading.
 
-    Side effect: ``res_id`` and ``chain_id`` are overwritten in place wherever the
-    ``auth_seq_id`` and ``auth_asym_id`` annotations exist (load with them in ``extra_fields``).
-    An array without those annotations is left as it was.
+    Side effect: ``res_id`` and ``chain_id`` are overwritten in place from the ``auth_seq_id``
+    and ``auth_asym_id`` annotations (load with them in ``extra_fields``). The values they
+    replace are kept as ``label_seq_id`` and ``label_asym_id`` annotations, so a structure
+    can still be written with both numberings. An array that already has those two
+    annotations keeps them, which also makes a second call harmless. Loaded with ``load_any``,
+    an atom outside a polymer has ``label_seq_id`` -1, biotite's value for ``.``.
 
     Parameters
     ----------
     atom_array : AtomArray | AtomArrayStack
-        Loaded structure. A stack shares its per-atom annotations across models.
+        Structure loaded from mmCIF. A stack shares its per-atom annotations across models.
 
     Returns
     -------
@@ -199,23 +202,60 @@ def use_author_numbering(atom_array: AtomArray | AtomArrayStack) -> AtomArray | 
     Raises
     ------
     ValueError
+        If the ``auth_seq_id`` or ``auth_asym_id`` annotation is missing. A PDB file never has
+        them (``has_author_columns``): it is on its author numbering as loaded.
+    ValueError
         If any atom's ``auth_seq_id`` is not an integer. Keeping the label number for such
         atoms would mix two numberings in one array.
     """
     categories = atom_array.get_annotation_categories()
-    if "auth_seq_id" in categories:
-        auth_seq_id = np.asarray(atom_array.auth_seq_id).astype(str)
-        is_integer = np.char.isdigit(np.char.lstrip(auth_seq_id, "-"))
-        if not is_integer.all():
-            non_integer_values = sorted(set(auth_seq_id[~is_integer]))
-            raise ValueError(
-                f"{np.count_nonzero(~is_integer)} atoms have a non-integer auth_seq_id "
-                f"({non_integer_values[:5]}); author numbering needs an integer on every atom."
+    missing_annotations = [
+        name for name in ("auth_seq_id", "auth_asym_id") if name not in categories
+    ]
+    if missing_annotations:
+        raise ValueError(
+            f"The structure has no {' and no '.join(missing_annotations)} annotation. Load an "
+            "mmCIF file with both in extra_fields; a PDB file is already on its author numbering."
+        )
+    auth_seq_id = np.asarray(atom_array.auth_seq_id).astype(str)
+    is_integer = np.char.isdigit(np.char.lstrip(auth_seq_id, "-"))
+    if not is_integer.all():
+        non_integer_values = sorted(set(auth_seq_id[~is_integer]))
+        raise ValueError(
+            f"{np.count_nonzero(~is_integer)} atoms have a non-integer auth_seq_id "
+            f"({non_integer_values[:5]}); author numbering needs an integer on every atom."
+        )
+    for label_annotation, loaded_annotation in (
+        ("label_seq_id", "res_id"),
+        ("label_asym_id", "chain_id"),
+    ):
+        if label_annotation not in categories:
+            atom_array.set_annotation(
+                label_annotation, atom_array.get_annotation(loaded_annotation).copy()
             )
-        atom_array.res_id = auth_seq_id.astype(int)
-    if "auth_asym_id" in categories:
-        atom_array.chain_id = np.asarray(atom_array.auth_asym_id).astype(str)
+    atom_array.res_id = auth_seq_id.astype(int)
+    atom_array.chain_id = np.asarray(atom_array.auth_asym_id).astype(str)
     return atom_array
+
+
+def has_author_columns(path: Path | str) -> bool:
+    """Whether a structure file has author ids in columns of their own.
+
+    mmCIF has ``auth_*`` columns beside its ``label_*`` columns. A PDB file has one numbering,
+    the author's, which loads straight into ``res_id`` and ``chain_id``, and biotite's PDB
+    reader rejects the ``auth_*`` fields.
+
+    Parameters
+    ----------
+    path : Path | str
+        Path to the structure file (PDB, mmCIF, etc.)
+
+    Returns
+    -------
+    bool
+        True for mmCIF and BinaryCIF, False for every other format.
+    """
+    return infer_pdb_file_type(Path(path)) in ("cif", "bcif")
 
 
 def load_with_author_numbering(
@@ -237,16 +277,19 @@ def load_with_author_numbering(
     Returns
     -------
     AtomArray | AtomArrayStack
-        Loaded structure with ``res_id`` and ``chain_id`` on the author numbering
-        (``use_author_numbering``).
+        Loaded structure with ``res_id`` and ``chain_id`` on the author numbering. From mmCIF
+        it also carries the file's label ids as ``label_seq_id`` and ``label_asym_id``
+        (``use_author_numbering``); a PDB file has no label ids and comes back as loaded.
     """
     structure_path = Path(path)
-    requested_fields = list(extra_fields)
-    if infer_pdb_file_type(structure_path) in ("cif", "bcif"):
-        # A PDB file has only the author numbering, and biotite's PDB reader rejects the fields.
-        requested_fields += ["auth_seq_id", "auth_asym_id"]
+    if not has_author_columns(structure_path):
+        return load_any(structure_path, altloc="all", extra_fields=list(extra_fields))
     return use_author_numbering(
-        load_any(structure_path, altloc="all", extra_fields=requested_fields)
+        load_any(
+            structure_path,
+            altloc="all",
+            extra_fields=[*extra_fields, "auth_seq_id", "auth_asym_id"],
+        )
     )
 
 

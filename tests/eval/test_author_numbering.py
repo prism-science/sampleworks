@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from atomworks.io.utils.io_utils import load_any
+from biotite.structure.io.pdb import PDBFile
 from biotite.structure.io.pdbx import CIFFile
 from sampleworks.eval.eval_dataclasses import ProteinConfig
 from sampleworks.synthetic.synthetic_utils import load_structure_for_synthetic_loss
@@ -26,6 +27,7 @@ from sampleworks.utils.atom_array_utils import (
     filter_to_common_atoms,
     load_conformer_pairs,
     load_structure_with_altlocs,
+    load_with_author_numbering,
     use_author_numbering,
 )
 from sampleworks.utils.cif_utils import find_altloc_selections
@@ -36,6 +38,9 @@ from tests.script_loader import load_script
 
 
 _SCRIPTS = Path(__file__).resolve().parents[2] / "scripts" / "eval"
+# The PDB entry's own mmCIF: label and author numbering differ, and it has waters and ligands.
+_DEPOSITED_CIF = _REAL_CIF.parent / "1vme_rcsb.cif"
+_PDB_FILE = _REAL_CIF.parents[1] / "9BN8" / "9BN8_single_001.pdb"
 _SEQ_ID_OFFSET = 1000
 _MOVED_CHAIN = "Z"
 _AUTHOR_FIELDS = ["auth_seq_id", "auth_asym_id"]
@@ -52,6 +57,30 @@ def rmsd_script():
 def rscc_script():
     """The RSCC evaluation script, imported by path."""
     return load_script(_SCRIPTS / "rscc_grid_search_script.py")
+
+
+@pytest.fixture
+def lddt_script():
+    """The lDDT evaluation script, imported by path."""
+    return load_script(_SCRIPTS / "lddt_evaluation_script.py")
+
+
+def read_atom_site_column(path: Path, column: str) -> np.ndarray:
+    """Read one ``atom_site`` column of an mmCIF file with biotite alone, as written.
+
+    Parameters
+    ----------
+    path : Path
+        mmCIF file.
+    column : str
+        Column name without the category, e.g. ``"auth_seq_id"``.
+
+    Returns
+    -------
+    np.ndarray
+        The column as strings, one per ``atom_site`` row, shape ``(n_rows,)``.
+    """
+    return CIFFile.read(path).block["atom_site"][column].as_array(str)
 
 
 def write_cif_with_moved_ids(
@@ -100,7 +129,8 @@ def _replace_every_refined_cif(fx, id_columns: Literal["label", "auth"]) -> None
         write_cif_with_moved_ids(_REAL_CIF, path, id_columns)
 
 
-def _rmsd_args(fx) -> argparse.Namespace:
+def _eval_args(fx) -> argparse.Namespace:
+    """Arguments the RMSD and lDDT scripts take, for one fixture tree."""
     return argparse.Namespace(
         grid_search_results_path=fx.grid_search_results_path,
         grid_search_inputs_path=fx.grid_search_inputs_path,
@@ -141,8 +171,8 @@ def test_label_moved_output_shares_no_atom_with_the_reference_on_label_numbering
 
 
 def test_reference_loader_returns_author_numbering(tmp_path: Path):
-    """A label-moved reference comes back from the shared loader on the author numbering."""
-    write_cif_with_moved_ids(_REAL_CIF, tmp_path / "reference.cif", "label")
+    """A label-moved reference comes back from the shared loader on its author columns."""
+    label_moved = write_cif_with_moved_ids(_REAL_CIF, tmp_path / "reference.cif", "label")
     config = ProteinConfig(
         protein="1vme",
         base_map_dir=tmp_path,
@@ -155,10 +185,69 @@ def test_reference_loader_returns_author_numbering(tmp_path: Path):
     _, reference_stack = get_reference_atomarraystack(config, {"A": 0.5, "B": 0.5})
 
     assert reference_stack is not None
-    unmoved = use_author_numbering(load_any(_REAL_CIF, extra_fields=_AUTHOR_FIELDS))
-    assert set(np.asarray(reference_stack.chain_id)) == set(np.asarray(unmoved.chain_id))
-    assert reference_stack.res_id.min() == unmoved.res_id.min()
-    assert reference_stack.res_id.max() == unmoved.res_id.max()
+    np.testing.assert_array_equal(
+        reference_stack.res_id, read_atom_site_column(label_moved, "auth_seq_id").astype(int)
+    )
+    np.testing.assert_array_equal(
+        reference_stack.chain_id, read_atom_site_column(label_moved, "auth_asym_id")
+    )
+
+
+def test_loader_keeps_both_numberings_of_a_deposited_file():
+    """The author columns become res_id and chain_id; the label columns stay as annotations."""
+    atom_array = load_with_author_numbering(_DEPOSITED_CIF)
+
+    np.testing.assert_array_equal(
+        atom_array.res_id, read_atom_site_column(_DEPOSITED_CIF, "auth_seq_id").astype(int)
+    )
+    np.testing.assert_array_equal(
+        atom_array.chain_id, read_atom_site_column(_DEPOSITED_CIF, "auth_asym_id")
+    )
+    np.testing.assert_array_equal(
+        atom_array.get_annotation("label_asym_id"),
+        read_atom_site_column(_DEPOSITED_CIF, "label_asym_id"),
+    )
+    written_label_seq_id = read_atom_site_column(_DEPOSITED_CIF, "label_seq_id")
+    in_polymer = written_label_seq_id != "."
+    kept_label_seq_id = atom_array.get_annotation("label_seq_id")
+    np.testing.assert_array_equal(
+        kept_label_seq_id[in_polymer], written_label_seq_id[in_polymer].astype(int)
+    )
+    # biotite loads the ``.`` of an atom outside a polymer as -1.
+    assert in_polymer.any() and not in_polymer.all()
+    assert (kept_label_seq_id[~in_polymer] == -1).all()
+    assert not np.array_equal(atom_array.res_id[in_polymer], kept_label_seq_id[in_polymer])
+
+
+def test_pdb_file_keeps_its_own_numbering():
+    """A PDB file has one numbering, so the loader returns it with nothing relabeled."""
+    atom_array = load_with_author_numbering(_PDB_FILE)
+
+    as_written = PDBFile.read(_PDB_FILE).get_structure(model=1, altloc="all")
+    np.testing.assert_array_equal(atom_array.res_id, as_written.res_id)
+    np.testing.assert_array_equal(atom_array.chain_id, as_written.chain_id)
+    assert "label_seq_id" not in atom_array.get_annotation_categories()
+
+
+def test_rscc_parse_numbers_label_moved_file_by_author_columns(tmp_path: Path, rscc_script):
+    """The RSCC script's parse puts a label-moved file on its unmoved author columns."""
+    label_moved = write_cif_with_moved_ids(_REAL_CIF, tmp_path / "refined.cif", "label")
+
+    atom_array = rscc_script.parse_on_author_numbering(label_moved)
+
+    assert set(atom_array.chain_id) == set(read_atom_site_column(_REAL_CIF, "auth_asym_id"))
+    assert set(atom_array.get_annotation("label_asym_id")) == {_MOVED_CHAIN}
+    assert set(atom_array.get_annotation("label_seq_id") - atom_array.res_id) == {_SEQ_ID_OFFSET}
+
+
+def test_rscc_parse_accepts_a_pdb_reference(rscc_script):
+    """A PDB reference has no author columns to load and parses on the numbering it has."""
+    atom_array = rscc_script.parse_on_author_numbering(_PDB_FILE)
+
+    as_written = PDBFile.read(_PDB_FILE).get_structure(model=1)
+    polymer_res_ids = set(as_written.res_id[~as_written.hetero])
+    assert polymer_res_ids <= set(atom_array.res_id)
+    assert "label_seq_id" not in atom_array.get_annotation_categories()
 
 
 def test_altloc_loader_returns_author_numbering(tmp_path: Path):
@@ -222,7 +311,7 @@ def test_rmsd_script_scores_label_moved_output(rscc_fixture_factory, rmsd_script
     fx = rscc_fixture_factory(n_groups=1, trials_per_group=1, selections=(_SELECTION,))
     _replace_every_refined_cif(fx, "label")
 
-    rmsd_script.main(_rmsd_args(fx))
+    rmsd_script.main(_eval_args(fx))
 
     df = pd.read_csv(fx.grid_search_results_path / "min_altloc_rmsd_results.csv")
     assert len(df) == 1
@@ -241,7 +330,42 @@ def test_rmsd_script_cannot_pair_author_moved_output(rscc_fixture_factory, rmsd_
     _replace_every_refined_cif(fx, "auth")
 
     with pytest.raises(RuntimeError, match="No common atoms"):
-        rmsd_script.main(_rmsd_args(fx))
+        rmsd_script.main(_eval_args(fx))
+
+
+def test_lddt_script_scores_label_moved_output(rscc_fixture_factory, lddt_script):
+    """The lDDT evaluator assigns the label-moved file, a copy of altloc A, to altloc A."""
+    fx = rscc_fixture_factory(n_groups=1, trials_per_group=1, selections=(_SELECTION,))
+    _replace_every_refined_cif(fx, "label")
+
+    lddt_script.main(_eval_args(fx))
+
+    df = pd.read_csv(fx.grid_search_results_path / "lddt_results.csv")
+    assert len(df) == 1
+    row = df.iloc[0]
+    assert pd.isna(row["error"]), row["error"]
+    # Fraction of output models closest to altloc A, then to altloc B, as numpy prints them.
+    occupancies = np.array(row["occupancies"].strip("[]").split(), dtype=float)
+    np.testing.assert_allclose(occupancies, [1.0, 0.0])
+    assert row["avg_silhouette_to_ref"] == pytest.approx(1.0)
+
+
+def test_lddt_script_cannot_score_author_moved_output(rscc_fixture_factory, lddt_script):
+    """With the author columns moved instead, the selection finds nothing to score.
+
+    The lDDT script records a failed trial as an error row instead of raising. An evaluator
+    reading the label columns would fail this way on the label-moved file and score this one.
+    """
+    fx = rscc_fixture_factory(n_groups=1, trials_per_group=1, selections=(_SELECTION,))
+    _replace_every_refined_cif(fx, "auth")
+
+    lddt_script.main(_eval_args(fx))
+
+    df = pd.read_csv(fx.grid_search_results_path / "lddt_results.csv")
+    assert len(df) == 1
+    row = df.iloc[0]
+    assert pd.notna(row["error"])
+    assert np.isnan(row["avg_silhouette_to_ref"])
 
 
 @pytest.mark.slow
