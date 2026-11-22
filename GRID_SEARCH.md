@@ -59,6 +59,7 @@ needs:
 | `real_space_density` | `density` (`.ccp4`, `.mrc`, `.map`), `resolution`                                |
 | `structure_factor`   | `mtzfile` (`resolution` optional: truncates the MTZ)                             |
 | `diffuse_bragg`      | `bragg_target` unless `bragg_weight` is 0; `diffuse_target` unless it is 1       |
+| `bond_geometry`      | none                                                                             |
 
 ```csv
 name,structure,density,resolution,sequence

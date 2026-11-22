@@ -144,16 +144,13 @@ RUN --mount=type=bind,from=checkpoints,target=/ck \
 # a missing prefix, so clearing prefixes first covers both stale layers and the
 # empty-prefix failure mode seen on diffuse-sh-builder.
 #
-# `/root/.cache/pixi` is deliberately not cached across builds — it carries
-# pixi's own "is this environment current" state, which is the thing that can
-# disagree with a prefix restored from a different build. The rattler and uv
-# caches stay: they hold downloaded packages and wheels, are what actually make
-# rebuilds fast, and were verified not to affect what lands in the layer.
-#
-# The cache mounts have project-specific ids so they cannot alias mounts from
-# unrelated Dockerfiles when a builder retains state. `sharing=locked` prevents
-# concurrent steps on the same builder from mutating a package cache together.
-# Bump the suffix only to recover from a demonstrably corrupt persistent cache.
+# The package caches live inside this step and are deleted at its end, rather
+# than in BuildKit cache mounts. CI builds on ephemeral GitHub-hosted runners,
+# where a cache mount never survives to a second build, and it costs a full
+# extra copy of every environment: rattler cannot hard-link across the mount
+# boundary, so it copies. In the same filesystem it hard-links, and deleting the
+# cache afterwards leaves only the environments in the layer. That difference
+# (tens of GB) decides whether the build fits on a hosted runner's disk.
 #
 # The guard prints diagnostics before it exits. The empty-environment install
 # has not been reproducible outside this builder: the same manifest, lock and
@@ -161,12 +158,10 @@ RUN --mount=type=bind,from=checkpoints,target=/ck \
 # a cold and a warm rattler cache. So when it happens here, the build log is the
 # only place the cause can come from, and "pixi said installed, nothing is
 # there" is not enough to act on.
-RUN --mount=type=cache,id=sampleworks-rattler-2,target=/root/.cache/rattler,sharing=locked \
-    --mount=type=cache,id=sampleworks-uv-2,target=/root/.cache/uv,sharing=locked \
-    pixi --version && \
+RUN pixi --version && \
     pixi info --no-config && \
     rm -rf /app/.pixi/envs && \
-    for env in boltz protenix rf3 protpardelle analysis; do \
+    for env in boltz protenix rf3 protpardelle bioemu2 analysis; do \
         echo "=== reinstalling ${env} ==="; \
         pixi reinstall -e "${env}" --frozen --no-config || { \
             echo "FATAL: pixi failed while reinstalling environment '${env}'."; \
@@ -191,7 +186,8 @@ RUN --mount=type=cache,id=sampleworks-rattler-2,target=/root/.cache/rattler,shar
             echo "FATAL: environment '${env}' has an unusable Python interpreter."; \
             exit 1; \
         }; \
-    done
+    done && \
+    rm -rf /root/.cache/rattler /root/.cache/uv /root/.cache/pixi
 
 # A GPU is not required to build the image. Pre-compile CUDA extensions only when
 # the builder exposes NVIDIA devices; if present, failures should stop the build.

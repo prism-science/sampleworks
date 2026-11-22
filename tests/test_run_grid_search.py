@@ -1,5 +1,6 @@
 """Tests for grid-search job generation and result serialization."""
 
+import itertools
 import json
 import os
 from pathlib import Path
@@ -272,6 +273,56 @@ class TestLossSelection:
             )
 
         assert "--bulk-solvent" in capsys.readouterr().err
+
+
+def test_every_swept_setting_reaches_the_worker_config_of_its_own_job(grid_inputs):
+    """Each point of the sweep becomes one job whose worker config carries that point.
+
+    Pure guidance sweeps ensemble size and step size; FK steering also sweeps the
+    number of gradient-descent steps. The output directory names the settings, so a
+    run's results are filed under the values it was actually run with.
+    """
+    ensemble_sizes, gradient_weights, gd_steps = (2, 4), (0.3, 0.7), (1, 3)
+    args = _grid_args(
+        grid_inputs,
+        "name,structure,density,resolution\n1ABC,s.cif,d.ccp4,1.8\n",
+        "--scalers",
+        "pure_guidance fk_steering",
+        "--ensemble-sizes",
+        "2 4",
+        "--gradient-weights",
+        "0.3 0.7",
+        "--num-gd-steps",
+        "1 3",
+    )
+    # Keyed by trial directory name; values are (ensemble size, gradient weight[, GD steps]).
+    expected_pure = {
+        f"ens{ens}_gw{weight}": (ens, weight)
+        for ens, weight in itertools.product(ensemble_sizes, gradient_weights)
+    }
+    expected_fk = {
+        f"ens{ens}_gw{weight}_gd{steps}": (ens, weight, steps)
+        for ens, weight, steps in itertools.product(ensemble_sizes, gradient_weights, gd_steps)
+    }
+
+    configs = [build_args_for_process_pool(job, args) for job in generate_jobs(args)]
+    pure_configs = [config for config in configs if config.guidance_type == "pure_guidance"]
+    fk_configs = [config for config in configs if config.guidance_type == "fk_steering"]
+
+    assert len(pure_configs) == 4
+    assert len(fk_configs) == 8
+    assert {
+        Path(config.output_dir).name: (config.ensemble_size, config.step_size)
+        for config in pure_configs
+    } == expected_pure
+    assert {
+        Path(config.output_dir).name: (
+            config.ensemble_size,
+            config.guidance_weight,
+            config.num_gd_steps,
+        )
+        for config in fk_configs
+    } == expected_fk
 
 
 @pytest.fixture

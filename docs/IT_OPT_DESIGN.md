@@ -35,7 +35,7 @@ for each outer round (a round = one full traversal of the schedule, fresh prior 
     optimizer = Adam([s, z])                      # ONE persistent Adam per round
     for each diffusion step:
         x̂₀   = differentiable denoise(x_t, s, z)  # ONE forward, run under autograd
-        loss  = loss_function(x̂₀) + anchor(s, z) + bond_geometry(x̂₀)   # both penalties off at weight 0
+        loss  = loss_function(x̂₀) + anchor(s, z)   # anchor off at weight 0
         loss.backward();  clip s and z INDEPENDENTLY;  optimizer.step()
         x_t   = step_output.state.detach()         # advance; coordinate graph cut here
 final clean sampling pass with the optimized latents  ->  saved ensemble
@@ -54,7 +54,7 @@ detaches each step, and a true unroll is O(steps·N²·d) memory.)
 | `LatentOptimization` | [core/scalers/latent_optimization.py](../src/sampleworks/core/scalers/latent_optimization.py) | The scaler / entry point. Owns the loop, the ensemble, and the final sampling pass. |
 | `LatentAnchor` | same file | `Σ wᵢ·mean((latentᵢ − baselineᵢ)²)` — mean-squared drift from the baseline latents. Regularizer added to the data loss in `_latent_optimizer_step`; not a `LossFunctionProtocol`, since its input is latents rather than coordinates (#363). |
 | `_GradEnablingScaler` | same file | Minimal `StepScalerProtocol` that only turns autograd on (§4). |
-| `BondGeometryLoss` | [core/losses/geometry.py](../src/sampleworks/core/losses/geometry.py) | Bond-length + steric-clash hinges on `x̂₀`. Built only when `bond_length_weight > 0`. Bounded hinges (not the reference's exploding `exp(relu(...))`). |
+| `BondGeometryLoss` | [core/losses/geometry.py](../src/sampleworks/core/losses/geometry.py) | Bond-length + steric-clash hinges on `x̂₀`. Not built by the scaler: add it as a `bond_geometry` term of `loss_function` with `--loss-config`. Bounded hinges (not the reference's exploding `exp(relu(...))`). |
 | `AttrLatentIO` / `LatentIO` | [models/latent_adapter.py](../src/sampleworks/models/latent_adapter.py) | Reads/writes `s`/`z` by attribute name; writes via `dataclasses.replace` (honors `frozen=True, slots=True`). The only model-specific knowledge is a pair of attribute names. |
 | CLI wiring | [utils/guidance_script_utils.py](../src/sampleworks/utils/guidance_script_utils.py) (`_run_guidance`), [utils/guidance_script_arguments.py](../src/sampleworks/utils/guidance_script_arguments.py) (`add_latent_opt_args`), [utils/guidance_constants.py](../src/sampleworks/utils/guidance_constants.py) (`GuidanceType.LATENT_OPT`) | Builds the scaler from CLI flags. |
 
@@ -70,7 +70,7 @@ LatentOptimization(
     t_start=0.0, outer_steps=1, learning_rate=0.05, max_grad_norm=1.0,
     optimize_single=True, optimize_pair=True,
     anchor_weight_single=0.0, anchor_weight_pair=0.0,
-    bond_length_weight=5e-5, single_attr="s", pair_attr="z",
+    single_attr="s", pair_attr="z",
 )
 ```
 
@@ -166,7 +166,9 @@ than the reference's Frobenius norm (shape-agnostic, so `w_s`/`w_z` are comparab
 
 CLI: `sampleworks-guidance --model <protenix|rf3|boltz1|boltz2> --guidance-type latent_opt …` with
 `--which-latent {single,pair,both}` (default `pair`), `--learning-rate` (0.05), `--outer-steps` (2),
-`--anchor-weight` (0.0), `--max-grad-norm` (1.0), `--bond-length-weight` (5e-5). Also reachable
+`--anchor-weight` (0.0), `--max-grad-norm` (1.0). The bond-geometry restraint is a loss term:
+pass `--loss-config` with `real_space_density` and `bond_geometry` weighted `1.0` and `5e-5`
+(see the README's Losses section). Also reachable
 programmatically through `run_guidance`. `_run_guidance` resolves the model name to the latent
 attribute names and raises a clear `ValueError` for an unsupported model. See
 [IT_OPT_TESTING.md](IT_OPT_TESTING.md) for the debug ladder and gradient check.

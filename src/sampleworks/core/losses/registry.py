@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 from sampleworks.core.losses.options import (
+    BondGeometryOptions,
     DiffuseBraggOptions,
     option_type,
     RealSpaceDensityOptions,
@@ -150,6 +151,12 @@ LOSS_SPECS: dict[Losses, LossSpec] = {
         builder_path="sampleworks.core.losses.diffuse_bragg:build_diffuse_bragg_loss",
         description="Bragg amplitudes plus anisotropic diffuse intensities, via lunus.sf.",
         conditional_required_options=_diffuse_bragg_required,
+    ),
+    Losses.BOND_GEOMETRY: LossSpec(
+        name=Losses.BOND_GEOMETRY,
+        options_cls=BondGeometryOptions,
+        builder_path="sampleworks.core.losses.geometry:build_bond_geometry_loss",
+        description="Bond-length and steric-clash penalty; combine with a data loss.",
     ),
 }
 

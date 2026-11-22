@@ -284,7 +284,7 @@ def residue_level_lddt_single(
         valid_mask: Bool[torch.Tensor, "N"],  # noqa F821
         tok_idx: Int[torch.Tensor, "L"],  # noqa F821
         token_id: int,
-    ) -> Float[torch.Tensor, ""] | float:
+    ) -> Float[torch.Tensor, ""]:
         """Calculate residue-level lDDT for single residue
 
         Parameters

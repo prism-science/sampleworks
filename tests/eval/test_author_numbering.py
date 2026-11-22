@@ -283,11 +283,13 @@ def test_altloc_selections_are_in_author_numbering(tmp_path: Path):
     """find_altloc_selections gives a label-moved file the selections of the unmoved file."""
     label_moved = write_cif_with_moved_ids(_REAL_CIF, tmp_path / "moved.cif", "label")
 
-    moved_selections = list(find_altloc_selections(label_moved))
-    unmoved_selections = list(find_altloc_selections(_REAL_CIF))
+    moved_spans, moved_unions = find_altloc_selections(label_moved)
+    unmoved_spans, unmoved_unions = find_altloc_selections(_REAL_CIF)
 
-    assert unmoved_selections
-    assert moved_selections == unmoved_selections
+    assert unmoved_spans
+    assert unmoved_unions
+    assert moved_spans == unmoved_spans
+    assert moved_unions == unmoved_unions
 
 
 def test_conformer_pairs_are_on_author_numbering(tmp_path: Path):

@@ -199,14 +199,25 @@ class TestWeightHandling:
         with pytest.raises(ValueError, match="diffuse_target is required"):
             DiffuseBraggLossFunction(bragg_target=diffuse_bragg_targets.bragg, bragg_weight=0.5)
 
-    def test_numpy_scalar_weight_is_a_constant(self, diffuse_bragg_ensemble, diffuse_bragg_targets):
-        """A np.float32 weight is stored as a float, not mistaken for a callable."""
-        atom_array, coords = diffuse_bragg_ensemble
-        loss_function = prepared_loss(diffuse_bragg_targets, atom_array, np.float32(0.5))
+    def test_fractional_numpy_weight_mixes_the_pure_terms_convexly(
+        self, diffuse_bragg_ensemble, diffuse_bragg_targets, diffuse_bragg_losses
+    ):
+        """A np.float32 weight w scores exactly w * pure Bragg + (1 - w) * pure diffuse.
 
-        assert loss_function.bragg_weight == 0.5
-        loss, _ = score(loss_function, atom_array, coords)
-        assert torch.isfinite(loss)
+        The weight is 0.3 rather than 0.5 so that swapping the two terms' weights
+        changes the answer. A np.float32 mistaken for a callable would raise instead.
+        """
+        atom_array, coords = diffuse_bragg_ensemble
+        loss_function = prepared_loss(diffuse_bragg_targets, atom_array, np.float32(0.3))
+        displaced = coords + 0.05 * np.random.default_rng(3).normal(size=coords.shape)
+
+        mixed, _ = score(loss_function, atom_array, displaced)
+        bragg_only, _ = score(diffuse_bragg_losses[1.0], atom_array, displaced)
+        diffuse_only, _ = score(diffuse_bragg_losses[0.0], atom_array, displaced)
+
+        assert bragg_only.item() != pytest.approx(diffuse_only.item(), rel=0.1)
+        expected = 0.3 * bragg_only.item() + 0.7 * diffuse_only.item()
+        assert mixed.item() == pytest.approx(expected, rel=1e-5)
 
     def test_weight_outside_the_unit_interval_is_rejected(self, diffuse_bragg_targets):
         """The mixture is convex, so a weight outside [0, 1] is refused at construction."""

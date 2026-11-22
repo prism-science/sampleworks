@@ -49,9 +49,11 @@ pixi install -a
 Alternatively, install only what you need:
 
 ```bash
-pixi install -e boltz      # Boltz-1 / Boltz-2
-pixi install -e protenix   # Protenix
-pixi install -e rf3        # RosettaFold3
+pixi install -e boltz         # Boltz-1 / Boltz-2
+pixi install -e protenix      # Protenix
+pixi install -e rf3           # RosettaFold3
+pixi install -e protpardelle  # Protpardelle
+pixi install -e bioemu2       # BioEmu2
 ```
 
 ### 3. Download model checkpoints
@@ -71,6 +73,21 @@ download_boltz2(cache)
 **Protenix**: checkpoint is downloaded automatically on first use.
 
 **RosettaFold3** (RF3): see the [RC-Foundry repository](https://github.com/RosettaCommons/foundry) for instructions. Default path: `~/.foundry/checkpoints/rf3_foundry_01_24_latest.ckpt`
+
+**Protpardelle**: the checkpoint is not auto-resolved, so pass `--model-checkpoint` explicitly. The model config YAML defaults to the bundled `cc89_epoch415.yaml`; override it with `--protpardelle-config-path`. If the wrapper fails to import, set `PROTPARDELLE_MODEL_PARAMS` to the model-params directory.
+
+**BioEmu2**: download the `bioemu2-preview` checkpoint (2 GB) and its `config.yaml` from
+[Hugging Face](https://huggingface.co/microsoft/bioemu2), then pass the `checkpoint.ckpt` path
+with `--model-checkpoint` or `BIOEMU2_CHECKPOINT`. `config.yaml` must sit in the same directory.
+
+```bash
+pixi run -e bioemu2 hf download microsoft/bioemu2 \
+    --include "checkpoints/bioemu2-preview/*" --local-dir ~/.bioemu2
+export BIOEMU2_CHECKPOINT=~/.bioemu2/checkpoints/bioemu2-preview/checkpoint.ckpt
+```
+
+The released checkpoint needs a CUDA GPU (it uses cuEquivariance kernels). BioEmu2 is
+released for research use; see its [model card](https://github.com/microsoft/bioemu2/blob/main/MODEL_CARD.md).
 
 ## Quick Start
 
@@ -103,16 +120,54 @@ Output files appear in `output/boltz2_pure_guidance/`: `refined.cif` (final ense
 
 | Argument          | Description                                                               |
 | ----------------- | ------------------------------------------------------------------------- |
-| `--model`         | `boltz1`, `boltz2`, `protenix`, or `rf3`                                  |
+| `--model`         | `boltz1`, `boltz2`, `protenix`, `rf3`, `protpardelle`, or `bioemu2`       |
 | `--guidance-type` | `pure_guidance`, `fk_steering`, or `latent_opt`                           |
 | `--protein`       | Protein identifier (should match naming used in grid search / evaluation) |
 | `--structure`     | Path to input structure file (CIF)                                        |
 | `--density`       | Path to density map (CCP4/MRC/MAP) — required by the default loss         |
 | `--resolution`    | Map resolution in Angstroms — required by the default loss                |
 
-Model-specific arguments (e.g. `--method` for boltz2, `--msa-path` for rf3) and guidance-type-specific arguments (e.g. `--num-particles` for fk_steering) are included automatically. Run `sampleworks-guidance --model <model> --guidance-type <type> --help` to see all available options.
+Model-specific arguments (e.g. `--method` for boltz2, `--msa-path` for rf3, `--bioemu2-mode` for bioemu2) and guidance-type-specific arguments (e.g. `--num-particles` for fk_steering) are included automatically. Run `sampleworks-guidance --model <model> --guidance-type <type> --help` to see all available options.
 
-MSAs fetched from the MSA server are cached in `~/.sampleworks/msa`; set `MSA_CACHE_DIR` to cache them elsewhere.
+#### Selecting a model
+
+The `--model` flag chooses which generative model guides the run. The value also decides
+which Pixi environment you must run in, since each model's dependencies are isolated. Pass
+the name exactly as shown below:
+
+| `--model`      | Model          | Pixi environment | Checkpoint                                                                   |
+| -------------- | -------------- | ---------------- | --------------------------------------------------------------------------- |
+| `boltz1`       | Boltz-1        | `boltz`          | `~/.boltz/boltz1_conf.ckpt`                                                  |
+| `boltz2`       | Boltz-2        | `boltz`          | `~/.boltz/boltz2_conf.ckpt`                                                  |
+| `protenix`     | Protenix       | `protenix`       | auto-downloaded on first use                                                |
+| `rf3`          | RosettaFold3   | `rf3`            | `~/.foundry/checkpoints/rf3_foundry_01_24_latest.ckpt`                       |
+| `protpardelle` | Protpardelle   | `protpardelle`   | pass `--model-checkpoint` explicitly (not auto-resolved)                     |
+| `bioemu2`      | BioEmu2        | `bioemu2`        | pass `--model-checkpoint` or set `BIOEMU2_CHECKPOINT` (see above)            |
+
+Run with `pixi run -e <environment>`, matching the environment column to your chosen model. For
+example, to guide with Protenix instead of Boltz-2, swap both the environment and the model name:
+
+```bash
+pixi run -e protenix sampleworks-guidance \
+    --model protenix \
+    --guidance-type pure_guidance \
+    --protein 1VME \
+    --structure tests/resources/1vme/1vme_final_carved_edited_0.5occA_0.5occB.cif \
+    --density tests/resources/1vme/1vme_final_carved_edited_0.5occA_0.5occB_1.80A.ccp4 \
+    --resolution 1.8 \
+    --output-dir output/protenix_pure_guidance \
+    --guidance-start 0.65 \
+    --ensemble-size 4 \
+    --gradient-normalization \
+    --augmentation \
+    --align-to-input
+```
+
+`boltz1` and `boltz2` share the `boltz` environment, so switching between them only changes
+`--model` (and their checkpoint). Not every model supports every `--guidance-type`; latent
+optimization (`latent_opt`), for instance, is available for `protenix`, `rf3`, and `boltz1`.
+
+MSAs fetched from the MSA server are cached in `~/.sampleworks/msa`; set `MSA_CACHE_DIR` to cache them elsewhere. BioEmu2 fetches through its own client and cache instead (`BIOEMU2_MSA_CACHE`; see [docs/BIOEMU2_INTEGRATION.md](docs/BIOEMU2_INTEGRATION.md)).
 
 ### Latent optimization (IT-opt)
 
@@ -140,7 +195,6 @@ pixi run -e protenix sampleworks-guidance \
 | `--outer-steps`        | Optimization rounds, fresh prior noise each               | `2`     |
 | `--anchor-weight`      | Penalty on drift from the trunk baseline; `0` disables it | `0.0`   |
 | `--max-grad-norm`      | Per-latent gradient clip                                  | `1.0`   |
-| `--bond-length-weight` | Bond-length and steric-clash penalty; `0` disables it     | `5e-5`  |
 
 See [docs/IT_OPT_DESIGN.md](docs/IT_OPT_DESIGN.md) for the algorithm and the per-model gradient
 readiness table, and [docs/IT_OPT_TESTING.md](docs/IT_OPT_TESTING.md) for how to run and debug it.
@@ -154,6 +208,7 @@ readiness table, and [docs/IT_OPT_TESTING.md](docs/IT_OPT_TESTING.md) for how to
 | `real_space_density` (default) | Fit to a density map                                                   | `--density`, `--resolution`, `--loss-order`, `--em`, `--scattering-table`, `--allow-torch-fallback` |
 | `structure_factor`             | Fit to structure-factor amplitudes from an MTZ                         | `--mtzfile`, `--expcolumns`, `--resolution`, `--bulk-solvent`, `--scattering-factor-mode`, ... |
 | `diffuse_bragg`                | Fit to Bragg amplitudes and anisotropic diffuse intensities (lunus.sf) | `--bragg-target`, `--diffuse-target`, `--bragg-weight`, `--resolution`, ...                    |
+| `bond_geometry`                | Bond-length and steric-clash penalty; combine with a data loss         | `--bond-tolerance`, `--clash-padding`, `--bond-power`                                          |
 
 ```bash
 sampleworks-guidance --model boltz2 --guidance-type pure_guidance \
@@ -181,6 +236,24 @@ structure_factor:
 Weights default to `1/N` when omitted, so combining losses leaves the meaning of the
 guidance step size intact.
 
+`bond_geometry` scores no experimental data, so it is meant as a second term that keeps guidance
+from stretching bonds or packing atoms into clashes to improve the data fit. Its penalty is a sum
+over every bond and atom pair, so it usually needs a much smaller weight than the data loss. The
+weight below was tuned for `latent_opt`, where it is the smallest that brought mean clash back to
+the unguided baseline without losing the density gain (`1e-3` reaches median clash 0 but reduces
+altloc diversity). Treat it as a starting point for `pure_guidance` and `fk_steering`, where it
+has not been tuned:
+
+```yaml
+real_space_density:
+  weight: 1.0
+  loss_options:
+    density: 1vme.ccp4
+    resolution: 1.8
+bond_geometry:
+  weight: 5.0e-5
+```
+
 ## Grid Search
 
 `run_grid_search.py` sweeps a model across scalers, ensemble sizes, and gradient weights:
@@ -188,7 +261,7 @@ guidance step size intact.
 ```bash
 pixi run -e boltz python run_grid_search.py \
     --proteins proteins.csv \
-    --models boltz2 \                # options: boltz1, boltz2, protenix, rf3 (make sure env aligns!)
+    --models boltz2 \                # options: boltz1, boltz2, protenix, rf3, protpardelle (make sure env aligns!)
     --methods "X-RAY DIFFRACTION" \  # only useful for Boltz-2, ignored otherwise
     --scalers pure_guidance \        # options: pure_guidance, fk_steering, or both as space-separated list
     --ensemble-sizes "1 4" \
@@ -229,7 +302,7 @@ win over the CSV. A protein missing a required option fails the grid before any 
 | `--proteins`         | CSV of name/structure(/sequence) plus loss-option columns | required                    |
 | `--loss-type`      | Loss to guide with; its option flags become available    | `real_space_density`        |
 | `--loss-config`    | Loss configuration file, to combine losses              | none                        |
-| `--models`           | Model to run. One of `boltz1`, `boltz2`, `protenix`, `rf3` | required                    |
+| `--models`           | Model to run. One of `boltz1`, `boltz2`, `protenix`, `rf3`, `protpardelle` | required    |
 | `--scalers`          | Guidance method(s) to sweep                                | `pure_guidance fk_steering` |
 | `--ensemble-sizes`   | Space-separated values, e.g. `"1 4"`                       | `"1 2 4 8"`                 |
 | `--gradient-weights` | Space-separated values, e.g. `"0.1 0.2"`                   | `"0.01 0.1 0.2"`            |
@@ -338,7 +411,7 @@ synced branch changes `pyproject.toml` or `pixi.lock`, `run_experiments` stops
 with a clear error instead of mutating the baked environment. For dependency
 debugging only, opt into an on-pod pixi update with
 `RUNTIME_PIXI=1 run_experiments ...`; reproducible scientist runs should use a
-rebuilt `pixi-with-checkpoints:sampleworks` image instead.
+rebuilt image instead (a new `sampleworks` pin in the actl catalog).
 
 ## Running preset analyses on ACTL (`run_analysis`)
 
@@ -383,17 +456,15 @@ Sampleworks now has a two-layer image split:
 
 Image names:
 
-| Purpose                    | Image                                                                          |
-| -------------------------- | ------------------------------------------------------------------------------ |
-| Public Sampleworks runtime | `diffuseproject/pixi-with-checkpoints`                                         |
-| Astera/ACTL runtime        | `sampleworks` alias; run `actl pod images` for the resolved, digest-pinned ref |
+| Purpose                    | Image (Harbor `diffuse` project)                                                   |
+| -------------------------- | ---------------------------------------------------------------------------------- |
+| Model checkpoints          | `diffuse/sampleworks-checkpoints`, built by `checkpoints.yml`                      |
+| Sampleworks runtime        | `diffuse/pixi-with-checkpoints-public`                                             |
+| Astera/ACTL runtime        | `sampleworks` alias; run `actl pod images` for the resolved, digest-pinned ref     |
 
-CI publishes these tags:
-
-| Image         | Tags                                                                         |
-| ------------- | ---------------------------------------------------------------------------- |
-| Public        | `latest` on `main`, `sha-<short-sha>`, release semver tags                   |
-| Astera/Harbor | `latest` and `sampleworks` on `main`, `sha-<short-sha>`, release semver tags |
+Tags in the `diffuse` project are immutable, so CI publishes no moving tags:
+both runtime images get `sha-<short-sha>` on `main` and the semver tags on a
+release, and the checkpoints image gets a tag unique to its run.
 
 The Astera image is always built from the exact public `sha-<short-sha>` image
 produced earlier in the same workflow run, then adds EXT, Dynamic PDB CLI, and
@@ -401,13 +472,13 @@ small workspace tools on top.
 
 CI configuration variables:
 
-| Variable                                  | Purpose                                                                                                                                              |
-| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SAMPLEWORKS_PUBLIC_REGISTRY`             | Public registry host; defaults to `docker.io`                                                                                                        |
-| `SAMPLEWORKS_PUBLIC_IMAGE`                | Public image path; defaults to `diffuseproject/pixi-with-checkpoints`                                                                                |
-| `SAMPLEWORKS_CHECKPOINTS_DOCKERHUB_IMAGE` | Optional public Docker Hub checkpoint mirror destination tag; defaults to `docker.io/diffuseproject/sampleworks-checkpoints:latest`                  |
-| `SAMPLEWORKS_CUDA_BASE_IMAGE`             | Optional digest-pinned CUDA base override                                                                                                            |
-| `SAMPLEWORKS_CHECKPOINTS_SOURCE_PATH`     | **Required.** Digest-pinned path of the private checkpoint image CI mirrors to Docker Hub, without the registry host (e.g. `library/foo@sha256:...`) |
+| Variable                         | Purpose                                                                                                                                  |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `SAMPLEWORKS_CHECKPOINTS_IMAGE`  | **Required.** Digest-pinned Harbor path of the checkpoints image, without the registry host, as printed in the `checkpoints.yml` summary |
+| `SAMPLEWORKS_CUDA_BASE_IMAGE`    | Optional digest-pinned CUDA base override                                                                                                |
+
+The checkpoints image is rebuilt from upstream sources: `docker/checkpoint-image/manifest.tsv`
+lists every file's URL and sha256, and the build fails on any mismatch.
 
 One CI secret, `ASTERA_REGISTRY`, holds the internal registry host. It is a
 secret rather than a variable because this repo is public, which makes its
@@ -421,7 +492,7 @@ Build the public image locally:
 ```bash
 docker build --platform linux/amd64 \
   --build-arg CHECKPOINTS_IMAGE=<checkpoint-image-ref> \
-  -t diffuseproject/pixi-with-checkpoints:local \
+  -t pixi-with-checkpoints:local \
   .
 ```
 
@@ -432,16 +503,15 @@ repository secret):
 ```bash
 docker build --platform linux/amd64 \
   -f Dockerfile.astera \
-  --build-arg PIXI_WITH_CHECKPOINTS_IMAGE=diffuseproject/pixi-with-checkpoints:local \
-  -t "${ASTERA_REGISTRY}/library/pixi-with-checkpoints:local" \
+  --build-arg PIXI_WITH_CHECKPOINTS_IMAGE=pixi-with-checkpoints:local \
+  -t "${ASTERA_REGISTRY}/diffuse/pixi-with-checkpoints:local" \
   .
 ```
 
-For local public builds, pass `CHECKPOINTS_IMAGE` as a public, digest-pinned
-checkpoint image ref. In CI, the Docker workflow first mirrors the private Harbor
-checkpoint source to Docker Hub, verifies the digest, and passes the resulting
-digest-pinned Docker Hub ref to the public build so that build never needs Harbor
-credentials.
+For local public builds, pass `CHECKPOINTS_IMAGE` as a digest-pinned checkpoints
+image ref, or build one first with
+`docker build --platform linux/amd64 -t sampleworks-checkpoints:local docker/checkpoint-image`.
+In CI, both runtime builds pull from and push to Harbor over Astera's tailnet.
 
 ## Development
 
@@ -462,7 +532,7 @@ uv sync --group test
 ```
 
 The existing GPU model environments are split by model, e.g. `boltz-dev`,
-`protenix-dev`, `rf3-dev`. To install dev dependencies and run tests there:
+`protenix-dev`, `rf3-dev`, `bioemu2-dev`. To install dev dependencies and run tests there:
 
 ```bash
 pixi install -e [model]-dev    # add pytest, ruff, ty

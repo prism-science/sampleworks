@@ -106,6 +106,8 @@ class RealSpaceDensityOptions:
 
     def __post_init__(self):
         _check_resolution(self.resolution)
+        if not isinstance(self.allow_torch_fallback, bool):
+            raise ValueError("allow_torch_fallback must be a boolean")
 
 
 @dataclass(frozen=True)
@@ -209,6 +211,33 @@ class DiffuseBraggOptions:
             raise ValueError(
                 f"bragg_weight must lie in [0, 1] to be a convex mixture; got {self.bragg_weight}."
             )
+
+
+@dataclass(frozen=True)
+class BondGeometryOptions:
+    """Options for :class:`~sampleworks.core.losses.geometry.BondGeometryLoss`."""
+
+    bond_tolerance: float = opt(
+        0.2, help="Bond-length deviation from ideal, in Angstroms, that costs nothing"
+    )
+    clash_padding: float = opt(
+        0.4,
+        help="Angstroms added to the sum of covalent radii below which non-bonded atoms clash",
+    )
+    bond_power: int = opt(2, help="Exponent on the bond-length hinge", choices=(1, 2))
+
+    def __post_init__(self):
+        if (
+            not isinstance(self.bond_power, int)
+            or isinstance(self.bond_power, bool)
+            or self.bond_power not in (1, 2)
+        ):
+            raise ValueError(f"bond_power must be 1 or 2; got {self.bond_power!r}.")
+        for name in ("bond_tolerance", "clash_padding"):
+            value = getattr(self, name)
+            is_number = isinstance(value, (int, float)) and not isinstance(value, bool)
+            if not (is_number and math.isfinite(value) and value >= 0):
+                raise ValueError(f"{name} must be a finite, non-negative distance; got {value!r}.")
 
 
 def option_type(options_cls: type, name: str) -> Any:

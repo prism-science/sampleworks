@@ -44,7 +44,7 @@ repos:
         language: system
         types: [python]
         pass_filenames: true
-        exclude: (real_space_density|protenix|rf3|rfd3)
+        exclude: (real_space_density|protenix|rf3|rfd3|bioemu2)
         priority: 50
 
       - id: ty-rf3
@@ -54,6 +54,15 @@ repos:
         types: [python]
         pass_filenames: true
         files: (rf3|rfd3)
+        priority: 50
+
+      - id: ty-bioemu2
+        name: ty (bioemu2 environment)
+        entry: bash -c 'pixi run -e bioemu2-dev ty check "$@"' --
+        language: system
+        types: [python]
+        pass_filenames: true
+        files: bioemu2
         priority: 50
 
       - id: ty-protenix

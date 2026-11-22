@@ -1,10 +1,10 @@
-"""Coordinate-space bond-geometry regularizer for inference-time latent optimization (IT-opt).
+"""Coordinate-space bond-geometry regularizer: bond-length and steric-clash hinges.
 
-When the density loss is optimized aggressively, the latent update can distort the denoised
-structure -- stretching covalent bonds and driving non-bonded atoms into steric clashes -- to buy a
-little density fit. That is the overshoot observed on high-baseline targets (e.g. 1VME, where
+When a data loss is optimized aggressively, guidance can distort the denoised structure --
+stretching covalent bonds and driving non-bonded atoms into steric clashes -- to buy a little data
+fit. That is the overshoot observed on high-baseline targets (e.g. 1VME, where IT-opt
 z-optimization raised clashes while dropping RSCC). This module adds a differentiable penalty on the
-denoised coordinates that the optimizer must trade against, so it cannot reach a good density score
+denoised coordinates that guidance must trade against, so it cannot reach a good data score
 through broken geometry.
 
 It is a faithful port of the reference ``BondLengthLossFunction``
@@ -12,19 +12,28 @@ It is a faithful port of the reference ``BondLengthLossFunction``
 a bonded-pair length hinge plus a non-bonded steric-clash hinge. Both take the violation's positive
 part; the bond term then raises it to ``bond_power`` (default 2) while the clash term stays linear,
 matching the reference. The one deliberate divergence is how ``collision_loss`` reduces the
-ensemble axis; see the comment there. It is meant
-to be an additive term inside ``LatentOptimization``'s per-step loss, not a standalone objective,
-and does nothing unless its weight is set.
+ensemble axis; see the comment there. It is registered as the ``bond_geometry`` loss, so it combines
+with a data loss through a loss configuration file. See for example:
+experiments/losses/density_with_bond_geometry.yaml
 """
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 import torch
 from biotite.structure import AtomArray, connect_via_residue_names
+from jaxtyping import Float, Int
 from torch import Tensor
 
 from sampleworks.utils.elements import covalent_radius
+
+
+if TYPE_CHECKING:
+    from sampleworks.core.losses.options import BondGeometryOptions
+    from sampleworks.core.losses.protocol import LossInputs
+    from sampleworks.core.losses.registry import LossBuildContext
 
 
 # Type hints below (": str", "-> Tensor", "| None" meaning "or None") only CLAIM what a value
@@ -32,45 +41,61 @@ from sampleworks.utils.elements import covalent_radius
 # human readers and the ty checker. Worked examples: core/scalers/latent_optimization.py.
 
 
-# TODO(#363): widen __call__ to LossFunctionProtocol so this composes with the other losses.
 class BondGeometryLoss:
     """Penalize distorted bonds and steric clashes in the denoised structure.
 
-    The topology (which atoms are bonded, their ideal bond lengths, the per-atom-pair collision
-    distances, and which pairs to score for clashes) is read once from ``atom_array`` at
-    construction, so each step is just cheap tensor ops on the coords. ``atom_array`` MUST be the
-    atom set whose ordering matches the coordinate tensor the loss sees -- the *model* atom array,
-    not the deposited structure -- or the bond indices will not line up with the coordinates.
+    A two-phase loss (see ``PreparableLossFunctionProtocol``): ``__init__`` takes the hinge
+    settings, and :meth:`prepare` reads the topology (which atoms are bonded, their ideal bond
+    lengths, the per-atom-pair collision distances, and which pairs to score for clashes) once from
+    the model atom array, so each step is just cheap tensor ops on the coordinates. Only the
+    coordinates are scored; the per-atom elements, B-factors and occupancies are ignored.
 
-    This is a penalty: it is added to, and minimized as part of, ``LatentOptimization``'s loss.
-
-    Note: this does not satisfy ``LossFunctionProtocol``. ``__call__`` takes only ``coords``,
-    not the protocol's per-atom ``elements``/``b_factors``/``occupancies``, so the planned
-    redefinition of the losses interface will have to admit penalties of this shape.
+    The penalty is unweighted: a ``CompositeLoss`` weight, or the caller, scales it.
     """
 
     def __init__(
         self,
-        atom_array: AtomArray,
-        weight: float,
-        device: torch.device | str,
         *,
         bond_tolerance: float = 0.2,
         clash_padding: float = 0.4,
         bond_power: int = 2,
     ):
-        """Build the bond topology and collision-distance matrix from ``atom_array`` once.
+        """Store the hinge settings; the topology is built by :meth:`prepare`.
 
-        ``weight`` scales the whole penalty; ``bond_tolerance`` (Å) is the slack a bond may deviate
-        from its ideal length before it is penalized; ``clash_padding`` (Å) is added to the sum of
-        covalent radii to set how close non-bonded atoms may approach before they count as clashing;
-        ``bond_power`` is the exponent on the bond-length hinge (2 = quadratic, per the reference).
+        ``bond_tolerance`` (Å) is the slack a bond may deviate from its ideal length before it is
+        penalized; ``clash_padding`` (Å) is added to the sum of covalent radii to set how close
+        non-bonded atoms may approach before they count as clashing; ``bond_power`` is the exponent
+        on the bond-length hinge (2 = quadratic, per the reference).
         """
-        self.weight = weight
         self.bond_tolerance = bond_tolerance
         self.clash_padding = clash_padding
         self.bond_power = bond_power
+        self._radii: Tensor | None = None
 
+    def prepare(self, loss_inputs: LossInputs, *, device: torch.device | str = "cpu") -> None:
+        """Build the bond topology and collision-distance matrix from the model atom array.
+
+        Side effect: replaces this loss's topology tensors, so re-running it rebinds the loss.
+
+        Parameters
+        ----------
+        loss_inputs
+            Inputs for the atoms the model operates on; ``loss_inputs.atom_array`` sets the atom
+            order of the coordinates ``__call__`` scores.
+        device
+            Torch device the topology tensors are placed on.
+
+        Raises
+        ------
+        ValueError
+            If ``loss_inputs`` carries no atom array.
+        """
+        atom_array = loss_inputs.atom_array
+        if atom_array is None:
+            raise ValueError(
+                "BondGeometryLoss needs the model atom array to infer bonds; build the loss "
+                "inputs with LossInputs.from_atom_array."
+            )
         # One covalent radius per atom, looked up once. Both penalties below are sums of two radii,
         # so they index this instead of querying gemmi again per bond and per atom.
         self._radii = self._build_radii(atom_array, device)
@@ -96,19 +121,24 @@ class BondGeometryLoss:
         return torch.tensor(radii, dtype=torch.float32, device=device)
 
     def _build_bonds(self, atom_array: AtomArray, device):
-        """Bonded-atom endpoints and ideal lengths, inferred from residue-name templates.
+        """Bonded-atom endpoints and ideal lengths, from residue templates and explicit bonds.
 
         biotite's ``connect_via_residue_names`` infers the intra- and inter-residue bonds from the
-        standard component templates and returns a ``BondList``. By default that list already holds
-        each bond exactly once with the lower atom index first, so ``as_array()`` gives us the edge
-        list directly -- its columns are atom i, atom j, bond type. (``get_all_bonds()`` would
-        instead return padded per-atom adjacency, which lists every bond twice.) A bond's ideal
-        length is the sum of the two atoms' covalent radii.
+        standard component templates and returns a ``BondList``. Templates cannot know bonds that
+        are specific to this structure (disulfides, covalent ligand links), so the bonds
+        ``atom_array`` itself carries are merged in; ``BondList.merge`` drops the duplicates. The
+        merged list holds each bond exactly once with the lower atom index first, so ``as_array()``
+        gives us the edge list directly -- its columns are atom i, atom j, bond type.
+        (``get_all_bonds()`` would instead return padded per-atom adjacency, which lists every bond
+        twice.) A bond's ideal length is the sum of the two atoms' covalent radii.
 
         Returns three aligned 1-D tensors, each of length n_bonds: the first endpoint of every bond,
         the second endpoint, and the ideal length.
         """
-        bonds = connect_via_residue_names(atom_array).as_array()  # [n_bonds, 3]: i, j, bond type
+        bond_list = connect_via_residue_names(atom_array)
+        if atom_array.bonds is not None:
+            bond_list = bond_list.merge(atom_array.bonds)
+        bonds = bond_list.as_array()  # [n_bonds, 3]: i, j, bond type
         # as_array() is uint32, which torch refuses to convert, so cast to a signed integer.
         pair_array = bonds[:, :2].astype(np.int64)
 
@@ -202,14 +232,71 @@ class BondGeometryLoss:
         #   sum          1x .. Ex      every member counted, but scales the penalty with E
         #
         # We take max + mean. The max keeps the worst member's full push, so the penalty can never
-        # come out weaker than it is today -- which matters because bond_length_weight is tuned to
-        # the smallest value that fixes clashes, and mean alone could drop below that floor. The
-        # mean then gives every other clashing member a share instead of nothing, which is what
-        # max alone failed to do. sum would do that too, but its value grows with ensemble size.
+        # come out weaker than it is today -- which matters because the bond_geometry weight is
+        # tuned to the smallest value that fixes clashes, and mean alone could drop below that
+        # floor. The mean then gives every other clashing member a share instead of nothing, which
+        # is what max alone failed to do. sum would do that too, but its value grows with ensemble
+        # size.
         combined_overlap = overlap_per_member.max(dim=0).values + overlap_per_member.mean(dim=0)
         scored_overlap = combined_overlap * self._scored_pairs  # [n, n]; unscored pairs zeroed
         return scored_overlap.sum()
 
-    def __call__(self, coords: Tensor) -> Tensor:
-        """Weighted sum of the bond-length and collision penalties, added to the loss."""
-        return self.weight * (self.bond_length_loss(coords) + self.collision_loss(coords))
+    def __call__(
+        self,
+        coordinates: Float[Tensor, "batch n_atoms 3"],
+        elements: Int[Tensor, "batch n_atoms"],
+        b_factors: Float[Tensor, "batch n_atoms"],
+        occupancies: Float[Tensor, "batch n_atoms"],
+    ) -> Float[Tensor, ""]:
+        """Sum of the bond-length and collision penalties over the ensemble.
+
+        Parameters
+        ----------
+        coordinates
+            Denoised coordinates in model atom order, shape [batch, n_atoms, 3]; the batch axis is
+            the ensemble.
+        elements, b_factors, occupancies
+            Accepted for ``LossFunctionProtocol`` compatibility and ignored.
+
+        Returns
+        -------
+        Float[Tensor, ""]
+            Scalar penalty to be minimized.
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`prepare` has not been called.
+        """
+        del elements, b_factors, occupancies
+        if self._radii is None:
+            raise RuntimeError("BondGeometryLoss.prepare() must be called before scoring.")
+        return self.bond_length_loss(coordinates) + self.collision_loss(coordinates)
+
+
+def build_bond_geometry_loss(
+    options: BondGeometryOptions, context: LossBuildContext
+) -> BondGeometryLoss:
+    """Build the bond-geometry loss from its configured options.
+
+    The topology arrives in :meth:`BondGeometryLoss.prepare`, once sampling knows the model atom
+    array, so ``context`` is unused.
+
+    Parameters
+    ----------
+    options
+        Bond-geometry options; see :class:`~sampleworks.core.losses.options.BondGeometryOptions`.
+    context
+        Run-level inputs. Unused here, kept for a uniform builder signature.
+
+    Returns
+    -------
+    BondGeometryLoss
+        Unprepared loss penalizing bond-length deviations and steric clashes.
+    """
+    del context  # topology and device arrive in prepare()
+    return BondGeometryLoss(
+        bond_tolerance=options.bond_tolerance,
+        clash_padding=options.clash_padding,
+        bond_power=options.bond_power,
+    )

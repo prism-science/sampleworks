@@ -56,8 +56,8 @@ class TestFromCliUnified:
         config = GuidanceConfig.from_cli(argv)
         assert config.model_name == "rf3"
         assert config.guidance_type == "fk_steering"
-        assert hasattr(config, "num_particles")
-        assert hasattr(config, "fk_lambda")
+        assert config.num_particles == 3
+        assert config.fk_lambda == 1.0
 
     def test_model_specific_args_boltz2_method(self):
         argv = [
@@ -101,20 +101,63 @@ class TestFromCliUnified:
         assert getattr(config, "protpardelle_config_path") == "/data/cc89.yaml"
         assert config.num_diffusion_steps == 64
 
+    def test_model_specific_args_bioemu2(self):
+        argv = [
+            "--model",
+            "bioemu2",
+            "--guidance-type",
+            "pure_guidance",
+            "--model-checkpoint",
+            "/data/bioemu2-preview/checkpoint.ckpt",
+            "--bioemu2-mode",
+            "structure",
+            "--msa-path",
+            "/data/msa.a3m",
+            "--bioemu2-no-msa-server",
+        ] + COMMON_ARGS
+        config = GuidanceConfig.from_cli(argv)
+        assert getattr(config, "model_checkpoint") == "/data/bioemu2-preview/checkpoint.ckpt"
+        assert getattr(config, "bioemu2_mode") == "structure"
+        assert getattr(config, "msa_path") == "/data/msa.a3m"
+        assert getattr(config, "bioemu2_no_msa_server") is True
+
+    def test_bioemu2_defaults_to_equilibrium_mode(self):
+        argv = ["--model", "bioemu2", "--guidance-type", "pure_guidance"] + COMMON_ARGS
+        config = GuidanceConfig.from_cli(argv)
+        assert getattr(config, "bioemu2_mode") == "equilibrium"
+        assert not getattr(config, "bioemu2_no_msa_server")
+
     def test_guidance_specific_args_fk(self):
+        """Every FK steering flag lands on the config with the value passed.
+
+        Each value differs from the flag's default, so a flag that is parsed
+        but never copied onto the config cannot pass by falling back to it.
+        """
         argv = [
             "--model",
             "boltz1",
             "--guidance-type",
             "fk_steering",
             "--num-particles",
-            "5",
+            "5",  # default 3
             "--fk-lambda",
-            "2.0",
+            "2.0",  # default 1.0
+            "--fk-resampling-interval",
+            "4",  # default 1
+            "--num-gd-steps",
+            "3",  # default 1
+            "--guidance-weight",
+            "0.25",  # default 0.01
+            "--guidance-interval",
+            "2",  # default 1
         ] + COMMON_ARGS
         config = GuidanceConfig.from_cli(argv)
         assert config.num_particles == 5
         assert config.fk_lambda == 2.0
+        assert config.fk_resampling_interval == 4
+        assert config.num_gd_steps == 3
+        assert config.guidance_weight == 0.25
+        assert config.guidance_interval == 2
 
     def test_guidance_specific_args_pure(self):
         argv = [

@@ -1,18 +1,35 @@
 """Tests for ``BondGeometryLoss``, the bond-length and steric-clash penalty.
 
 The toy systems are a water molecule (two O-H bonds, one non-bonded H-H pair) and
-pairs of single-atom residues (no bonds, one non-bonded pair), placed by hand so the
-expected hinge values follow from the covalent radii alone. The last test scores the
-deposited 1VME protein against a noised copy of it.
+pairs of single-atom residues (no template bonds, one pair that is non-bonded unless
+the atom array bonds it explicitly), placed by hand so the expected hinge values follow
+from the covalent radii alone. One test scores the deposited 1VME protein against a
+noised copy of it.
 """
 
 import numpy as np
 import pytest
 import torch
-from biotite.structure import array, Atom, AtomArray, AtomArrayStack, filter_amino_acids
+from biotite.structure import (
+    array,
+    Atom,
+    AtomArray,
+    AtomArrayStack,
+    BondList,
+    filter_amino_acids,
+)
 from biotite.structure.info import residue
+from sampleworks.core.losses.config import build_loss, LossConfig
 from sampleworks.core.losses.geometry import BondGeometryLoss
+from sampleworks.core.losses.options import BondGeometryOptions
+from sampleworks.core.losses.protocol import (
+    LossInputs,
+    PreparableLossFunctionProtocol,
+    prepare_loss_if_needed,
+)
+from sampleworks.core.losses.registry import LossBuildContext
 from sampleworks.utils.elements import covalent_radius
+from sampleworks.utils.guidance_script_arguments import GuidanceConfig
 
 
 BOND_TOLERANCE = 0.2
@@ -20,30 +37,73 @@ CLASH_PADDING = 0.4
 OH_IDEAL_LENGTH = covalent_radius("O") + covalent_radius("H")
 
 
-def make_loss(atom_array: AtomArray, weight: float = 1.0, **kwargs) -> BondGeometryLoss:
-    """A ``BondGeometryLoss`` on CPU with the default tolerance and padding.
+def make_loss(atom_array: AtomArray, **kwargs) -> BondGeometryLoss:
+    """A ``BondGeometryLoss`` with the default tolerance and padding, prepared on ``atom_array``.
 
     Parameters
     ----------
     atom_array
         Atoms whose order matches the coordinates the loss will score.
-    weight
-        Scale on the summed penalty.
     **kwargs
         Further keyword arguments for ``BondGeometryLoss``.
 
     Returns
     -------
     BondGeometryLoss
-        The constructed loss.
+        The prepared loss.
     """
-    return BondGeometryLoss(
-        atom_array,
-        weight,
-        "cpu",
-        bond_tolerance=BOND_TOLERANCE,
-        clash_padding=CLASH_PADDING,
-        **kwargs,
+    loss = BondGeometryLoss(bond_tolerance=BOND_TOLERANCE, clash_padding=CLASH_PADDING, **kwargs)
+    loss.prepare(loss_inputs_for(atom_array), device="cpu")
+    return loss
+
+
+def loss_inputs_for(atom_array: AtomArray) -> LossInputs:
+    """Loss inputs carrying ``atom_array`` as their topology, with placeholder per-atom tensors.
+
+    The geometry loss reads only the topology and the coordinates, so the toy arrays here need no
+    B-factor or occupancy annotations.
+
+    Parameters
+    ----------
+    atom_array
+        Atoms the inputs describe.
+
+    Returns
+    -------
+    LossInputs
+        Inputs for one ensemble member.
+    """
+    n_atoms = len(atom_array)
+    return LossInputs(
+        elements=torch.zeros((1, n_atoms), dtype=torch.long),
+        b_factors=torch.zeros((1, n_atoms)),
+        occupancies=torch.ones((1, n_atoms)),
+        input_coords=torch.zeros((1, n_atoms, 3)),
+        atom_array=atom_array,
+    )
+
+
+def score(loss: BondGeometryLoss, coords: torch.Tensor) -> torch.Tensor:
+    """Call ``loss`` through ``LossFunctionProtocol``, with placeholder per-atom tensors.
+
+    Parameters
+    ----------
+    loss
+        Prepared loss.
+    coords
+        Coordinates, shape [batch, n_atoms, 3].
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar penalty.
+    """
+    per_atom = torch.zeros(coords.shape[:-1])
+    return loss(
+        coordinates=coords,
+        elements=per_atom.long(),
+        b_factors=per_atom,
+        occupancies=per_atom + 1.0,
     )
 
 
@@ -223,37 +283,46 @@ def test_unrecognized_element_uses_the_fallback_radius():
     assert carbon.collision_loss(pair_coords(distance + 0.05)) > 0
 
 
-@pytest.mark.parametrize("weight", [0.0, 0.5, 3.0])
-def test_call_is_the_weighted_sum_of_both_penalties(water, weight):
-    """``__call__`` scales the bond and clash penalties together by ``weight``.
-
-    Parameters
-    ----------
-    weight
-        Scale on the summed penalty.
-    """
-    loss = make_loss(water, weight=weight)
+def test_call_is_the_sum_of_both_penalties(water):
+    """``__call__`` adds the bond and clash penalties, unweighted."""
+    loss = make_loss(water)
     coords = water_coords(OH_IDEAL_LENGTH - 0.5)  # bond and H-H clash penalties both nonzero
     bond = loss.bond_length_loss(coords)
     clash = loss.collision_loss(coords)
 
     assert bond > 0 and clash > 0
-    assert loss(coords).item() == pytest.approx(weight * (bond + clash).item())
+    assert score(loss, coords).item() == pytest.approx((bond + clash).item())
 
 
-def test_deposited_protein_scores_far_below_a_noised_copy(structure_1vme):
-    """Deposited 1VME has near-ideal bonds and few clashes; noise breaks both.
+def test_scoring_before_prepare_is_an_error():
+    """An unprepared loss has no topology, so scoring it fails with a clear message."""
+    with pytest.raises(RuntimeError, match="prepare"):
+        score(BondGeometryLoss(), water_coords(OH_IDEAL_LENGTH))
 
-    A few gradient-descent steps on the noised coordinates then lower the penalty.
-    """
+
+def test_satisfies_the_preparable_loss_protocol():
+    """The loss plugs into guidance wherever a two-phase loss does."""
+    assert isinstance(BondGeometryLoss(), PreparableLossFunctionProtocol)
+
+
+@pytest.fixture
+def protein_1vme(structure_1vme) -> AtomArray:
+    """The modelled amino-acid atoms of 1VME residues 1-40, first model only."""
     atom_array = structure_1vme["asym_unit"]
     if isinstance(atom_array, AtomArrayStack):
         atom_array = atom_array[0]
     modelled = np.isfinite(atom_array.coord).all(axis=-1)
-    protein = atom_array[filter_amino_acids(atom_array) & modelled & (atom_array.res_id <= 40)]
-    loss = make_loss(protein)
+    return atom_array[filter_amino_acids(atom_array) & modelled & (atom_array.res_id <= 40)]
 
-    deposited = torch.tensor(protein.coord[None], dtype=torch.float32)  # [1, n_atoms, 3]
+
+def test_deposited_protein_scores_far_below_a_noised_copy(protein_1vme):
+    """Deposited 1VME has near-ideal bonds and few clashes; noise breaks both.
+
+    A few gradient-descent steps on the noised coordinates then lower the penalty.
+    """
+    loss = make_loss(protein_1vme)
+
+    deposited = torch.tensor(protein_1vme.coord[None], dtype=torch.float32)  # [1, n_atoms, 3]
     generator = torch.Generator().manual_seed(0)
     noised = deposited + 0.3 * torch.randn(deposited.shape, generator=generator)
 
@@ -262,9 +331,107 @@ def test_deposited_protein_scores_far_below_a_noised_copy(structure_1vme):
 
     coords = noised.clone().requires_grad_(True)
     optimizer = torch.optim.SGD([coords], lr=1e-3)
-    initial = loss(coords).item()
+    initial = score(loss, coords).item()
     for _ in range(20):
         optimizer.zero_grad()
-        loss(coords).backward()
+        score(loss, coords).backward()
         optimizer.step()
-    assert loss(coords).item() < initial
+    assert score(loss, coords).item() < initial
+
+
+def test_weighted_loss_configuration_scales_the_penalty(protein_1vme):
+    """A ``bond_geometry`` entry in a loss configuration builds, prepares, and applies its weight.
+
+    The inputs come from ``LossInputs.from_atom_array``, the path guidance runs take.
+    """
+    weight = 0.25
+    config = LossConfig.from_mapping(
+        {"bond_geometry": {"weight": weight, "loss_options": {"bond_tolerance": BOND_TOLERANCE}}}
+    )
+    loss_inputs = LossInputs.from_atom_array(protein_1vme, ensemble_size=2)
+    configured = build_loss(config, LossBuildContext(structure={}))
+    prepare_loss_if_needed(configured, loss_inputs)
+
+    generator = torch.Generator().manual_seed(0)
+    coords = loss_inputs.input_coords + 0.3 * torch.randn(
+        loss_inputs.input_coords.shape, generator=generator
+    )
+    configured_value = configured(
+        coordinates=coords,
+        elements=loss_inputs.elements,
+        b_factors=loss_inputs.b_factors,
+        occupancies=loss_inputs.occupancies,
+    )
+    unweighted_value = score(make_loss(protein_1vme), coords)
+
+    assert configured_value.item() == pytest.approx(weight * unweighted_value.item(), rel=1e-5)
+
+
+def test_bond_geometry_is_selectable_from_the_command_line():
+    """``--loss-type bond_geometry`` exposes the loss's own options as flags."""
+    config = GuidanceConfig.from_cli(
+        [
+            "--model",
+            "boltz2",
+            "--guidance-type",
+            "pure_guidance",
+            "--protein",
+            "1VME",
+            "--structure",
+            "1vme.cif",
+            "--loss-type",
+            "bond_geometry",
+            "--clash-padding",
+            "0.5",
+        ]
+    )
+    (entry,) = config.resolved_loss_config().with_effective_options().entries
+
+    assert entry.options["clash_padding"] == pytest.approx(0.5)
+    assert entry.options["bond_tolerance"] == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize("option", ["bond_tolerance", "clash_padding"])
+@pytest.mark.parametrize("value", [-0.1, float("inf")])
+def test_options_reject_invalid_distances(option, value):
+    """Negative or non-finite distances fail when the options are built, before any model loads.
+
+    Parameters
+    ----------
+    option
+        Distance option under test.
+    value
+        Invalid value for it.
+    """
+    with pytest.raises(ValueError, match=option):
+        BondGeometryOptions(**{option: value})
+
+
+@pytest.fixture
+def explicitly_bonded_sulfurs() -> AtomArray:
+    """Two single-atom sulfur residues joined by a bond the residue templates do not know.
+
+    Stands in for a disulfide or a covalent ligand link: the bond exists only in the
+    atom array's own ``bonds``.
+    """
+    sulfurs = single_atom_residues("S")
+    sulfurs.bonds = BondList(sulfurs.array_length(), np.array([[0, 1]]))
+    return sulfurs
+
+
+def test_explicit_bond_is_not_scored_as_a_clash(explicitly_bonded_sulfurs):
+    """An explicitly bonded pair at its ideal length costs nothing; unbonded, it clashes."""
+    ideal_length = 2 * covalent_radius("S")
+    coords = pair_coords(ideal_length)
+
+    assert make_loss(single_atom_residues("S")).collision_loss(coords) > 0
+    assert score(make_loss(explicitly_bonded_sulfurs), coords) == 0.0
+
+
+def test_explicit_bond_is_held_at_its_ideal_length(explicitly_bonded_sulfurs):
+    """Stretching an explicit bond past the tolerance costs the excess squared."""
+    excess = 0.3
+    stretched_length = 2 * covalent_radius("S") + BOND_TOLERANCE + excess
+    loss = make_loss(explicitly_bonded_sulfurs)
+
+    assert loss.bond_length_loss(pair_coords(stretched_length)).item() == pytest.approx(excess**2)
