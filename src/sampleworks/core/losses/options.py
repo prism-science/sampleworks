@@ -199,13 +199,18 @@ class DiffuseBraggOptions:
         0.10, help="Width of the solvent mask's transition, e/A^3, for an explicit cutoff"
     )
     exclude_free_reflections: bool = opt(
-        False, help="Drop the R-free test set from the Bragg target"
+        False, help="Exclude the R-free test set from the Bragg residual during guidance"
     )
     free_flag_column: str | None = opt(
         None, help="R-free flag column in the Bragg MTZ (default: its sole integer column)"
     )
     test_set_value: int = opt(
         1, help="Flag value marking the test set: 1 (Phenix, default) or 0 (CCP4)"
+    )
+    exclude_outliers: bool = opt(
+        True,
+        help="Exclude outlier Bragg reflections during guidance, currently defined as "
+        "non-positive amplitudes",
     )
 
     def __post_init__(self):
