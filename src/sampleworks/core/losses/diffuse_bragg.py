@@ -44,13 +44,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast, TYPE_CHECKING
+from typing import cast, NamedTuple, TYPE_CHECKING
 
 import gemmi
 import numpy as np
 import reciprocalspaceship as rs
 import torch
-from jaxtyping import Float, Int
+from jaxtyping import Bool, Float, Int
 from loguru import logger
 from lunus.sf import mean_and_diffuse
 from lunus.sf.symmetry_torch import supercell_factors
@@ -77,6 +77,138 @@ DEFAULT_SOLVENT_TAPER_WIDTH = 0.10
 # catches an R-free convention mismatch, the count a reflection set too small to guide.
 _MIN_RETAINED_REFLECTION_FRACTION = 0.75
 _MIN_RETAINED_REFLECTIONS = 5_000
+
+
+class BraggTarget(NamedTuple):
+    """The measured Bragg amplitudes of one MTZ, row-aligned, with its R-free flags.
+
+    Attributes
+    ----------
+    hkl
+        int64 Miller indices ``[n_refl, 3]``, as the MTZ indexes them.
+    f_obs
+        float64 observed amplitudes ``[n_refl]``, all finite.
+    free_mask
+        True where the reflection is in the R-free test set, ``[n_refl]``. ``None``
+        when the MTZ's flag column could not be resolved, which is distinct from a
+        resolved column that flags nothing.
+    unit_cell, space_group
+        Crystal metadata of the MTZ.
+    """
+
+    hkl: Int[np.ndarray, "n_refl 3"]
+    f_obs: Float[np.ndarray, " n_refl"]
+    free_mask: Bool[np.ndarray, " n_refl"] | None
+    unit_cell: gemmi.UnitCell
+    space_group: gemmi.SpaceGroup
+
+
+def _within_resolution(
+    cell: gemmi.UnitCell,
+    hkl: Int[np.ndarray, "n_refl 3"],
+    resolution: float,
+    name: str,
+) -> Bool[np.ndarray, " n_refl"]:
+    """Mask of one target's reflections at or below a high-resolution cutoff.
+
+    Parameters
+    ----------
+    cell
+        Cell the d-spacings are computed in.
+    hkl
+        int64 Miller indices ``[n_refl, 3]``.
+    resolution
+        High-resolution cutoff in Å.
+    name
+        ``"Bragg"`` or ``"diffuse"``, for the error message.
+
+    Returns
+    -------
+    Bool[np.ndarray, " n_refl"]
+        True where ``d >= resolution``.
+
+    Raises
+    ------
+    ValueError
+        If no reflection survives the cutoff.
+    """
+    d_spacing = np.asarray(cell.calculate_d_array(hkl), dtype=np.float64)
+    keep = d_spacing >= resolution
+    if not keep.any():
+        raise ValueError(
+            f"No {name} reflections survive a {resolution} A cutoff; the "
+            f"target reaches {d_spacing.min():.2f} A."
+        )
+    return keep
+
+
+def load_bragg_target(
+    mtz_path: str | Path,
+    *,
+    amplitude_column: str | None = None,
+    free_flag_column: str | None = None,
+    test_set_value: int = 1,
+    resolution: float | None = None,
+) -> BraggTarget:
+    """Read the Bragg amplitudes and R-free flags a structure-factor model is scored on.
+
+    Upon loading the Bragg mtz, keeps every reflection with a finite amplitude inside
+    the cutoff that is not a systematic absence. Test set reflections are NOT dropped.
+    Indices stay as the MTZ gives them, not mapped to canonical reciprocal ASU.
+
+    Parameters
+    ----------
+    mtz_path
+        MTZ holding the observed amplitudes.
+    amplitude_column
+        Amplitude column, resolved by :func:`resolve_mtz_column`: ``None`` takes the
+        MTZ's sole amplitude column.
+    free_flag_column
+        R-free flag column; ``None`` takes the MTZ's sole integer column.
+    test_set_value
+        Flag value marking the test set: 1 in the Phenix convention the synthetic
+        generators write, 0 in CCP4's.
+    resolution
+        High-resolution cutoff in Å, or ``None`` to keep every measured reflection.
+
+    Returns
+    -------
+    BraggTarget
+        The reflections in MTZ row order. ``free_mask`` is ``None`` when the MTZ has
+        no integer column, several with no ``free_flag_column`` to choose between
+        them, or no integer column of that name.
+
+    Raises
+    ------
+    ValueError
+        If the amplitude column cannot be resolved, or no reflection survives the
+        resolution cutoff.
+    """
+    dataset = rs.read_mtz(str(mtz_path))
+    amplitude_column = resolve_mtz_column(
+        dataset, rs.StructureFactorAmplitudeDtype(), column=amplitude_column
+    )
+    f_obs = dataset[amplitude_column].to_numpy(dtype=np.float64)
+    hkl = dataset.get_hkls().astype(np.int64)
+    # A systematic absence is zero by symmetry whatever the model, so it measures
+    # nothing about the structure; SFcalculator drops them from its targets too.
+    keep = np.isfinite(f_obs) & ~rs.utils.is_absent(hkl, dataset.spacegroup)
+    if resolution is not None:
+        keep[keep] = _within_resolution(dataset.cell, hkl[keep], resolution, "Bragg")
+
+    try:
+        flag_column = resolve_mtz_column(dataset, rs.MTZIntDtype(), column=free_flag_column)
+    except ValueError as unresolved:
+        # Not an error here: only a caller that needs the test set can say so.
+        logger.debug(f"No R-free flags read from {mtz_path}: {unresolved}")
+        free_mask = None
+    else:
+        # MTZInt is a nullable integer dtype; as float, a missing flag is NaN and
+        # compares unequal to every value, so an unflagged reflection is working set.
+        flags = dataset[flag_column].to_numpy(dtype=np.float64, na_value=np.nan)
+        free_mask = (flags == test_set_value)[keep]
+
+    return BraggTarget(hkl[keep], f_obs[keep], free_mask, dataset.cell, dataset.spacegroup)
 
 
 class DiffuseBraggLossFunction:
@@ -294,7 +426,9 @@ class DiffuseBraggLossFunction:
         ------
         ValueError
             If the diffuse target's cell is not an integer supercell of the Bragg
-            target's, or a resolution cutoff leaves a term with no reflections.
+            target's, a resolution cutoff leaves a term with no reflections, or
+            ``exclude_free_reflections`` is set and the Bragg target's R-free flags
+            cannot be read or flag every reflection.
         NotImplementedError
             If the diffuse target is indexed on a supercell of the Bragg cell.
         """
@@ -302,19 +436,27 @@ class DiffuseBraggLossFunction:
         diffuse_hkl = diffuse_values = None
         cell = spacegroup = None
 
-        if self._scores_bragg:
-            ds = rs.read_mtz(str(bragg_path))
-            column = resolve_mtz_column(ds, rs.StructureFactorAmplitudeDtype(), column=bragg_column)
-            bragg_hkl, bragg_values = self._finite_column(ds, column)
+        if self._scores_bragg and bragg_path is not None:
+            bragg = load_bragg_target(
+                bragg_path,
+                amplitude_column=bragg_column,
+                free_flag_column=self.free_flag_column,
+                test_set_value=self.test_set_value,
+                resolution=self.resolution,
+            )
+            bragg_hkl, bragg_values = bragg.hkl, bragg.f_obs
             if self.exclude_free_reflections:
-                keep = self._working_set_mask(ds, column)
+                keep = self._working_set_mask(bragg, bragg_path)
                 bragg_hkl, bragg_values = bragg_hkl[keep], bragg_values[keep]
-            cell, spacegroup = ds.cell, ds.spacegroup
+            cell, spacegroup = bragg.unit_cell, bragg.space_group
 
         if self._scores_diffuse:
             ds = rs.read_mtz(str(diffuse_path))
             column = resolve_mtz_column(ds, rs.IntensityDtype(), column=diffuse_column)
-            diffuse_hkl, diffuse_values = self._finite_column(ds, column)
+            diffuse_values = ds[column].to_numpy(dtype=np.float64)
+            measured = np.isfinite(diffuse_values)
+            diffuse_hkl = ds.get_hkls().astype(np.int64)[measured]
+            diffuse_values = diffuse_values[measured]
             if cell is None:
                 cell, spacegroup = ds.cell, ds.spacegroup
             else:
@@ -328,17 +470,12 @@ class DiffuseBraggLossFunction:
                         "needs its own supercell grid, which this loss does not build "
                         "yet (#493); supply a diffuse target indexed on the Bragg cell."
                     )
+            if self.resolution is not None:
+                keep = _within_resolution(cell, diffuse_hkl, self.resolution, "diffuse")
+                diffuse_hkl, diffuse_values = diffuse_hkl[keep], diffuse_values[keep]
 
         if cell is None or spacegroup is None:
             raise RuntimeError("No target was read; __init__ requires at least one.")
-
-        if self.resolution is not None:
-            bragg_hkl, bragg_values = self._within_resolution(
-                cell, self.resolution, "Bragg", bragg_hkl, bragg_values
-            )
-            diffuse_hkl, diffuse_values = self._within_resolution(
-                cell, self.resolution, "diffuse", diffuse_hkl, diffuse_values
-            )
 
         logger.info(
             "Targets:"
@@ -356,44 +493,6 @@ class DiffuseBraggLossFunction:
             )
         )
         return bragg_hkl, bragg_values, diffuse_hkl, diffuse_values, cell, spacegroup
-
-    @staticmethod
-    def _within_resolution(
-        cell: gemmi.UnitCell,
-        resolution: float,
-        name: str,
-        hkl: np.ndarray | None,
-        values: np.ndarray | None,
-    ) -> tuple[np.ndarray | None, np.ndarray | None]:
-        """Drop one target's reflections beyond ``resolution``.
-
-        Parameters
-        ----------
-        cell
-            Cell the d-spacings are computed in.
-        resolution
-            High-resolution cutoff in Å.
-        name
-            ``"Bragg"`` or ``"diffuse"``, for the error message.
-        hkl, values
-            int64 indices ``[n, 3]`` and values ``[n]``, or both ``None`` for a term
-            that is not scored, which passes through unchanged.
-
-        Returns
-        -------
-        tuple[np.ndarray | None, np.ndarray | None]
-            The rows of ``hkl`` and ``values`` with ``d >= resolution``, same dtypes.
-        """
-        if hkl is None or values is None:
-            return None, None
-        d_spacing = np.asarray(cell.calculate_d_array(hkl), dtype=np.float64)
-        keep = d_spacing >= resolution
-        if not keep.any():
-            raise ValueError(
-                f"No {name} reflections survive a {resolution} A cutoff; the "
-                f"target reaches {d_spacing.min():.2f} A."
-            )
-        return hkl[keep], values[keep]
 
     def _union_hkl(self) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None]:
         """The reflections to evaluate once, and each term's gather indices into them.
@@ -416,32 +515,10 @@ class DiffuseBraggLossFunction:
         diffuse_index = inverse[n_bragg:] if self._diffuse_hkl is not None else None
         return hkl, bragg_index, diffuse_index
 
-    @staticmethod
-    def _finite_column(dataset: rs.DataSet, column: str) -> tuple[np.ndarray, np.ndarray]:
-        """The (hkl, value) pairs of one column, dropping unmeasured entries.
-
-        Parameters
-        ----------
-        dataset
-            MTZ contents as read by reciprocalspaceship, indexed by H, K, L.
-        column
-            Column to read.
-
-        Returns
-        -------
-        tuple[np.ndarray, np.ndarray]
-            hkl: int64 Miller indices ``[n, 3]`` of the rows where ``column`` is finite.
-            values: float64 values ``[n]`` of those rows.
-        """
-        values = dataset[column].to_numpy(dtype=np.float64)
-        hkl = np.column_stack(
-            [dataset.index.get_level_values(i).to_numpy() for i in ("H", "K", "L")]
-        )
-        finite = np.isfinite(values)
-        return hkl[finite].astype(np.int64), values[finite]
-
-    def _working_set_mask(self, dataset: rs.DataSet, column: str) -> np.ndarray:
-        """Mask over the finite rows of ``column`` that are not in the R-free test set.
+    def _working_set_mask(
+        self, bragg: BraggTarget, bragg_path: str | Path
+    ) -> Bool[np.ndarray, " n_refl"]:
+        """Mask of the Bragg target's reflections that are not in the R-free test set.
 
         Mirrors ``StructureFactorLossFunction._build_reflection_mask``: raise if
         nothing remains, warn if the retained fraction or count is suspiciously low,
@@ -449,33 +526,33 @@ class DiffuseBraggLossFunction:
 
         Parameters
         ----------
-        dataset
-            The Bragg MTZ contents.
-        column
-            Amplitude column whose finite rows define the mask's length.
+        bragg
+            The Bragg target, from :func:`load_bragg_target`.
+        bragg_path
+            The MTZ it was read from, for the error message.
 
         Returns
         -------
-        np.ndarray
-            Boolean mask over the finite rows ``[n_finite]``, True where the
-            reflection is in the working set.
+        Bool[np.ndarray, " n_refl"]
+            True where the reflection is in the working set.
 
         Raises
         ------
         ValueError
-            If no reflection remains.
+            If the target carries no R-free flags, or no reflection remains.
         """
-        flag_column = resolve_mtz_column(dataset, rs.MTZIntDtype(), column=self.free_flag_column)
-        finite = np.isfinite(dataset[column].to_numpy(dtype=np.float64))
-        # MTZInt is a nullable integer dtype; as float, a missing flag is NaN and
-        # compares unequal to every value, so an unflagged reflection is kept.
-        flags = dataset[flag_column].to_numpy(dtype=np.float64, na_value=np.nan)[finite]
-        keep = flags != self.test_set_value
+        if bragg.free_mask is None:
+            raise ValueError(
+                f"exclude_free_reflections needs R-free flags, but none could be read from "
+                f"{bragg_path} (free_flag_column={self.free_flag_column!r}). The MTZ must "
+                "hold exactly one integer column, or free_flag_column must name one."
+            )
+        keep = ~bragg.free_mask
 
         n_total, n_used = keep.size, int(keep.sum())
         composition = (
-            f"{n_total} Bragg reflections, {n_total - n_used} flagged free in "
-            f"{flag_column!r} (test_set_value={self.test_set_value})"
+            f"{n_total} Bragg reflections, {n_total - n_used} flagged free "
+            f"(test_set_value={self.test_set_value})"
         )
         convention_hint = (
             "Reflections with flag == test_set_value are the test set; pass test_set_value=0 "
@@ -483,6 +560,10 @@ class DiffuseBraggLossFunction:
         )
         if n_used == 0:
             raise ValueError(f"No reflections remain: {composition}. {convention_hint}")
+        if n_used == n_total:
+            logger.warning(
+                f"exclude_free_reflections excluded nothing: {composition}. {convention_hint}"
+            )
         if n_used < _MIN_RETAINED_REFLECTIONS:
             logger.warning(f"Only {n_used} reflections remain: {composition}.")
         if n_used < _MIN_RETAINED_REFLECTION_FRACTION * n_total:
