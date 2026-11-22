@@ -62,6 +62,8 @@ def rscc_script():
 @pytest.fixture
 def lddt_script():
     """The lDDT evaluation script, imported by path."""
+    # The script clusters with scikit-learn, an `analysis` dependency some model envs lack.
+    pytest.importorskip("sklearn", reason="scikit-learn not installed")
     return load_script(_SCRIPTS / "lddt_evaluation_script.py")
 
 
