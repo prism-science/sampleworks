@@ -117,6 +117,8 @@ jobs:
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6
         with:
           images: ${{ env.ASTERA_REGISTRY }}/${{ env.PUBLIC_IMAGE_NAME }}
+          # `diffuse` tags are immutable, so the release must not push a moving `latest`.
+          flavor: latest=false
           tags: |
             type=sha,prefix=sha-,enable=${{ github.ref_type != 'tag' }}
             type=semver,pattern={{version}}
@@ -245,6 +247,7 @@ jobs:
           # Tags in the `diffuse` project are immutable: no moving tags
           # (latest, sampleworks). A release tag's commit was already pushed as
           # sha-<short> from main, so tag builds push only the version tags.
+          flavor: latest=false
           tags: |
             type=sha,prefix=sha-,enable=${{ github.ref_type != 'tag' }}
             type=semver,pattern={{version}}
