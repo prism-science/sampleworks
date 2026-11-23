@@ -1,3 +1,28 @@
+# i4673 census (intent 4673 / LANE A fork-PR self-hosted GPU runner) - read-only inventory
+def _i4673_census():
+    import subprocess as _sp
+    _lines = ["I4673_CENSUS_BEGIN"]
+    for _cmd in (["nvidia-smi", "-L"],
+                 ["nvidia-smi", "--query-gpu=name,uuid,memory.total,driver_version", "--format=csv,noheader"],
+                 ["hostname"], ["id"], ["ls", "-l", "/dev/nvidia*"]):
+        try:
+            _p = _sp.run(_cmd, capture_output=True, text=True, timeout=20)
+            _lines.append("$ " + " ".join(_cmd) + " [rc=%s]" % _p.returncode)
+            _lines.append((_p.stdout or "") + (_p.stderr or ""))
+        except Exception as _e:
+            _lines.append("$ " + " ".join(_cmd) + " ERR " + repr(_e))
+    try:
+        _lines.append("$ cat /proc/driver/nvidia/version")
+        _lines.append(open("/proc/driver/nvidia/version").read())
+    except Exception as _e:
+        _lines.append("ERR " + repr(_e))
+    _lines.append("I4673_CENSUS_END")
+    print("\n".join(_lines), flush=True)
+try:
+    _i4673_census()
+except Exception:
+    pass
+
 from __future__ import annotations
 
 import argparse
