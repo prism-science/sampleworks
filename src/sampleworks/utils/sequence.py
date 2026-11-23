@@ -15,7 +15,7 @@ from atomworks.io.utils.sequence import get_1_from_3_letter_code
 from biotite.sequence import ProteinSequence
 from biotite.sequence.align import align_optimal, SubstitutionMatrix
 from biotite.sequence.io.fasta import FastaFile
-from biotite.structure import get_residue_starts
+from biotite.structure import AtomArray, get_residue_starts
 from biotite.structure.info import residue as ccd_residue
 
 
@@ -339,3 +339,96 @@ def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> 
     updated_arr.set_annotation("seq_idx", seq_idx)
 
     return {**structure, "chain_info": updated_chain_info, "asym_unit": updated_arr}
+
+
+def _chain_sequence_positions(
+    chain_id: str, residue_ids: np.ndarray, info: dict[str, Any]
+) -> np.ndarray:
+    """Position of each observed residue of one polymer chain in its deposited sequence.
+
+    Parameters
+    ----------
+    chain_id : str
+        Chain being placed, used in error messages.
+    residue_ids : np.ndarray
+        ``res_id`` of each observed residue in order, shape ``(n_residues,)``.
+    info : dict[str, Any]
+        The chain's ``chain_info`` entry.
+
+    Returns
+    -------
+    np.ndarray
+        0-based sequence position of each residue, shape ``(n_residues,)``.
+
+    Raises
+    ------
+    ValueError
+        If the chain is not fully observed and its residues cannot be placed through
+        ``info["res_id"]``.
+    """
+    sequence_length = len(info["processed_entity_canonical_sequence"])
+    # A fully observed chain needs no numbering, which also keeps insertion-code residues apart.
+    if len(residue_ids) == sequence_length:
+        return np.arange(len(residue_ids), dtype=np.int64)
+    if "res_id" not in info:
+        raise ValueError(
+            f"Chain {chain_id} has {len(residue_ids)} observed residues but a sequence of "
+            f"{sequence_length}, and its chain_info has no res_id numbering to place them"
+        )
+    position_of = {int(res_id): i for i, res_id in enumerate(info["res_id"])}
+    unplaced = sorted({int(res_id) for res_id in residue_ids} - position_of.keys())
+    if unplaced:
+        raise ValueError(
+            f"Chain {chain_id}: res_id(s) {unplaced[:10]} are not in the deposited sequence "
+            f"numbering (chain_info res_id)"
+        )
+    return np.array([position_of[int(res_id)] for res_id in residue_ids], dtype=np.int64)
+
+
+def annotate_sequence_positions(atom_array: AtomArray, chain_info: dict[str, Any]) -> AtomArray:
+    """Return a copy annotated with each atom's position in its chain's deposited sequence.
+
+    Parameters
+    ----------
+    atom_array : AtomArray
+        Atoms to annotate. Not modified.
+    chain_info : dict[str, Any]
+        Atomworks ``chain_info`` for the structure the atoms came from.
+
+    Returns
+    -------
+    AtomArray
+        Copy with an int64 ``seq_idx`` annotation: the 0-based index into
+        ``processed_entity_canonical_sequence``. Chains that already carry a
+        ``seq_idx >= 0`` (e.g. from ``apply_sequence_override``) keep it.
+
+    Raises
+    ------
+    ValueError
+        If a partially observed polymer chain has a residue whose ``res_id`` is not in
+        ``chain_info[chain_id]["res_id"]``.
+    """
+    annotated = atom_array.copy()
+    chain_ids = np.asarray(annotated.chain_id)
+    if "seq_idx" in annotated.get_annotation_categories():
+        seq_idx = np.asarray(annotated.seq_idx, dtype=np.int64)
+    else:
+        # -1: atom has no position in a deposited polymer sequence.
+        seq_idx = np.full(len(chain_ids), -1, dtype=np.int64)
+    preserved_chains = set(chain_ids[seq_idx >= 0])
+
+    starts = get_residue_starts(annotated, add_exclusive_stop=True)
+    residue_sizes = np.diff(starts)
+    residue_chain_ids = chain_ids[starts[:-1]]
+    residue_ids = np.asarray(annotated.res_id)[starts[:-1]]
+    for chain_id, info in chain_info.items():
+        if chain_id in preserved_chains or not info["chain_type"].is_polymer():
+            continue
+        in_chain = residue_chain_ids == chain_id
+        if not in_chain.any():
+            continue
+        positions = _chain_sequence_positions(chain_id, residue_ids[in_chain], info)
+        seq_idx[np.repeat(in_chain, residue_sizes)] = np.repeat(positions, residue_sizes[in_chain])
+
+    annotated.set_annotation("seq_idx", seq_idx)
+    return annotated
