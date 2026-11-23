@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
 from biotite.structure import AtomArray, AtomArrayStack
 from loguru import logger
 
@@ -22,7 +23,16 @@ from sampleworks.eval.occupancy_utils import (
     extract_protein_and_occupancy,
     rcsb_id_from_protein_name,
 )
-from sampleworks.utils.atom_array_utils import BLANK_ALTLOC_IDS, map_altlocs_to_stack
+from sampleworks.utils.atom_array_utils import (
+    BLANK_ALTLOC_IDS,
+    filter_to_common_atoms,
+    map_altlocs_to_stack,
+)
+from sampleworks.utils.frame_transforms import (
+    apply_forward_transform,
+    weighted_rigid_align_differentiable,
+)
+from sampleworks.utils.framework_utils import match_batch
 from sampleworks.utils.guidance_constants import Losses, StructurePredictor
 
 
@@ -411,6 +421,50 @@ def build_reference_frames(reference: AtomArray | AtomArrayStack, selection: str
     return stack
 
 
+def align_to_reference(
+    atom_array: AtomArray | AtomArrayStack, reference: AtomArray | AtomArrayStack
+) -> AtomArray | AtomArrayStack:
+    """Copy of ``atom_array`` with each model rigidly superposed onto ``reference``.
+
+    Each model is fitted on the atoms it shares with ``reference`` (matched by chain, residue
+    and atom name), and its transform then moves all of that model's atoms.
+
+    Parameters
+    ----------
+    atom_array
+        Structure to move, e.g. a run's ``refined.cif``.
+    reference
+        Single-model structure in the target frame, e.g. the guidance input.
+
+    Returns
+    -------
+    AtomArray or AtomArrayStack
+        Aligned copy of ``atom_array``.
+    """
+    reference_common, predicted_common = filter_to_common_atoms(reference, atom_array)
+    predicted_coords = torch.from_numpy(predicted_common.coord).float()  # [n_models, n_common, 3]
+    reference_coords = match_batch(  # [n_models, n_common, 3]
+        torch.from_numpy(reference_common.coord).float(), predicted_coords.shape[0]
+    )
+    uniform = torch.ones(1, predicted_coords.shape[1])  # [1, n_common] weights and mask
+    _, transform = weighted_rigid_align_differentiable(
+        true_coords=predicted_coords,
+        pred_coords=reference_coords,
+        weights=uniform,
+        mask=uniform,
+        return_transforms=True,
+        allow_gradients=False,
+    )
+    # Apply the transform to the entire structure, not just the common atoms.
+    atom_array_coords_torch = torch.from_numpy(atom_array.coord)
+    aligned_coords_torch = apply_forward_transform(
+        atom_array_coords_torch, transform, rotation_only=False
+    )
+    aligned = atom_array.copy()
+    aligned.coord = aligned_coords_torch.numpy()
+    return aligned
+
+
 def translate_selection(selection: str) -> str:
     """Convert a pymol-style selection (``chain A and resi N-M``) to
     atomworks/pandas style (``chain_id == 'A' and res_id >= N and res_id <= M``).
@@ -452,6 +506,35 @@ def get_method_and_model_name(model_name: str) -> tuple[str | None, str]:
     return method, model
 
 
+def add_grid_search_args(parser: argparse.ArgumentParser) -> None:
+    """Add the arguments every eval script needs to find trials in a grid-search tree.
+
+    Parameters
+    ----------
+    parser
+        Parser to add ``--grid-search-results-path``, ``--target-filename`` and
+        ``--depth`` to; mutated in place.
+    """
+    parser.add_argument(
+        "--grid-search-results-path",
+        type=Path,
+        required=True,
+        help="Path to the top-level grid search results directory, usu. called "
+        "``grid_search_results``",
+    )
+    parser.add_argument(
+        "--target-filename",
+        default="refined.cif",
+        help="Target filename for the CIF files to process, defaults to 'refined.cif'",
+    )
+    parser.add_argument(
+        "--depth",
+        type=int,
+        default=4,
+        help="Maximum directory depth to recurse when scanning for target CIF files.",
+    )
+
+
 def parse_eval_args(description: str | None = None):
     """
     Return a common set of arguments for grid search evaluation scripts,
@@ -460,13 +543,7 @@ def parse_eval_args(description: str | None = None):
     All eval scripts should use this same framework
     """
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument(
-        "--grid-search-results-path",
-        type=Path,
-        required=True,
-        help="Path to the top-level grid search results directory, usu. called "
-        "``grid_search_results``",
-    )
+    add_grid_search_args(parser)
     # not technically used everywhere yet, but requiring it future-proofs.
     parser.add_argument(
         "--grid-search-inputs-path",
@@ -489,17 +566,6 @@ def parse_eval_args(description: str | None = None):
         type=float,
         help=f"Occupancies to evaluate, defaults to {OCCUPANCY_LEVELS}",
         default=OCCUPANCY_LEVELS,
-    )
-    parser.add_argument(
-        "--target-filename",
-        default="refined.cif",
-        help="Target filename for the CIF files to process, defaults to 'refined.cif'",
-    )
-    parser.add_argument(
-        "--depth",
-        type=int,
-        default=4,
-        help="Maximum directory depth to recurse when scanning for target CIF files.",
     )
     parser.add_argument(
         "--n-jobs",
