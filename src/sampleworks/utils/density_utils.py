@@ -106,7 +106,8 @@ def build_density_transformer(
     device : torch.device
         PyTorch device for computation.
     scattering_table : str | None
-        ``"wk1995"``, ``"it1992"`` or ``"electron"``; ``None`` takes the mode's default.
+        ``"wk1995"``, ``"it1992"``, ``"electron"`` or ``"c4322"``; ``None`` takes the
+        mode's default.
 
     Returns
     -------
@@ -202,7 +203,8 @@ def compute_density_from_atomarray(
     device : torch.device | None
         PyTorch device for computation. If None, will try to use GPU.
     scattering_table : str | None
-        ``"wk1995"``, ``"it1992"`` or ``"electron"``; ``None`` takes the mode's default.
+        ``"wk1995"``, ``"it1992"``, ``"electron"`` or ``"c4322"``; ``None`` takes the
+        mode's default.
 
     Returns
     -------

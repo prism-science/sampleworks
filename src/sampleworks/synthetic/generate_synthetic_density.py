@@ -9,10 +9,8 @@ import torch
 from loguru import logger
 
 from sampleworks.core.forward_models.xray.real_space_density import XMap_torch
-from sampleworks.core.losses.real_space_density import (
-    resolve_scattering_table,
-    SCATTERING_TABLES,
-)
+from sampleworks.core.losses.options import SCATTERING_TABLES
+from sampleworks.core.losses.real_space_density import resolve_scattering_table
 from sampleworks.synthetic.synthetic_utils import (
     load_structure_for_synthetic_loss,
     resolve_parallel_jobs,
@@ -169,7 +167,8 @@ def _process_single_row(
     save_structure
         If True, save the processed structure to a CIF file in the input directory. Default is True.
     scattering_table
-        ``"wk1995"``, ``"it1992"`` or ``"electron"``; ``None`` takes the mode's default.
+        ``"wk1995"``, ``"it1992"``, ``"electron"`` or ``"c4322"``; ``None`` takes the
+        mode's default.
     """
     structure_path = base_dir / row.filename
     atom_array = load_structure_for_synthetic_loss(
@@ -264,7 +263,8 @@ def process_batch(
     save_structure
         If True, save the processed structure to a CIF file in the input directory.
     scattering_table
-        ``"wk1995"``, ``"it1992"`` or ``"electron"``; ``None`` takes the mode's default.
+        ``"wk1995"``, ``"it1992"``, ``"electron"`` or ``"c4322"``; ``None`` takes the
+        mode's default.
     """
     from joblib import delayed, Parallel
 

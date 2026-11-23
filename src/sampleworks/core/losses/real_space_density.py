@@ -21,11 +21,38 @@ from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.sf import
 from sampleworks.core.forward_models.xray.real_space_density_deps.qfit.volume import (
     XMap,
 )
-from sampleworks.core.losses.options import RealSpaceDensityOptions
+from sampleworks.core.losses.options import (
+    ELECTRON_SCATTERING_TABLES,
+    RealSpaceDensityOptions,
+    SCATTERING_TABLES,
+    XRAY_SCATTERING_TABLES,
+)
 from sampleworks.core.losses.protocol import LossInputs
 from sampleworks.core.losses.registry import LossBuildContext
 from sampleworks.utils.elements import elements_to_scattering_indices
 from sampleworks.utils.torch_utils import try_gpu
+
+
+def neutral_gemmi_elements() -> dict[str, gemmi.Element]:
+    """Map each scattering-index symbol to the neutral gemmi element it scatters as.
+
+    gemmi's IT92 and C4322 tables cover neutral atoms only, so the charge suffix is
+    dropped (``Fe2+`` scatters as ``Fe``). Symbols gemmi does not recognize -- the
+    ``'?'`` placeholder and qFit's valence pseudo-elements -- are left out and fall
+    to the caller's zero-fill.
+
+    Returns
+    -------
+    dict[str, gemmi.Element]
+        Neutral gemmi element for every recognized key of
+        :data:`ELEMENT_TO_SCATTERING_INDEX`.
+    """
+    elements = {}
+    for element in ELEMENT_TO_SCATTERING_INDEX:
+        gemmi_element = gemmi.Element(element.rstrip("+-0123456789"))
+        if gemmi_element.atomic_number != 0:
+            elements[element] = gemmi_element
+    return elements
 
 
 def it92_structure_factors() -> dict[str, list[list[float]]]:
@@ -33,22 +60,37 @@ def it92_structure_factors() -> dict[str, list[list[float]]]:
 
     IT92 is four Gaussians plus a constant. The constant takes the sixth ``a``
     slot and the fifth pair is zero, which is how the six-term integrand already
-    reads a row, so no change downstream. Symbols gemmi does not recognise -- the
-    ``'?'`` placeholder and qFit's valence pseudo-elements -- are left out and
-    fall to the caller's zero-fill.
+    reads a row, so no change downstream.
+
+    Returns
+    -------
+    dict[str, list[list[float]]]
+        ``[a, b]`` coefficient rows, each of length 6, keyed by element symbol.
     """
     factors = {}
-    for element in ELEMENT_TO_SCATTERING_INDEX:
-        # IT92 tabulates neutral atoms, so the charge suffix is dropped: Fe2+ -> Fe.
-        gemmi_element = gemmi.Element(element.rstrip("+-0123456789"))
-        if gemmi_element.atomic_number == 0:
-            continue
+    for element, gemmi_element in neutral_gemmi_elements().items():
         it92 = gemmi_element.it92
         factors[element] = [[*it92.a, 0.0, it92.c], [*it92.b, 0.0, 0.0]]
     return factors
 
 
-SCATTERING_TABLES = ("wk1995", "it1992", "electron")
+def c4322_structure_factors() -> dict[str, list[list[float]]]:
+    """C4322 electron scattering coefficients from gemmi, laid out like the Peng table.
+
+    C4322 (International Tables Vol. C, Table 4.3.2.2) is five Gaussians with no
+    constant term, the same layout as ELECTRON_SCATTERING_FACTORS (Peng et al. 1996),
+    which is what the em branch of the density integrand reads.
+
+    Returns
+    -------
+    dict[str, list[list[float]]]
+        ``[a, b]`` coefficient rows, each of length 5, keyed by element symbol.
+    """
+    factors = {}
+    for element, gemmi_element in neutral_gemmi_elements().items():
+        c4322 = gemmi_element.c4322
+        factors[element] = [list(c4322.a), list(c4322.b)]
+    return factors
 
 
 def resolve_scattering_table(em_mode: bool, scattering_table: str | None) -> str:
@@ -70,7 +112,7 @@ def resolve_scattering_table(em_mode: bool, scattering_table: str | None) -> str
     Raises
     ------
     ValueError
-        If the name is unknown, or an X-ray table is paired with ``em_mode`` or the
+        If the name is unknown, or an X-ray table is paired with ``em_mode`` or an
         electron table without it.
     """
     if scattering_table is None:
@@ -79,14 +121,16 @@ def resolve_scattering_table(em_mode: bool, scattering_table: str | None) -> str
         raise ValueError(
             f"Unknown scattering_table {scattering_table!r}; use one of {SCATTERING_TABLES}."
         )
-    # TODO(#466): wire gemmi's electron table (C4322) so em_mode has a gemmi option.
-    if em_mode and scattering_table != "electron":
+    if em_mode and scattering_table in XRAY_SCATTERING_TABLES:
         raise ValueError(
             f"scattering_table={scattering_table!r} is an X-ray table and cannot be used "
-            "with em_mode; use 'electron' (gemmi's electron table, C4322, is not wired up)."
+            f"with em_mode; use one of {ELECTRON_SCATTERING_TABLES}."
         )
-    if not em_mode and scattering_table == "electron":
-        raise ValueError("scattering_table='electron' needs em_mode; use 'wk1995' or 'it1992'.")
+    if not em_mode and scattering_table in ELECTRON_SCATTERING_TABLES:
+        raise ValueError(
+            f"scattering_table={scattering_table!r} needs em_mode; "
+            f"use one of {XRAY_SCATTERING_TABLES}."
+        )
     return scattering_table
 
 
@@ -111,9 +155,11 @@ def setup_scattering_params(
     scattering_table
         Table name as in Phenix: ``"wk1995"`` (Waasmaier & Kirfel 1995, the qFit
         table above), ``"it1992"`` (International Tables for Crystallography
-        Vol. C, Table 6.1.1.4, read from gemmi) or ``"electron"`` (Peng et al.
-        1996). ``None`` takes the mode's default, ``"electron"`` for ``em_mode``
-        and ``"wk1995"`` otherwise; see :func:`resolve_scattering_table`.
+        Vol. C, Table 6.1.1.4, read from gemmi), ``"electron"`` (Peng et al.
+        1996, built in) or ``"c4322"`` (International Tables Vol. C, Table
+        4.3.2.2, read from gemmi). ``None`` takes the mode's default,
+        ``"electron"`` for ``em_mode`` and ``"wk1995"`` otherwise; see
+        :func:`resolve_scattering_table`.
 
     Returns
     -------
@@ -131,6 +177,8 @@ def setup_scattering_params(
         structure_factors = it92_structure_factors()
     elif scattering_table == "electron":
         structure_factors = ELECTRON_SCATTERING_FACTORS
+    elif scattering_table == "c4322":
+        structure_factors = c4322_structure_factors()
     else:
         structure_factors = ATOM_STRUCTURE_FACTORS
     n_coeffs = len(structure_factors["C"][0])
