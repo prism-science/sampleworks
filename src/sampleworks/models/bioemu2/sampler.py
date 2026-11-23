@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from sampleworks.core.samplers.schedule import NoiseScheduleConfig
+
 
 if TYPE_CHECKING:
     from sampleworks.models.bioemu2.wrapper import BioEmu2Wrapper, SamplingMode
@@ -16,9 +18,9 @@ def bioemu2_edm_settings(model_wrapper: BioEmu2Wrapper, mode: SamplingMode = "eq
     :class:`~sampleworks.core.samplers.edm.EDMSamplerConfig` (overriding any field as needed)
     and passing the config to :class:`~sampleworks.core.samplers.edm.AF3EDMSampler`.
 
-    ``sigma_data``, ``sigma_min`` and ``sigma_max`` come from the checkpoint: the denoiser
-    preconditions its inputs with the same schedule, so they are fixed by the model. The rest
-    are the defaults of ``bioemu2.denoising.edm.edm_sampler``: ``gamma_0=0.8``,
+    The noise schedule (``sigma_data``, ``sigma_min``, ``sigma_max``) comes from the checkpoint:
+    the denoiser preconditions its inputs with the same schedule, so it is fixed by the model.
+    The rest are the defaults of ``bioemu2.denoising.edm.edm_sampler``: ``gamma_0=0.8``,
     ``gamma_min=1.0``, ``noise_scale=1.0``, and ``step_scale`` 1.0 in equilibrium mode or 1.5
     in structure mode.
 
@@ -32,14 +34,14 @@ def bioemu2_edm_settings(model_wrapper: BioEmu2Wrapper, mode: SamplingMode = "eq
     Returns
     -------
     dict
-        ``EDMSamplerConfig`` field values: ``sigma_data``, ``s_max``, ``s_min``, ``gamma_0``,
-        ``gamma_min``, ``noise_scale`` and ``step_scale``.
+        ``EDMSamplerConfig`` field values: ``schedule``, ``gamma_0``, ``gamma_min``,
+        ``noise_scale`` and ``step_scale``.
     """
     schedule = model_wrapper.model.edm_schedule
     return {
-        "sigma_data": schedule.sigma_data,
-        "s_max": schedule.sigma_max,
-        "s_min": schedule.sigma_min,
+        "schedule": NoiseScheduleConfig(
+            sigma_data=schedule.sigma_data, s_max=schedule.sigma_max, s_min=schedule.sigma_min
+        ),
         "gamma_0": 0.8,
         "gamma_min": 1.0,
         "noise_scale": 1.0,

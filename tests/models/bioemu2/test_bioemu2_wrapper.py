@@ -15,6 +15,7 @@ from bioemu2 import Ligand, Protein, System
 from bioemu2.structure.preparation import prepare_sampling_inputs
 from biotite.structure import AtomArrayStack
 from sampleworks.core.samplers.edm import AF3EDMSampler, EDMSamplerConfig
+from sampleworks.core.samplers.schedule import NoiseScheduleConfig
 from sampleworks.core.scalers.pure_guidance import PureGuidance
 from sampleworks.core.scalers.step_scalers import DataSpaceDPSScaler
 from sampleworks.models.bioemu2.sampler import bioemu2_edm_settings
@@ -400,10 +401,8 @@ class TestEdmSettings:
         schedule = tiny_bioemu2_wrapper.model.edm_schedule
         settings = bioemu2_edm_settings(tiny_bioemu2_wrapper, mode)
 
-        assert (settings["sigma_data"], settings["s_max"], settings["s_min"]) == (
-            schedule.sigma_data,
-            schedule.sigma_max,
-            schedule.sigma_min,
+        assert settings["schedule"] == NoiseScheduleConfig(
+            sigma_data=schedule.sigma_data, s_max=schedule.sigma_max, s_min=schedule.sigma_min
         )
         assert (settings["gamma_0"], settings["gamma_min"], settings["noise_scale"]) == (
             0.8,
