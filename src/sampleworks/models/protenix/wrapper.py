@@ -5,6 +5,7 @@ from typing import Any, cast
 
 import numpy as np
 import torch
+from atomworks.io.transforms.atom_array import ensure_atom_array_stack
 from biotite.structure import AtomArray
 from configs.configs_base import configs as configs_base
 from configs.configs_data import data_configs
@@ -29,15 +30,13 @@ from runner.inference import download_infercence_cache as download_inference_cac
 from torch import Tensor
 
 from sampleworks.models.protenix.structure_processing import (
-    add_terminal_oxt_atoms,
     create_protenix_input_from_structure,
-    ensure_atom_array,
-    filter_zero_occupancy,
 )
 from sampleworks.models.protocol import GenerativeModelInput
 from sampleworks.utils.framework_utils import match_batch
 from sampleworks.utils.guidance_constants import StructurePredictor
 from sampleworks.utils.msa import MSAManager
+from sampleworks.utils.sequence import annotate_sequence_positions
 from sampleworks.utils.torch_utils import gaussian_prior, send_tensors_in_dict_to_device
 
 
@@ -424,11 +423,9 @@ class ProtenixWrapper:
 
         input_feature_dict = dict_to_tensor(feat)
 
-        # TODO: all this processing is very jank, and we still get cases where the atom
-        # numbers mismatch. I imagine this will be a common source of bugs for other models too...
-        atom_array = ensure_atom_array(structure["asym_unit"])
-        atom_array = filter_zero_occupancy(atom_array)
-        atom_array = add_terminal_oxt_atoms(atom_array, structure.get("chain_info", {}))
+        atom_array = annotate_sequence_positions(
+            ensure_atom_array_stack(structure["asym_unit"])[0], structure.get("chain_info", {})
+        )
 
         features = cast(dict[str, Any], input_feature_dict)
 

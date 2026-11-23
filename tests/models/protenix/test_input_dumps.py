@@ -9,6 +9,8 @@ import pytest
 pytest.importorskip("protenix", reason="Protenix not installed")
 
 from sampleworks.models.protenix.wrapper import annotate_structure_for_protenix
+from sampleworks.utils.atom_reconciler import AtomReconciler
+from sampleworks.utils.structure_utils import get_valid_atom_mask
 
 
 def _protein_sequences(input_json: Path) -> list[str]:
@@ -38,24 +40,19 @@ def test_featurize_does_not_reuse_another_structures_msa_input(
     protenix_wrapper, structure_6b8x: dict, structure_5sop: dict, tmp_path: Path
 ):
     """Featurizing two structures into one out_dir yields each structure's own atoms."""
-    # Protenix keeps every heavy atom of both fixtures, so a reused dump shows up as the
-    # other structure's count.
-    structures = {"6b8x": structure_6b8x, "5sop": structure_5sop}
-    expected_atom_counts = {
-        name: structure["asym_unit"].array_length() for name, structure in structures.items()
-    }
-    assert expected_atom_counts["6b8x"] != expected_atom_counts["5sop"]
-
     out_dir = tmp_path / "protenix_input"
-    atom_counts = {}
-    for name, structure in structures.items():
+    for structure in (structure_6b8x, structure_5sop):
         annotated = annotate_structure_for_protenix(structure, out_dir=out_dir, use_msa=True)
-        features = protenix_wrapper.featurize(annotated)
-        atom_counts[name] = len(features.conditioning.model_atom_array)
+        conditioning = protenix_wrapper.featurize(annotated).conditioning
 
         add_msa_json = out_dir / "protenix_input-add-msa.json"
         assert _protein_sequences(add_msa_json) == _protein_sequences(
             out_dir / "protenix_input.json"
         )
 
-    assert atom_counts == expected_atom_counts
+        # A reused dump models the other structure's sequences, so it would leave most
+        # resolved input atoms without a model counterpart.
+        input_atoms = conditioning.true_atom_array
+        resolved_input_atoms = input_atoms[get_valid_atom_mask(input_atoms)]
+        reconciler = AtomReconciler.from_arrays(conditioning.model_atom_array, resolved_input_atoms)
+        assert reconciler.n_common == len(resolved_input_atoms)
