@@ -287,10 +287,10 @@ def test_prepare_without_an_atom_array_is_a_clear_error(
 
 
 class TestFreeReflections:
-    """exclude_free_reflections drops the test set from the Bragg term."""
+    """exclude_free_reflections leaves the test set out of the Bragg term."""
 
-    def test_test_set_is_dropped_from_the_bragg_list(self, diffuse_bragg_targets):
-        """The Bragg list shrinks by the flagged count; the diffuse list is untouched."""
+    def test_test_set_is_left_out_of_the_bragg_residual(self, diffuse_bragg_targets):
+        """The scored count shrinks by the flagged count; both lists stay whole."""
         from sampleworks.core.losses.diffuse_bragg import DiffuseBraggLossFunction
 
         targets = diffuse_bragg_targets
@@ -298,12 +298,13 @@ class TestFreeReflections:
         with_all = DiffuseBraggLossFunction(bragg_weight=0.5, **both)
         working = DiffuseBraggLossFunction(bragg_weight=0.5, exclude_free_reflections=True, **both)
 
-        assert len(with_all._bragg_hkl) == targets.n_reflections
-        assert len(working._bragg_hkl) == targets.n_reflections - targets.n_free
-        assert len(working._diffuse_hkl) == targets.n_reflections
+        assert int(with_all._bragg_mask.sum()) == targets.n_reflections
+        assert int(working._bragg_mask.sum()) == targets.n_reflections - targets.n_free
+        assert len(working._bragg.hkl) == targets.n_reflections
+        assert len(working._diffuse.hkl) == targets.n_reflections
 
     def test_wrong_convention_warns(self, diffuse_bragg_targets, caplog):
-        """test_set_value=0 on a Phenix-convention file keeps only the 10% test set."""
+        """test_set_value=0 on a Phenix-convention file scores only the 10% test set."""
         from sampleworks.core.losses.diffuse_bragg import DiffuseBraggLossFunction
 
         loss_function = DiffuseBraggLossFunction(
@@ -313,7 +314,7 @@ class TestFreeReflections:
             test_set_value=0,
         )
 
-        assert len(loss_function._bragg_hkl) == diffuse_bragg_targets.n_free
+        assert int(loss_function._bragg_mask.sum()) == diffuse_bragg_targets.n_free
         assert "CCP4-convention" in caplog.text
 
     def test_reflection_with_a_missing_flag_stays_in_the_working_set(
@@ -333,13 +334,13 @@ class TestFreeReflections:
         )
 
         n = diffuse_bragg_targets.n_reflections - diffuse_bragg_targets.n_free + 1
-        assert len(loss_function._bragg_hkl) == n
+        assert int(loss_function._bragg_mask.sum()) == n
 
     def test_missing_flag_column_is_a_clear_error(self, diffuse_bragg_targets):
         """A Bragg MTZ without an integer column cannot have its test set excluded."""
         from sampleworks.core.losses.diffuse_bragg import DiffuseBraggLossFunction
 
-        with pytest.raises(ValueError, match="No MTZInt column"):
+        with pytest.raises(ValueError, match="needs R-free flags"):
             DiffuseBraggLossFunction(
                 bragg_target=diffuse_bragg_targets.bragg_single,
                 bragg_weight=1.0,
@@ -376,8 +377,8 @@ class TestSeparateReflectionLists:
             bragg_target=diffuse_bragg_targets.bragg, diffuse_target=path, bragg_weight=0.5
         )
 
-        assert len(loss_function._bragg_hkl) == n_full
-        assert len(loss_function._diffuse_hkl) == n_thinned
+        assert len(loss_function._bragg.hkl) == n_full
+        assert len(loss_function._diffuse.hkl) == n_thinned
         assert len(loss_function._hkl) == n_full
 
         atom_array, coords = diffuse_bragg_ensemble
@@ -398,7 +399,7 @@ class TestSeparateReflectionLists:
         loss_function = DiffuseBraggLossFunction(
             bragg_target=odd_bragg, diffuse_target=diffuse_path, bragg_weight=0.5
         )
-        assert len(loss_function._bragg_hkl) == n_full - n_even
+        assert len(loss_function._bragg.hkl) == n_full - n_even
         assert len(loss_function._hkl) == n_full
 
         atom_array, coords = diffuse_bragg_ensemble
@@ -601,7 +602,7 @@ class TestBuilder:
         assert loss_function.bulk_solvent == "per_conformer"
         assert loss_function._solvent.cutoff == 0.3
         n = diffuse_bragg_targets.n_reflections - diffuse_bragg_targets.n_free
-        assert len(loss_function._bragg_hkl) == n
+        assert int(loss_function._bragg_mask.sum()) == n
 
     def test_is_registered(self):
         """The registry knows the loss under its CLI name."""
