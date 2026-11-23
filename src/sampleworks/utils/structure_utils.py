@@ -25,21 +25,6 @@ from sampleworks.utils.atom_reconciler import AtomReconciler
 from sampleworks.utils.framework_utils import match_batch
 
 
-try:
-    from sampleworks.models.protenix.structure_processing import (
-        add_terminal_oxt_atoms as _add_terminal_oxt_atoms,
-        ensure_atom_array as _ensure_atom_array,
-        filter_zero_occupancy as _filter_zero_occupancy,
-    )
-
-    _HAS_PROTENIX = True
-except ImportError:
-    _HAS_PROTENIX = False
-    _add_terminal_oxt_atoms = None  # ty:ignore[invalid-assignment]
-    _ensure_atom_array = None  # ty:ignore[invalid-assignment]
-    _filter_zero_occupancy = None  # ty:ignore[invalid-assignment]
-
-
 # TODO: standardize this more! This needs to have a specified output dataclass that
 # we deal with, and define how we couple the data here to the structure we output at the end
 # of sampling.
@@ -133,9 +118,7 @@ def process_structure_to_trajectory_input(
 
     CURRENTLY: Resolves the ground-truth ``AtomArray`` from either the conditioning
     attached to *features* or the ``"asym_unit"`` key of *structure*,
-    applies Protenix-specific preprocessing when needed (OXT atoms,
-    zero-occupancy filtering), masks invalid atoms, and tiles the
-    coordinates to *ensemble_size*.
+    masks invalid atoms, and tiles the coordinates to *ensemble_size*.
 
     IDEALLY: This function should not need to be aware of the model, and should
     produce a cleaned and masked AtomArray and coordinates usable for any model.
@@ -164,7 +147,6 @@ def process_structure_to_trajectory_input(
         tiled coordinates, atom array, and ensemble size.
     """
     atom_array = None
-    needs_protenix_preprocessing = False
 
     # TODO: still a bit jank, but it is better than before I think, and the transform related issues
     # will help when resolved
@@ -176,19 +158,6 @@ def process_structure_to_trajectory_input(
         if "asym_unit" not in structure:
             raise ValueError("structure must contain 'asym_unit' key")
         atom_array = ensure_atom_array_stack(structure["asym_unit"])[0]
-        if conditioning is not None:
-            cond_class = conditioning.__class__.__name__
-            needs_protenix_preprocessing = cond_class == "ProtenixConditioning"
-
-    # Add OXT atoms for Protenix to match the model's internal representation.
-    # Only needed when falling back to structure's asym_unit (true_atom_array was None).
-    if _HAS_PROTENIX and needs_protenix_preprocessing:
-        assert _ensure_atom_array is not None
-        assert _filter_zero_occupancy is not None
-        assert _add_terminal_oxt_atoms is not None
-        atom_array = _ensure_atom_array(atom_array)
-        atom_array = _filter_zero_occupancy(atom_array)
-        atom_array = _add_terminal_oxt_atoms(atom_array, structure.get("chain_info", {}))
 
     # Filter to valid atoms (nonzero occupancy, finite coords) in structure atom space.
     # The deposited structure may have zero-occupancy or NaN-coordinate atoms from
