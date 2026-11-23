@@ -1,8 +1,12 @@
 """Shared pytest fixtures for sampleworks tests."""
 
+import atexit
 import importlib
 import inspect
+import os
+import shutil
 import sys
+import tempfile
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from importlib.resources import files
@@ -18,6 +22,19 @@ import torch
 _project_root = Path(__file__).parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
+
+# protpardelle.env raises on import without a model_params directory, so pick one before
+# sampleworks.utils.imports sets PROTPARDELLE_AVAILABLE; a throwaway one suits random weights.
+_PROTPARDELLE_BUILTIN_PARAMS = (
+    Path(getsitepackages()[0]) / "release_data" / "protpardelle" / "model_params"
+)
+if "PROTPARDELLE_MODEL_PARAMS" not in os.environ:
+    if _PROTPARDELLE_BUILTIN_PARAMS.is_dir():
+        os.environ["PROTPARDELLE_MODEL_PARAMS"] = str(_PROTPARDELLE_BUILTIN_PARAMS)
+    else:
+        _model_params_dir = tempfile.mkdtemp(prefix="protpardelle_model_params_")
+        os.environ["PROTPARDELLE_MODEL_PARAMS"] = _model_params_dir
+        atexit.register(shutil.rmtree, _model_params_dir, ignore_errors=True)
 
 from atomworks.io.parser import parse, parse_atom_array
 from atomworks.io.utils.io_utils import load_any
@@ -796,14 +813,7 @@ def rf3_wrapper(rf3_checkpoint_path: Path):  # will run on Fabric device
 def protpardelle_checkpoint_path() -> Path:
     if not PROTPARDELLE_AVAILABLE:
         pytest.skip("Protpardelle dependencies not installed in this environment")
-    import os
-
-    # where we will eventually install the checkpoint on our containers.
-    builtin_path = Path(getsitepackages()[0]) / "release_data" / "protpardelle" / "model_params"
-
-    # if the user specifies a path to the model_params directory, use that instead.
-    path = Path(os.environ.get("PROTPARDELLE_MODEL_PARAMS", builtin_path))
-    path = path / "weights/cc89_epoch415.pth"
+    path = Path(os.environ["PROTPARDELLE_MODEL_PARAMS"]) / "weights/cc89_epoch415.pth"
     if not path.exists():
         pytest.skip(f"Protpardelle checkpoint not found at {path}")
     return path

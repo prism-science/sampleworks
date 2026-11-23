@@ -5,23 +5,8 @@ These tests build a small, randomly-initialized ``ai-allatom`` model (see
 needing downloaded weights.
 """
 
-import atexit
-import os
-import shutil
-import tempfile
-
 import pytest
 
-
-# Ensure the model-params directory exists before protpardelle is imported, mirroring
-# conftest (import order across conftests is not guaranteed). Whichever module runs first
-# creates the throwaway dir and registers its cleanup; the other sees the var already set
-# and does nothing. Guard explicitly rather than `setdefault`, which would eagerly leak a
-# mkdtemp even when the var is present.
-if "PROTPARDELLE_MODEL_PARAMS" not in os.environ:
-    _model_params_dir = tempfile.mkdtemp(prefix="protpardelle_model_params_")
-    os.environ["PROTPARDELLE_MODEL_PARAMS"] = _model_params_dir
-    atexit.register(shutil.rmtree, _model_params_dir, ignore_errors=True)
 
 pytest.importorskip(
     "protpardelle.core.models", reason="Protpardelle not installed in this environment"
