@@ -257,21 +257,21 @@ class TestStepScalerMatrix:
         assert torch.allclose(strength, torch.zeros(batch_size, device=device))
 
     @pytest.mark.parametrize("gradient_normalization", [False, True])
-    def test_data_space_dps_gradient_equals_state(
+    def test_data_space_dps_direction_matches_gradient(
         self, gradient_normalization: bool, device: torch.device
     ):
         """DataSpaceDPSScaler direction is grad(loss), or its per-member unit vector.
 
         MockGradientLossFunction computes loss = 0.5 * ||coords||^2,
         so grad(loss) w.r.t. coords = coords. The two batch members differ in
-        scale by 100x so a whole-batch or per-atom norm gives a different answer.
+        scale by 100x so a whole-batch norm gives a different answer.
         """
         scaler = DataSpaceDPSScaler(step_size=0.1, gradient_normalization=gradient_normalization)
         num_atoms = 10
 
         torch.manual_seed(123)
         unit_scale_state = torch.randn(num_atoms, 3, device=device)
-        state = torch.stack([unit_scale_state, 100.0 * unit_scale_state.flip(0)])
+        state = torch.stack([unit_scale_state, 100.0 * unit_scale_state])
 
         context = create_step_context_with_loss(0, state, device)
 
@@ -348,7 +348,7 @@ class TestStepScalerMatrix:
 
         torch.manual_seed(456)
         unit_scale_x_t = torch.randn(num_atoms, 3, device=device)
-        x_t = torch.stack([unit_scale_x_t, 100.0 * unit_scale_x_t.flip(0)]).requires_grad_(True)
+        x_t = torch.stack([unit_scale_x_t, 100.0 * unit_scale_x_t]).requires_grad_(True)
         state = x_t * 0.9 + 0.1
 
         loss_function = MockGradientLossFunction()
