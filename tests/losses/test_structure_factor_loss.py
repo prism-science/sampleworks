@@ -626,9 +626,7 @@ class TestStructureFactorScaleFit:
             r_work, _ = sfc.get_rfactors(ftotal=scored_fcalc.detach())
             r_work_by_scale_fit[scale_fit] = float(r_work)
 
-        assert r_work_by_scale_fit["off"] == pytest.approx(
-            1 - 1 / self.AMPLITUDE_SCALE, abs=1e-3
-        )
+        assert r_work_by_scale_fit["off"] == pytest.approx(1 - 1 / self.AMPLITUDE_SCALE, abs=1e-3)
         # Error-free data, so the fit should end far below any refinement R-work.
         assert r_work_by_scale_fit["adam"] < 0.01, (
             f"fitted scales should absorb the x{self.AMPLITUDE_SCALE} amplitude scale, but "

@@ -142,7 +142,7 @@ class StructureFactorLossFunction:
 
         ``"combined"`` and ``"per_conformer"`` differ only for a real ensemble
         (batch > 1); the mask operator is nonlinear, so ``mask(<rho>) != <mask(rho)>``.
-        
+
         With ``scale_fit="off"``, both non-"off" bulk solvent modes use the default SFC
         scales ``kiso=1``, ``kmask=0.35``, small ``uaniso``. With non-"off" ``scale_fit``
         these parameters are refined per resolution bin against ``|Fobs|``, and it applies
@@ -673,8 +673,8 @@ class StructureFactorLossFunction:
         after :meth:`prepare` runs ``get_scales_adam`` with SFC's defaults, which start
         from Phenix-style analytic initialization; later calls warm-start from the scales
         the previous call left and run ``_SCALE_UPDATE_STEPS`` steps.
-        
-        SFC adam details to be aware of: 
+
+        SFC adam details to be aware of:
         - Always fitted on the working set, ignores our `exclude_free_reflections` here.
         - It randomly (NumPy's global random state) subsamples reflections of each bin at
         every fit step.
