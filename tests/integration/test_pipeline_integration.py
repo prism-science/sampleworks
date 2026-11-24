@@ -836,17 +836,16 @@ class TestGuidanceEffectivenessMock:
         assert all(loss is not None and loss > 0.0 for loss in guided_losses)
 
         assert half_guided.trajectory is not None and unguided.trajectory is not None
-        # State after each step: (ensemble, atoms, 3), or (particles, ensemble, atoms, 3) for FK.
-        half_guided_states = [torch.as_tensor(state) for state in half_guided.trajectory]
-        unguided_states = [torch.as_tensor(state) for state in unguided.trajectory]
-        for step in range(first_guided_step):
-            torch.testing.assert_close(
-                half_guided_states[step], unguided_states[step], rtol=0, atol=0
-            )
-        for step in range(first_guided_step, num_steps):
-            assert not torch.allclose(half_guided_states[step], unguided_states[step]), (
-                f"step {step} should be guided but matches the unguided run"
-            )
+        # (steps, ensemble, atoms, 3), or (steps, particles, ensemble, atoms, 3) for FK.
+        half_guided_states = torch.stack([torch.as_tensor(s) for s in half_guided.trajectory])
+        unguided_states = torch.stack([torch.as_tensor(s) for s in unguided.trajectory])
+        step_matches_unguided = (
+            torch.isclose(half_guided_states, unguided_states).flatten(1).all(dim=1)
+        )
+        assert torch.equal(
+            half_guided_states[:first_guided_step], unguided_states[:first_guided_step]
+        )
+        assert not step_matches_unguided[first_guided_step:].any()
 
 
 class TestNumericalStabilityMock:
