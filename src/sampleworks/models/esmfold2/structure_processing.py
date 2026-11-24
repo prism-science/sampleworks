@@ -124,7 +124,10 @@ def structure_to_esmfold2_input(structure: dict[str, Any]) -> StructurePredictio
 
     chain_ids = np.unique(atoms.chain_id)
     if len(chain_ids) != 1:
-        raise NotImplementedError("Multichain is unsupported.")
+        raise NotImplementedError(
+            "Multichain is supported by ESMFold2, but is currently unimplemented in sampleworks."
+        )
+
     chain_id = str(chain_ids[0])
     info = structure.get("chain_info", {}).get(chain_id, {})
     if info.get("chain_type") != ChainType.POLYPEPTIDE_L:
