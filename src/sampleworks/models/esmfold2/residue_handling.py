@@ -7,7 +7,6 @@ have not yet explored using them here.
 
 from atomworks.constants import STANDARD_AA, STANDARD_AA_ONE_LETTER
 from biotite.structure import AtomArray, get_residue_starts
-from esm.models.esmfold2.types import ProteinInput
 
 
 CANONICAL_RESIDUE_REPLACEMENTS: dict[str, str] = {
@@ -15,8 +14,8 @@ CANONICAL_RESIDUE_REPLACEMENTS: dict[str, str] = {
 }
 
 
-def handle_modified_and_nonstandard_residues(atoms: AtomArray) -> ProteinInput:
-    """Build a protein input using supported canonical residue replacements.
+def canonicalize_residue_sequence(atoms: AtomArray) -> str:
+    """Build a canonical sequence using supported residue replacements.
 
     Parameters
     ----------
@@ -26,8 +25,8 @@ def handle_modified_and_nonstandard_residues(atoms: AtomArray) -> ProteinInput:
 
     Returns
     -------
-    ProteinInput
-        Chain identity and canonicalized sequence.
+    str
+        Canonical one-letter sequence in the original residue order.
 
     Raises
     ------
@@ -45,8 +44,7 @@ def handle_modified_and_nonstandard_residues(atoms: AtomArray) -> ProteinInput:
         )
 
     residue_names = atoms.res_name[get_residue_starts(atoms)]
-    sequence = "".join(
+    return "".join(
         standard_residue_codes[CANONICAL_RESIDUE_REPLACEMENTS.get(name, name)]
         for name in residue_names
     )
-    return ProteinInput(id=str(atoms.chain_id[0]), sequence=sequence)

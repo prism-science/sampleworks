@@ -1,12 +1,7 @@
 from typing import Any
 
 import pytest
-
-
-pytest.importorskip("esm.models.esmfold2.types", reason="ESMFold2 not installed")
-
-from esm.models.esmfold2.types import ProteinInput
-from sampleworks.models.esmfold2.residue_handling import handle_modified_and_nonstandard_residues
+from sampleworks.models.esmfold2.residue_handling import canonicalize_residue_sequence
 
 
 pytest_plugins = ["tests.models.esmfold2.structure_fixtures"]
@@ -18,13 +13,13 @@ def test_mse_structure_produces_canonical_sequence(modified_residue_structure: d
     original = atoms.copy()
     assert "MSE" in atoms.res_name
 
-    protein = handle_modified_and_nonstandard_residues(atoms)
+    sequence = canonicalize_residue_sequence(atoms)
 
     chain_id = str(atoms.chain_id[0])
     expected_sequence = modified_residue_structure["chain_info"][chain_id][
         "processed_entity_canonical_sequence"
     ]
-    assert protein == ProteinInput(id=chain_id, sequence=expected_sequence)
+    assert sequence == expected_sequence
     assert atoms == original
 
 
@@ -36,4 +31,4 @@ def test_other_nonstandard_residues_remain_unsupported(
     atoms = modified_residue_structure["asym_unit"]
     atoms.res_name[atoms.res_name == "MSE"] = residue_name
     with pytest.raises(NotImplementedError, match=f"{residue_name}.*modified/nonstandard"):
-        handle_modified_and_nonstandard_residues(atoms[0])
+        canonicalize_residue_sequence(atoms[0])
