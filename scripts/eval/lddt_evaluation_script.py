@@ -17,7 +17,7 @@ from sampleworks.eval.grid_search_eval_utils import (
     translate_selection,
 )
 from sampleworks.metrics.lddt import AllAtomLDDT
-from sampleworks.utils.atom_array_utils import filter_to_common_atoms
+from sampleworks.utils.atom_array_utils import filter_to_common_atoms, use_author_numbering
 from sampleworks.utils.structure_utils import get_reference_atomarraystack
 from sklearn.metrics import silhouette_samples
 
@@ -326,7 +326,9 @@ def process_trial_with_selection(
 
     try:
         # generated structures shouldn't have altlocs, don't need altloc="all".
-        predicted_atom_array_stack = load_any(trial.refined_cif_path)
+        predicted_atom_array_stack = use_author_numbering(
+            load_any(trial.refined_cif_path, extra_fields=["auth_seq_id", "auth_asym_id"])
+        )
         clustering_results = nn_lddt_clustering(
             px_seln_refernce_atom_array,
             ensure_atom_array_stack(predicted_atom_array_stack),

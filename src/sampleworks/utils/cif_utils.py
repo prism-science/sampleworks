@@ -18,6 +18,7 @@ from sampleworks.utils.atom_array_utils import (
     _closest_canonical_amino_acid,
     BLANK_ALTLOC_IDS,
     find_all_altloc_ids,
+    load_with_author_numbering,
     save_structure_to_cif,
     select_altloc,
 )
@@ -61,6 +62,9 @@ def find_altloc_selections(
     A final union of the selection strings is returned and saved to a separate CSV by
     ``scripts/eval/find_altloc_selections.py``, one union per chain.
 
+    The selections are in author numbering (``load_with_author_numbering``), like the selections
+    the synthetic generators and the evaluation scripts apply.
+
     A multi-model ensemble that keeps altloc annotation is treated as one conformer per model.
     This means that atoms with non-blank altloc ID in the first model conceptually corresponds
     to altloc A atoms. Its spans are the contiguous runs of residues with non-blank altlocs.
@@ -93,7 +97,7 @@ def find_altloc_selections(
     """
     cif_file = Path(cif_file)
     logger.info(f"Finding altloc selections for {cif_file}")
-    structure = load_any(cif_file, altloc="all", extra_fields=["occupancy", altloc_label])
+    structure = load_with_author_numbering(cif_file, extra_fields=["occupancy", altloc_label])
 
     # our other methods rely on the annotation "altloc_id" being present, so we'll add it here.
     structure.set_annotation("altloc_id", structure.get_annotation(altloc_label))

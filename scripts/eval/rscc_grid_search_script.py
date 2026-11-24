@@ -29,7 +29,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from biotite.structure import AtomArrayStack
+from biotite.structure import AtomArray, AtomArrayStack
 
 # Import local modules for density calculation
 from joblib import delayed, Parallel
@@ -41,8 +41,10 @@ from sampleworks.eval.metrics import rscc
 from sampleworks.utils.atom_array_utils import (
     apply_selection,
     filter_to_common_atoms,
+    has_author_columns,
     parse_structure,
     remove_atoms_with_any_nan_coords,
+    use_author_numbering,
 )
 from sampleworks.utils.density_utils import (
     build_density_transformer,
@@ -60,6 +62,28 @@ from sampleworks.utils.structure_utils import (
 
 
 OccKey = tuple[tuple[str, float], ...]
+
+
+def parse_on_author_numbering(path: str | Path) -> AtomArray | AtomArrayStack:
+    """Parse a structure with guidance's options and number it by its author columns.
+
+    Parameters
+    ----------
+    path : str | Path
+        Path to a PDB or mmCIF structure file.
+
+    Returns
+    -------
+    AtomArray | AtomArrayStack
+        The asymmetric unit with ``res_id`` and ``chain_id`` on the author numbering
+        (``use_author_numbering``). A PDB file has only that numbering and is returned as
+        parsed.
+    """
+    if not has_author_columns(path):
+        return get_asym_unit_from_structure(parse_structure(path))
+    # atomworks' parse loads auth_seq_id by default, auth_asym_id only on request.
+    structure = parse_structure(path, extra_fields=["auth_asym_id"])
+    return use_author_numbering(get_asym_unit_from_structure(structure))
 
 
 def process_group(
@@ -143,8 +167,7 @@ def process_group(
             )
         # parse_structure() returns only the first altloc. A multi-model ensemble reference
         # holds one conformer per model; keep the first, the same conformer.
-        ref_structure = parse_structure(ref_path)
-        ref_atom_array = get_asym_unit_from_structure(ref_structure)
+        ref_atom_array = parse_on_author_numbering(ref_path)
         if isinstance(ref_atom_array, AtomArrayStack):
             ref_atom_array = ref_atom_array[:1]
         ref_atom_array = remove_atoms_with_any_nan_coords(ref_atom_array)
@@ -168,8 +191,7 @@ def process_group(
     # parse refined, align, and compute density once per trial.
     for trial in trials:
         try:
-            structure = parse_structure(trial.refined_cif_path)
-            atom_array = get_asym_unit_from_structure(structure)
+            atom_array = parse_on_author_numbering(trial.refined_cif_path)
             if not hasattr(atom_array, "coord") or atom_array.coord is None:
                 raise AttributeError("AtomArray | AtomArrayStack is missing coordinates")
 

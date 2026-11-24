@@ -5,11 +5,12 @@ Integration tests for ``scripts/eval/find_altloc_selections.py``.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 from pathlib import Path
 
 import pandas as pd
 import pytest
+
+from tests.script_loader import load_script
 
 
 _SCRIPT_PATH = (
@@ -21,11 +22,7 @@ _SCRIPT_PATH = (
 def find_altloc_script():
     """Import the script module by path so tests don't require it to be
     installed on ``sys.path``."""
-    spec = importlib.util.spec_from_file_location("find_altloc_selections_script", _SCRIPT_PATH)
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    return load_script(_SCRIPT_PATH)
 
 
 def _altloc_input_csv(tmp_path: Path, resources_dir: Path, *, n_rows: int = 1) -> Path:
