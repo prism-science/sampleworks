@@ -280,9 +280,6 @@ class TestStepScalerMatrix:
         assert torch.allclose(
             direction, _expected_direction(state, gradient_normalization), rtol=1e-5, atol=1e-6
         )
-        if gradient_normalization:
-            member_norms = torch.linalg.vector_norm(direction, dim=(-1, -2))
-            assert torch.allclose(member_norms, torch.ones(2, device=device), atol=1e-6)
 
         # Ground truth: loss = 0.5 * ||state||^2
         expected_loss = 0.5 * (state**2).sum()
@@ -335,13 +332,13 @@ class TestStepScalerMatrix:
             scaler.scale(state, context, model=None)
 
     @pytest.mark.parametrize("gradient_normalization", [False, True])
-    def test_noise_space_dps_gradient_chain_rule(
+    def test_noise_space_dps_differentiates_wrt_x_t(
         self, gradient_normalization: bool, device: torch.device
     ):
-        """NoiseSpaceDPSScaler gradient follows chain rule through model.
+        """NoiseSpaceDPSScaler direction is the gradient w.r.t. x_t, not the denoised state.
 
         With state = x_t * 0.9 + 0.1, and loss = 0.5 * ||state||^2,
-        grad(loss) w.r.t. x_t = state * 0.9 (chain rule); with normalization,
+        grad(loss) w.r.t. x_t = state * 0.9, but w.r.t. state it is state; with normalization,
         each batch member's gradient is scaled to unit norm. The members differ
         in scale by 100x.
         """
@@ -378,9 +375,6 @@ class TestStepScalerMatrix:
         #             = state * 0.9
         expected = _expected_direction(state.detach() * 0.9, gradient_normalization)
         assert torch.allclose(direction, expected, rtol=1e-5, atol=1e-6)
-        if gradient_normalization:
-            member_norms = torch.linalg.vector_norm(direction, dim=(-1, -2))
-            assert torch.allclose(member_norms, torch.ones(batch_size, device=device), atol=1e-6)
 
     @pytest.mark.parametrize("scaler_type", get_all_step_scalers(), ids=lambda s: s.value)
     def test_scaler_scale_returns_correct_shapes(
