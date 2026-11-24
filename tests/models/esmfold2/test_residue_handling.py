@@ -1,0 +1,39 @@
+from typing import Any
+
+import pytest
+
+
+pytest.importorskip("esm.models.esmfold2.types", reason="ESMFold2 not installed")
+
+from esm.models.esmfold2.types import ProteinInput
+from sampleworks.models.esmfold2.residue_handling import handle_modified_and_nonstandard_residues
+
+
+pytest_plugins = ["tests.models.esmfold2.structure_fixtures"]
+
+
+def test_mse_structure_produces_canonical_sequence(modified_residue_structure: dict[str, Any]):
+    """MSE is canonicalized in the sequence while reference atoms remain unchanged."""
+    atoms = modified_residue_structure["asym_unit"][0]
+    original = atoms.copy()
+    assert "MSE" in atoms.res_name
+
+    protein = handle_modified_and_nonstandard_residues(atoms)
+
+    chain_id = str(atoms.chain_id[0])
+    expected_sequence = modified_residue_structure["chain_info"][chain_id][
+        "processed_entity_canonical_sequence"
+    ]
+    assert protein == ProteinInput(id=chain_id, sequence=expected_sequence)
+    assert atoms == original
+
+
+@pytest.mark.parametrize("residue_name", ["CSO", "UNK"])
+def test_other_nonstandard_residues_remain_unsupported(
+    modified_residue_structure: dict[str, Any], residue_name: str
+):
+    """Accepting MSE does not silently canonicalize other modified or unknown residues."""
+    atoms = modified_residue_structure["asym_unit"]
+    atoms.res_name[atoms.res_name == "MSE"] = residue_name
+    with pytest.raises(NotImplementedError, match=f"{residue_name}.*modified/nonstandard"):
+        handle_modified_and_nonstandard_residues(atoms[0])
