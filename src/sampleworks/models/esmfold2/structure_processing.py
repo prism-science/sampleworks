@@ -4,7 +4,6 @@ from typing import Any, cast
 
 import numpy as np
 import torch
-from atomworks.constants import STANDARD_AA, STANDARD_AA_ONE_LETTER
 from atomworks.enums import ChainType
 from biotite.structure import AtomArray, AtomArrayStack, get_residue_positions, get_residue_starts
 from esm.models.esmfold2.output import build_molecular_complex_from_features
@@ -12,6 +11,8 @@ from esm.models.esmfold2.prepare_input import ChainInfo
 from esm.models.esmfold2.processor import ESMFold2InputBuilder
 from esm.models.esmfold2.types import ProteinInput, StructurePredictionInput
 from rdkit import rdBase
+
+from sampleworks.models.esmfold2.residue_handling import canonicalize_residue_sequence
 
 
 class ESMFold2InputBuilderBlockLogs(ESMFold2InputBuilder):
@@ -129,12 +130,8 @@ def structure_to_esmfold2_input(structure: dict[str, Any]) -> StructurePredictio
     if info.get("chain_type") != ChainType.POLYPEPTIDE_L:
         raise NotImplementedError("Non L-protein chains are unsupported.")
 
-    residue_codes = dict(zip(STANDARD_AA, STANDARD_AA_ONE_LETTER, strict=True))
+    sequence = canonicalize_residue_sequence(atoms)
     starts = get_residue_starts(atoms, add_exclusive_stop=True)
-    residue_names = atoms.res_name[starts[:-1]]
-    unsupported = sorted(set(atoms.res_name) - residue_codes.keys())
-    if unsupported:
-        raise NotImplementedError(f"{unsupported} modified/nonstandard residues are unsupported.")
 
     for start, stop in zip(starts[:-1], starts[1:], strict=True):
         names = atoms.atom_name[start:stop]
@@ -143,7 +140,6 @@ def structure_to_esmfold2_input(structure: dict[str, Any]) -> StructurePredictio
                 "Resolve alternate conformations or duplicate atoms before ESMFold2 preparation."
             )
 
-    sequence = "".join(residue_codes[name] for name in residue_names)
     if sequence != info.get("processed_entity_canonical_sequence"):
         raise ValueError("The canonical sequence does not match the observed residues.")
 

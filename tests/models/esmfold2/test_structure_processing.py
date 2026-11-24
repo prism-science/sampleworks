@@ -233,11 +233,6 @@ def test_nonprotein_chain_raises_not_implemented(ligand_structure: dict[str, Any
         structure_to_esmfold2_input(ligand_structure)
 
 
-def test_modified_residue_raises_not_implemented(modified_residue_structure: dict[str, Any]):
-    with pytest.raises(NotImplementedError, match="MSE.*modified/nonstandard"):
-        structure_to_esmfold2_input(modified_residue_structure)
-
-
 def test_crosslinks_raise_not_implemented(crosslinked_structure: dict[str, Any]):
     with pytest.raises(NotImplementedError, match="crosslinks"):
         structure_to_esmfold2_input(crosslinked_structure)
