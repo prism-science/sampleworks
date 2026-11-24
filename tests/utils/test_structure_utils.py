@@ -66,10 +66,27 @@ class TestParseSelectionString:
         result = parse_selection_string("chain A and resi 10")
         assert result == ("A", 10, 10)
 
-    def test_case_insensitive(self):
-        """Test that parsing is case insensitive."""
+    def test_keywords_case_insensitive_chain_case_preserved(self):
+        """Keywords match in any case; the chain ID keeps its case (author chains can be a-z)."""
         result = parse_selection_string("CHAIN a AND RESI 10")
-        assert result == ("A", 10, 10)
+        assert result == ("a", 10, 10)
+
+    def test_negative_single_residue(self):
+        """Author residue numbers can be negative."""
+        result = parse_selection_string("chain A and resi -3")
+        assert result == ("A", -3, -3)
+
+    @pytest.mark.parametrize(
+        ("selection", "expected"),
+        [
+            ("resi -5--1", (None, -5, -1)),
+            ("resi -5-10", (None, -5, 10)),
+            ("chain b and resi -2-0", ("b", -2, 0)),
+        ],
+    )
+    def test_negative_residue_range(self, selection, expected):
+        """Ranges with negative bounds parse both bounds."""
+        assert parse_selection_string(selection) == expected
 
     def test_empty_string(self, caplog):
         """Test parsing empty string returns warning and all None."""
@@ -128,6 +145,22 @@ class TestApplySelection:
         """Test that selection matching no atoms raises ValueError."""
         with pytest.raises(ValueError, match="matched no atoms"):
             apply_selection(basic_atom_array_multichain, "chain Z")
+
+    def test_lowercase_chain_selects_only_that_chain(self, basic_atom_array_multichain):
+        """A lowercase author chain is distinct from its uppercase counterpart."""
+        atom_array = basic_atom_array_multichain.copy()
+        atom_array.chain_id[5:] = "a"
+        result = apply_selection(atom_array, "chain a and resi 2-4")
+        assert list(cast(np.ndarray, result.chain_id)) == ["a"] * 3
+        assert list(cast(np.ndarray, result.res_id)) == [2, 3, 4]
+
+    def test_negative_residue_range_selects_only_that_range(self, basic_atom_array_multichain):
+        """Negative author residue bounds restrict the selection instead of being dropped."""
+        atom_array = basic_atom_array_multichain.copy()
+        atom_array.res_id = atom_array.res_id - 4  # chain A res_ids become -3..1
+        result = apply_selection(atom_array, "chain A and resi -2--1")
+        assert list(cast(np.ndarray, result.chain_id)) == ["A"] * 2
+        assert list(cast(np.ndarray, result.res_id)) == [-2, -1]
 
     def test_preserves_annotations(self, basic_atom_array_multichain):
         """Test that annotations are preserved after filtering."""
