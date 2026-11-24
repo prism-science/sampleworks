@@ -691,10 +691,34 @@ class StructureFactorLossFunction:
                 self.sfc.get_scales_adam()
         self._scales_initialized = True
         logger.opt(lazy=True).debug(
-            "Scale fit: r_work={:.4f}, r_free={:.4f}",
+            "Scale fit: r_work={:.4f}, r_free={:.4f}; per resolution bin kiso={}, kmask={}, "
+            "uaniso={}",
             lambda: float(self.sfc.r_work),
             lambda: float(self.sfc.r_free),
+            lambda: _format_scales_for_log(self.sfc.kisos),
+            lambda: _format_scales_for_log(self.sfc.kmasks),
+            lambda: _format_scales_for_log(self.sfc.uanisos),
         )
+
+
+def _format_scales_for_log(scales_per_bin: list[torch.Tensor]) -> list:
+    """Convert per-resolution-bin scale tensors to rounded Python numbers for logging.
+
+    Parameters
+    ----------
+    scales_per_bin
+        One tensor per resolution bin: a scalar for ``kiso`` / ``kmask``, or the six
+        independent components of the anisotropic tensor for ``uaniso``.
+
+    Returns
+    -------
+    list
+        One entry per bin, rounded to four decimals: a float for scalar
+        scales, a list of six floats for ``uaniso``.
+    """
+    # [n_bins] for kiso / kmask, [n_bins, 6] for uaniso.
+    stacked = torch.stack([scale.detach().squeeze() for scale in scales_per_bin])
+    return np.round(stacked.double().cpu().numpy(), 4).tolist()
 
 
 def build_structure_factor_loss(
