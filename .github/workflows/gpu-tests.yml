@@ -9,7 +9,7 @@ on:
       - 'pyproject.toml'
       - 'pixi.lock'
       - '.github/workflows/gpu-tests.yml'
-  pull_request_target:
+  pull_request:
     branches: [main]
     paths:
       - 'src/**'
@@ -25,6 +25,11 @@ concurrency:
 
 jobs:
   gpu-tests:
+    # PRs from someone's fork never get a GPU job. Outside code requires a maintainer to push
+    # the reviewed commits to a branch in this repository.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: gpu-1
     timeout-minutes: 30
     environment: gpu-testing
@@ -51,13 +56,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          # pull_request_target checks out the base branch by default. We need
-          # the PR head to actually test PR code. This runs untrusted code on
-          # gpu-1, mitigated by: environment approval gate (gpu-testing),
-          # read-only token (contents: read), and reviewer sign-off before any
-          # steps execute. Reviewers: validate security-sensitive changes before
-          # approving.
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
 
       - name: Install pixi
         uses: prefix-dev/setup-pixi@9936258fee697aff89b3fed6ca1f80a382ef694e # v0.11.3
