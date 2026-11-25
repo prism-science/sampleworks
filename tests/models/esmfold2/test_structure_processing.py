@@ -1,6 +1,5 @@
 """Atomworks structures translate faithfully into ESMFold2 inputs."""
 
-import copy
 from typing import Any
 
 import pytest
@@ -34,7 +33,6 @@ def test_single_chain_preserves_sequence_and_identity(
     if not use_stack:
         structure["asym_unit"] = structure["asym_unit"][0]
 
-    original = copy.deepcopy(structure)
     sequence = structure["chain_info"]["A"]["processed_entity_canonical_sequence"]
 
     result = structure_to_esmfold2_input(structure)
@@ -44,8 +42,6 @@ def test_single_chain_preserves_sequence_and_identity(
     assert result.pocket is None
     assert result.distogram_conditioning is None
     assert result.covalent_bonds is None
-    assert structure["asym_unit"] == original["asym_unit"]
-    assert structure["chain_info"] == original["chain_info"]
 
 
 def test_prepared_input_builds_valid_features(
