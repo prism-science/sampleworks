@@ -56,8 +56,8 @@ def test_resolve_sequence_arg_reads_relative_fasta_from_root(tmp_path: Path):
 
 
 @pytest.mark.parametrize("second_header", ["second", "first"])
-def test_resolve_sequence_arg_rejects_multiple_fasta_records(tmp_path: Path, second_header: str):
-    """Reject multiple records even when headers repeat.
+def test_resolve_sequence_arg_joins_fasta_records_per_chain(tmp_path: Path, second_header: str):
+    """Each FASTA record is one protein chain, kept in file order even when headers repeat.
 
     Parameters
     ----------
@@ -69,9 +69,27 @@ def test_resolve_sequence_arg_rejects_multiple_fasta_records(tmp_path: Path, sec
     fasta = tmp_path / "sequences.fasta"
     fasta.write_text(f">first\nACD\n>{second_header}\nEFG\n")
 
-    # TODO: eventually we will need to scale this to multiple sequences and ligands
-    # which will invalidate this test
-    with pytest.raises(ValueError, match="multiple sequences"):
+    assert resolve_sequence_arg(fasta) == "ACD:EFG"
+
+
+def test_resolve_sequence_arg_normalizes_multichain_literal():
+    """A ``SEQ:SEQ`` literal is validated and normalized chain by chain."""
+    assert resolve_sequence_arg(" acd : EFG ") == "ACD:EFG"
+
+
+@pytest.mark.parametrize("sequence", ["ACD::EFG", "ACD:"])
+def test_resolve_sequence_arg_rejects_empty_chain_sequence(sequence: str):
+    """An empty chain between separators is an error, not a skipped chain."""
+    with pytest.raises(ValueError, match="empty"):
+        resolve_sequence_arg(sequence)
+
+
+def test_resolve_sequence_arg_rejects_fasta_with_empty_record(tmp_path: Path):
+    """A FASTA record without residues cannot stand for a protein chain."""
+    fasta = tmp_path / "sequences.fasta"
+    fasta.write_text(">first\nACD\n>second\n")
+
+    with pytest.raises(ValueError, match="empty"):
         resolve_sequence_arg(fasta)
 
 
