@@ -1,0 +1,8 @@
+molprobity_top8000.npz packs the Top8000 Ramachandran and rotamer percentile-contour grids from
+https://github.com/rlabduke/reference_data (commit 7b0c33dd2885380f44c49ede639d84d5e87abad9),
+Richardson Laboratory, Duke University, licensed under CC BY 4.0
+(https://creativecommons.org/licenses/by/4.0/). The grids were converted to dense arrays by
+scripts/build_molprobity_tables.py; values are unchanged.
+
+Williams, C. J. et al. MolProbity: More and better reference data for improved all-atom structure
+validation. Protein Sci. 27, 293-315 (2018).

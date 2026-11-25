@@ -209,6 +209,8 @@ readiness table, and [docs/IT_OPT_TESTING.md](docs/IT_OPT_TESTING.md) for how to
 | `structure_factor`             | Fit to structure-factor amplitudes from an MTZ                         | `--mtzfile`, `--expcolumns`, `--resolution`, `--bulk-solvent`, `--scattering-factor-mode`, ... |
 | `diffuse_bragg`                | Fit to Bragg amplitudes and anisotropic diffuse intensities (lunus.sf) | `--bragg-target`, `--diffuse-target`, `--bragg-weight`, `--resolution`, ...                    |
 | `bond_geometry`                | Bond-length and steric-clash penalty; combine with a data loss         | `--bond-tolerance`, `--clash-padding`, `--bond-power`                                          |
+| `ccd_bounds`                   | Distances outside CCD (RDKit) bounds; combine with a data loss         | `--bond-buffer`, `--angle-buffer`, `--clash-buffer`                                            |
+| `molprobity`                   | Soft MolProbity score; combine with a data loss                        | `--outlier-softness`, `--skip-polar-pairs`, `--clash-chunk-size`                               |
 
 ```bash
 sampleworks-guidance --model boltz2 --guidance-type pure_guidance \
@@ -252,6 +254,30 @@ real_space_density:
     resolution: 1.8
 bond_geometry:
   weight: 5.0e-5
+```
+
+`ccd_bounds` and `molprobity` are the two structure-quality terms of DEER-guided Boltz-2
+(Kao, Meiler & Mchaourab, bioRxiv 2026.10.29.762916), and like `bond_geometry` they score no
+data. `ccd_bounds` is a linear flat-bottom penalty on every intra-residue distance (bonds, 1-3
+pairs, and a floor on other pairs) and the peptide junction, outside RDKit's bounds for the CCD
+component widened by the buffers. `molprobity` keeps the form and weights of the MolProbity score
+with soft heavy-atom versions of its clashscore, rotamer outliers, and Ramachandran outliers; it
+has no bond-length or angle term, so pair it with `ccd_bounds` or `bond_geometry` when bonds can
+stretch. With `real_space_density` at weight 1.0 in noise-space `pure_guidance`, `ccd_bounds` at
+`8e-3` (default buffers) or `3e-3` (buffers `0.05`) and `molprobity` at `0.1` give coordinate
+gradients about the size of `bond_geometry` at `1e-2`:
+
+```yaml
+real_space_density:
+  weight: 1.0
+  loss_options:
+    density: 1vme.ccp4
+    resolution: 1.8
+ccd_bounds:
+  weight: 3.0e-3
+  loss_options:
+    bond_buffer: 0.05
+    angle_buffer: 0.05
 ```
 
 ## Grid Search

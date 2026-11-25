@@ -2,7 +2,8 @@ repos:
   - repo: builtin
     hooks:
       - id: check-added-large-files
-        exclude: \.(cif|pdb|ccp4|mtz|mrc)$
+        # The MolProbity Top8000 grids (2.3 MB compressed) are packed data the molprobity loss reads.
+        exclude: \.(cif|pdb|ccp4|mtz|mrc)$|^src/sampleworks/data/molprobity_top8000\.npz$
       - id: check-merge-conflict
       - id: check-yaml
       - id: end-of-file-fixer
