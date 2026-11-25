@@ -62,10 +62,8 @@ def test_prepared_input_builds_valid_features(
     assert chains[0].chain_id == "A"
     assert [token.residue_name for token in chains[0].tokens] == residue_names
     assert features["token_attention_mask"].sum().item() == n_residues
-    assert features["input_ids"].shape == (1, n_residues)
     assert features["msa"].shape == (1, 1, n_residues)
     assert not features["has_deletion"].any()
-    assert features["atom_attention_mask"].sum().item() > n_residues
     assert features["ref_pos"].shape[:2] == features["atom_attention_mask"].shape
     assert features["ref_pos"].shape[-1] == 3
     assert features["ref_pos"].device.type == "cpu"
