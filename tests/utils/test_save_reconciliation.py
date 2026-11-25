@@ -137,6 +137,9 @@ def test_relabel_fills_gaps_per_offset_and_keeps_model_only_chain():
         atom_names=["N", "CA"] * 2,
         b_factor_value=50.0,
     )
+    # Distinct sequences so the input chain pairs with A, not the equally long B.
+    model.res_name[:] = np.repeat(["GLY", "SER", "TRP", "TYR", "CYS", "HIS", "MET", "MET"], 2)
+    struct.res_name[:] = np.repeat(["SER", "TYR"], 2)
     # Model residues 2 and 4 in chain A are the matched ones.
     struct.set_annotation("seq_idx", np.array([1, 1, 3, 3]))
 

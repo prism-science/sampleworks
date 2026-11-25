@@ -1,6 +1,6 @@
 import re
 import warnings
-from collections.abc import Collection, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast, Literal, overload
@@ -856,64 +856,121 @@ def select_backbone(atom_array: AtomArray | AtomArrayStack) -> AtomArray | AtomA
         return atom_array[mask]
 
 
-def make_atom_id(arr: AtomArray | AtomArrayStack) -> np.ndarray:
-    """Create a unique identifier for each atom."""
-    chain_id = cast(np.ndarray, arr.chain_id)
-    res_id = cast(np.ndarray, arr.res_id)
-    atom_name = cast(np.ndarray, arr.atom_name)
-    return np.array(
-        [f"{chain}_{res}_{atom}" for chain, res, atom in zip(chain_id, res_id, atom_name)]
-    )
+def residue_index(res_id: np.ndarray, ins_code: np.ndarray) -> np.ndarray:
+    """Number residues ``0, 1, ...`` in order of first appearance.
 
-
-def make_normalized_atom_id(
-    arr: AtomArray | AtomArrayStack, chain_ids: Collection[str] | None = None
-) -> np.ndarray:
-    """Like ``make_atom_id`` but with sequential 0-based residue numbering per chain.
-
-    Handles numbering differences between representations (Boltz 0-based,
-    PDB author numbering, etc.).
+    A residue is a ``(res_id, ins_code)`` pair, so two residue names under one number share
+    an index.
 
     Parameters
     ----------
-    arr
-        Atoms to label.
-    chain_ids
-        Chain IDs to rank chains over, a superset of ``arr``'s. Defaults to ``arr``'s own
-        chain IDs. Arrays compared against each other must share it when one of them lacks
-        some of the other's chains, or their chain ranks disagree.
+    res_id : np.ndarray
+        Residue number of each atom, shape ``(n_atoms,)``.
+    ins_code : np.ndarray
+        Insertion code of each atom, shape ``(n_atoms,)``.
 
     Returns
     -------
     np.ndarray
-        Array of ``"chainidx_seqpos_atomname"`` strings.
+        Residue index of each atom, shape ``(n_atoms,)``.
+    """
+    keys = np.rec.fromarrays([res_id, ins_code])
+    _, first_atoms, residue_of_key = np.unique(keys, return_index=True, return_inverse=True)
+    # np.unique sorts the keys; ranking their first atoms renumbers them by first appearance.
+    return np.argsort(np.argsort(first_atoms))[residue_of_key.ravel()]
+
+
+def _repeat_counts(keys: np.ndarray) -> np.ndarray:
+    """Number each key's repeats ``0, 1, ...`` in order of appearance.
+
+    Parameters
+    ----------
+    keys : np.ndarray
+        Keys, shape ``(n,)``.
+
+    Returns
+    -------
+    np.ndarray
+        How many times each key appeared before, shape ``(n,)``.
+    """
+    n = len(keys)
+    order = np.argsort(keys, kind="stable")
+    sorted_keys = keys[order]
+    is_run_start = np.r_[True, sorted_keys[1:] != sorted_keys[:-1]]
+    run_start = np.maximum.accumulate(np.where(is_run_start, np.arange(n), 0))
+    counts = np.empty(n, dtype=np.int64)
+    counts[order] = np.arange(n) - run_start
+    return counts
+
+
+def make_atom_id(arr: AtomArray | AtomArrayStack) -> np.ndarray:
+    """Identify each atom by chain, residue number and atom name.
+
+    Parameters
+    ----------
+    arr : AtomArray | AtomArrayStack
+        Atoms to identify.
+
+    Returns
+    -------
+    np.ndarray
+        Structured array with fields ``chain_id``, ``res_id``, ``atom_name``, shape
+        ``(n_atoms,)``.
+    """
+    return np.rec.fromarrays(
+        (
+            cast(np.ndarray, arr.chain_id),
+            cast(np.ndarray, arr.res_id),
+            cast(np.ndarray, arr.atom_name),
+        ),
+        # ty's numpy stubs reject a valid `names` sequence for `rec.fromarrays`.
+        names=("chain_id", "res_id", "atom_name"),  # ty:ignore[invalid-argument-type]
+    )
+
+
+def make_normalized_atom_id(arr: AtomArray | AtomArrayStack) -> np.ndarray:
+    """Like ``make_atom_id`` but with residues numbered ``0, 1, ...`` per chain.
+
+    Lets arrays with different residue numbering (Boltz 0-based, PDB author numbering) pair.
+    Repeated ids (altlocs, or microheterogeneity: two residue names at one position) are told
+    apart by ``occurrence``, so a repeat pairs only with the same repeat in another array.
+
+    Parameters
+    ----------
+    arr : AtomArray | AtomArrayStack
+        Atoms to identify. Where its optional ``seq_idx`` annotation is ``>= 0``, it replaces
+        the residue position.
+
+    Returns
+    -------
+    np.ndarray
+        Structured array with fields ``chain_id``, ``seq_pos``, ``atom_name``, ``occurrence``,
+        shape ``(n_atoms,)``.
     """
     chain_id = cast(np.ndarray, arr.chain_id)
     res_id = cast(np.ndarray, arr.res_id)
+    ins_code = cast(np.ndarray, arr.ins_code)
     atom_name = cast(np.ndarray, arr.atom_name)
 
-    # Sorted so the index assignment is stable regardless of input ordering.
-    unique_chains = sorted(set(chain_id))
-    chain_to_idx = {c: i for i, c in enumerate(sorted(chain_ids or unique_chains))}
-
-    # Assign sequential 0-based seq_pos per chain.
     seq_pos = np.empty(len(res_id), dtype=np.int64)
-    for chain in unique_chains:
+    for chain in sorted(set(chain_id)):
         chain_mask = chain_id == chain
-        chain_res_ids = res_id[chain_mask]
-        _, first_idx = np.unique(chain_res_ids, return_index=True)
-        ordered_unique = chain_res_ids[np.sort(first_idx)]
-        rid_to_pos = {int(rid): pos for pos, rid in enumerate(ordered_unique)}
-        seq_pos[chain_mask] = np.array([rid_to_pos[int(r)] for r in chain_res_ids])
+        seq_pos[chain_mask] = residue_index(res_id[chain_mask], ins_code[chain_mask])
 
-    # Override with alignment-derived seq_idx when present (set by
-    # apply_sequence_override to handle gaps / missing residues).
+    # seq_idx comes from apply_sequence_override or AtomReconciler.
     if "seq_idx" in arr.get_annotation_categories():
         override = cast(np.ndarray, arr.seq_idx)
         mask = override >= 0
         seq_pos[mask] = override[mask]
 
-    return np.array([f"{chain_to_idx[c]}_{s}_{a}" for c, s, a in zip(chain_id, seq_pos, atom_name)])
+    ids = np.rec.fromarrays(
+        (chain_id, seq_pos, atom_name),
+        names=("chain_id", "seq_pos", "atom_name"),  # ty:ignore[invalid-argument-type]
+    )
+    return np.rec.fromarrays(
+        (chain_id, seq_pos, atom_name, _repeat_counts(ids)),
+        names=("chain_id", "seq_pos", "atom_name", "occurrence"),  # ty:ignore[invalid-argument-type]
+    )
 
 
 @overload
@@ -996,13 +1053,7 @@ def filter_to_common_atoms(
 
     # Find common atom IDs across all structures
     if normalize_ids:
-        # Arrays whose chains are all named in the largest array's chains (e.g. a model that
-        # leaves out ligands or waters) rank chains over that set; otherwise chains may have
-        # been renamed and each array ranks its own.
-        chain_sets = [set(cast(np.ndarray, array.chain_id)) for array in arrays]
-        largest = max(chain_sets, key=len)
-        shared = largest if all(chains <= largest for chains in chain_sets) else None
-        all_ids = [make_normalized_atom_id(array, shared) for array in arrays]
+        all_ids = [make_normalized_atom_id(array) for array in arrays]
     else:
         all_ids = [make_atom_id(array) for array in arrays]
 
@@ -1137,7 +1188,7 @@ def load_conformer_pairs(
     return atom_array, conformer_ids, build_pairwise_altloc_arrays(atom_array, conformer_ids)
 
 
-def _closest_canonical_amino_acid(res_name: str) -> str | None:
+def closest_canonical_amino_acid(res_name: str) -> str | None:
     """Map a (possibly modified) residue name to its canonical parent amino acid.
 
     Uses atomworks' mapping, e.g. ``CSO -> CYS``, ``MSE -> MET``. Standard amino
