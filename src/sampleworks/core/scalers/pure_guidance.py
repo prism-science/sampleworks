@@ -6,7 +6,12 @@ import torch
 from loguru import logger
 from tqdm import tqdm
 
-from sampleworks.core.losses.protocol import LossFunctionProtocol, prepare_loss_if_needed
+from sampleworks.core.losses.protocol import (
+    loss_at_progress,
+    LossFunctionProtocol,
+    prepare_loss_if_needed,
+)
+from sampleworks.core.losses.weight_schedule import guidance_progress
 from sampleworks.core.samplers.protocol import TrajectorySampler
 from sampleworks.core.scalers.protocol import GuidanceOutput, StepScalerProtocol
 from sampleworks.models.protocol import FlowModelWrapper
@@ -110,12 +115,14 @@ class PureGuidance:
                 starting_context.noise_scale
             )
 
+        first_guided_step = max(self.starting_step, self.guidance_start)
         for i in tqdm(range(self.starting_step, self.num_steps)):
             context = sampler.get_context_for_step(i, schedule)
             apply_guidance = i >= self.guidance_start
 
             if apply_guidance:
-                context = context.with_loss(loss_function, loss_inputs)
+                progress = guidance_progress(i, first_guided_step, self.num_steps)
+                context = context.with_loss(loss_at_progress(loss_function, progress), loss_inputs)
 
             context = context.with_reconciler(
                 reconciler=reconciler,
