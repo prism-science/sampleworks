@@ -54,9 +54,12 @@ def ligand_structure(protein_ligand_structure: dict[str, Any]) -> dict[str, Any]
     """
     atoms = protein_ligand_structure["asym_unit"]
     return {
-        **protein_ligand_structure,
         "asym_unit": atoms[:, atoms.chain_id == "C"],
         "chain_info": {"C": protein_ligand_structure["chain_info"]["C"]},
+        "assemblies": protein_ligand_structure["assemblies"],
+        "metadata": protein_ligand_structure["metadata"],
+        "extra_info": protein_ligand_structure["extra_info"],
+        "ligand_info": protein_ligand_structure["ligand_info"],
     }
 
 
