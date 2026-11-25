@@ -81,14 +81,3 @@ def missing_atoms_structure(resources_dir: Path, request: pytest.FixtureRequest)
         hydrogen_policy="remove",
         add_missing_atoms=request.param,
     )
-
-
-@pytest.fixture(params=["remove", "keep"], ids=["without-hydrogens", "with-hydrogens"])
-def hydrogen_structure(resources_dir: Path, request: pytest.FixtureRequest) -> dict[str, Any]:
-    """Parse the 5SOP protein chains with and without deposited hydrogens."""
-    return parse(
-        filename=resources_dir / "5SOP" / "5SOP_single_001.pdb",
-        hydrogen_policy=request.param,
-        add_missing_atoms=False,
-        remove_ccds=["RYI"],
-    )
