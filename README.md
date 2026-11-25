@@ -1,8 +1,9 @@
 # Sampleworks
 
-> [!NOTE]
+> [!WARNING]
 > This repository is under active development. Please always use the latest version. If you encounter any problems, please [create an issue on GitHub](https://github.com/prism-science/sampleworks/issues) and include: the PDB ID, the CIF file you used, your density map(s), and log information.
->
+
+> [!NOTE]
 > We would welcome contributions from the community. We are most interested in:
 >
 > - new ModelWrappers for additional structure prediction models (especially smaller models which may be more steerable)
