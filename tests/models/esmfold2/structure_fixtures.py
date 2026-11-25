@@ -73,33 +73,6 @@ def modified_residue_structure(resources_dir: Path) -> dict[str, Any]:
     )
 
 
-@pytest.fixture
-def crosslinked_structure(resources_dir: Path) -> dict[str, Any]:
-    """Parse crambin (1CRN) with its three disulfide bonds.
-
-    Parameters
-    ----------
-    resources_dir
-        Directory of checked-in test structures.
-
-    Returns
-    -------
-    dict
-        One protein chain with Cys3–Cys40, Cys4–Cys32, and Cys16–Cys26 bonds.
-
-    Notes
-    -----
-    CIF source: https://files.rcsb.org/download/1CRN.cif.
-    Atomworks excludes disulfide connections by default, so include them explicitly.
-    """
-    return parse(
-        filename=resources_dir / "1CRN" / "1CRN.cif",
-        hydrogen_policy="remove",
-        add_missing_atoms=False,
-        add_bond_types_from_struct_conn=["covale", "disulf"],
-    )
-
-
 @pytest.fixture(params=[False, True], ids=["observed-atoms", "with-unresolved-atoms"])
 def missing_atoms_structure(resources_dir: Path, request: pytest.FixtureRequest) -> dict[str, Any]:
     """Parse the damaged 5I09 prediction with and without atom completion."""

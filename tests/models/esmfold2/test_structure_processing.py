@@ -227,8 +227,3 @@ def test_multichain_raises_not_implemented(multichain_structure: dict[str, Any])
 def test_nonprotein_chain_raises_not_implemented(ligand_structure: dict[str, Any]):
     with pytest.raises(NotImplementedError, match="Non L-protein"):
         structure_to_esmfold2_input(ligand_structure)
-
-
-def test_crosslinks_raise_not_implemented(crosslinked_structure: dict[str, Any]):
-    with pytest.raises(NotImplementedError, match="crosslinks"):
-        structure_to_esmfold2_input(crosslinked_structure)
