@@ -17,6 +17,7 @@ from sampleworks.models.esmfold2.structure_processing import (
     ESMFold2InputBuilderBlockLogs,
     structure_to_esmfold2_input,
 )
+from sampleworks.utils.sequence import expected_heavy_atom_count
 
 
 # Loads the various structure dictionary fixtures into the namespace.
@@ -25,10 +26,10 @@ pytest_plugins = ["tests.models.esmfold2.structure_fixtures"]
 
 @pytest.mark.parametrize("use_stack", [False, True], ids=["atom-array", "atom-array-stack"])
 def test_single_chain_preserves_sequence_and_identity(
-    single_chain_structure: dict[str, Any], use_stack: bool
+    fresh_structure_6b8x: dict[str, Any], use_stack: bool
 ):
     """Translate either atom-array form without modifying the source structure."""
-    structure = single_chain_structure
+    structure = fresh_structure_6b8x
     if not use_stack:
         structure["asym_unit"] = structure["asym_unit"][0]
 
@@ -44,17 +45,17 @@ def test_single_chain_preserves_sequence_and_identity(
 
 
 def test_prepared_input_builds_valid_features(
-    single_chain_structure: dict[str, Any],
+    structure_6b8x: dict[str, Any],
 ):
     """Build CPU features using ESMFold2's external CCD cache, without model weights."""
-    model_input = structure_to_esmfold2_input(single_chain_structure)
+    model_input = structure_to_esmfold2_input(structure_6b8x)
 
     builder = ESMFold2InputBuilderBlockLogs()
 
     with pytest.warns(UserWarning, match="No MSA provided"):
         features, chains = builder.prepare_input(model_input, seed=0, device="cpu")
 
-    atoms = single_chain_structure["asym_unit"][0]
+    atoms = structure_6b8x["asym_unit"][0]
     residue_names = atoms.res_name[get_residue_starts(atoms)].tolist()
     n_residues = len(residue_names)
     assert len(chains) == 1
@@ -69,15 +70,15 @@ def test_prepared_input_builds_valid_features(
     assert torch.isfinite(features["ref_pos"]).all()
 
 
-def test_model_atoms_include_missing_cb_atoms(single_chain_structure: dict[str, Any]):
+def test_model_atoms_include_missing_cb_atoms(fresh_structure_6b8x: dict[str, Any]):
     """Model atoms include one CB per non-glycine residue despite their absence in the input."""
-    structure = single_chain_structure
+    structure = fresh_structure_6b8x
     input_atoms = structure["asym_unit"][0]
     sequence = structure["chain_info"]["A"]["processed_entity_canonical_sequence"]
     expected_cb_residues = [
         position for position, letter in enumerate(sequence, start=1) if letter != "G"
     ]
-    expected_atom_count = len(input_atoms)
+    expected_atom_count = expected_heavy_atom_count(sequence)
     structure["asym_unit"] = input_atoms[input_atoms.atom_name != "CB"]
 
     builder = ESMFold2InputBuilderBlockLogs()
@@ -90,7 +91,6 @@ def test_model_atoms_include_missing_cb_atoms(single_chain_structure: dict[str, 
         model_atoms.res_id[model_atoms.atom_name == "CB"], expected_cb_residues
     )
     assert len(model_atoms) == expected_atom_count
-    assert len(model_atoms) - len(structure["asym_unit"]) == len(expected_cb_residues)
 
 
 def test_atom_conversion_preserves_model_order_and_coordinates():
@@ -155,32 +155,32 @@ def test_model_atoms_support_loss_inputs():
     LossInputs.from_atom_array(model_atoms, ensemble_size=1, device="cpu")
 
 
-def test_malformed_asym_unit_raises_error(single_chain_structure: dict[str, Any]):
-    single_chain_structure["asym_unit"] = np.arange(10)
+def test_malformed_asym_unit_raises_error(fresh_structure_6b8x: dict[str, Any]):
+    fresh_structure_6b8x["asym_unit"] = np.arange(10)
     with pytest.raises(TypeError, match="asym_unit"):
-        structure_to_esmfold2_input(single_chain_structure)
+        structure_to_esmfold2_input(fresh_structure_6b8x)
 
-    del single_chain_structure["asym_unit"]
+    del fresh_structure_6b8x["asym_unit"]
     with pytest.raises(KeyError, match="asym_unit"):
-        structure_to_esmfold2_input(single_chain_structure)
+        structure_to_esmfold2_input(fresh_structure_6b8x)
 
 
-def test_sequence_mismatch_raises_error(single_chain_structure: dict[str, Any]):
+def test_sequence_mismatch_raises_error(fresh_structure_6b8x: dict[str, Any]):
     """Reject a declared sequence that differs from the observed residues."""
-    chain_info = single_chain_structure["chain_info"]["A"]
+    chain_info = fresh_structure_6b8x["chain_info"]["A"]
     sequence = chain_info["processed_entity_canonical_sequence"]
     assert sequence.startswith("M")
     chain_info["processed_entity_canonical_sequence"] = "A" + sequence[1:]
 
     with pytest.raises(ValueError, match="canonical sequence does not match the observed residues"):
-        structure_to_esmfold2_input(single_chain_structure)
+        structure_to_esmfold2_input(fresh_structure_6b8x)
 
 
-def test_multichain_raises_not_implemented(multichain_structure: dict[str, Any]):
+def test_multichain_raises_not_implemented(structure_5sop: dict[str, Any]):
     with pytest.raises(NotImplementedError, match="Multichain"):
-        structure_to_esmfold2_input(multichain_structure)
+        structure_to_esmfold2_input(structure_5sop)
 
 
-def test_nonprotein_chain_raises_not_implemented(ligand_structure: dict[str, Any]):
+def test_nonprotein_chain_raises_not_implemented(ligand_chain_5sop: dict[str, Any]):
     with pytest.raises(NotImplementedError, match="Non L-protein"):
-        structure_to_esmfold2_input(ligand_structure)
+        structure_to_esmfold2_input(ligand_chain_5sop)

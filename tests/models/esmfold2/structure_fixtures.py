@@ -1,83 +1,42 @@
-"""Atomworks structure fixtures for ESMFold2 tests."""
+"""Independent copies and chain selections of shared structure fixtures."""
 
-from pathlib import Path
+import copy
 from typing import Any
 
 import pytest
-from atomworks import parse
 
 
-@pytest.fixture
-def single_chain_structure(resources_dir: Path) -> dict[str, Any]:
-    """Parse the single-chain 6B8X structure with production parser options."""
-    return parse(
-        filename=resources_dir / "6b8x" / "6b8x_final.pdb",
-        hydrogen_policy="remove",
-        add_missing_atoms=False,
-    )
+@pytest.fixture(scope="function")
+def fresh_structure_6b8x(structure_6b8x: dict[str, Any]) -> dict[str, Any]:
+    """Copy shared 6B8X data so tests can modify it independently."""
+    return copy.deepcopy(structure_6b8x)
 
 
-@pytest.fixture
-def multichain_structure(resources_dir: Path) -> dict[str, Any]:
-    """Parse both 5SOP protein chains, excluding the RYI ligand."""
-    return parse(
-        filename=resources_dir / "5SOP" / "5SOP_single_001.pdb",
-        hydrogen_policy="remove",
-        add_missing_atoms=False,
-        remove_ccds=["RYI"],
-    )
+@pytest.fixture(scope="function")
+def fresh_structure_5sop(structure_5sop: dict[str, Any]) -> dict[str, Any]:
+    """Copy shared 5SOP data, containing protein chains A and B and RYI ligand chain C."""
+    return copy.deepcopy(structure_5sop)
 
 
-@pytest.fixture
-def protein_ligand_structure(resources_dir: Path) -> dict[str, Any]:
-    """Parse 5SOP with its protein chains and RYI ligand."""
-    return parse(
-        filename=resources_dir / "5SOP" / "5SOP_single_001.pdb",
-        hydrogen_policy="remove",
-        add_missing_atoms=False,
-    )
-
-
-@pytest.fixture
-def ligand_structure(protein_ligand_structure: dict[str, Any]) -> dict[str, Any]:
-    """Select the RYI ligand chain from 5SOP.
-
-    Parameters
-    ----------
-    protein_ligand_structure
-        Parsed 5SOP structure containing the protein and ligand chains.
-
-    Returns
-    -------
-    dict
-        Structure containing only ligand chain C.
-    """
-    atoms = protein_ligand_structure["asym_unit"]
+@pytest.fixture(scope="session")
+def ligand_chain_5sop(structure_5sop: dict[str, Any]) -> dict[str, Any]:
+    """Restrict the shared 5SOP asymmetric unit and chain metadata to RYI ligand chain C."""
+    atoms = structure_5sop["asym_unit"]
     return {
         "asym_unit": atoms[:, atoms.chain_id == "C"],
-        "chain_info": {"C": protein_ligand_structure["chain_info"]["C"]},
-        "assemblies": protein_ligand_structure["assemblies"],
-        "metadata": protein_ligand_structure["metadata"],
-        "extra_info": protein_ligand_structure["extra_info"],
-        "ligand_info": protein_ligand_structure["ligand_info"],
+        "chain_info": {"C": structure_5sop["chain_info"]["C"]},
+        "assemblies": structure_5sop["assemblies"],
+        "metadata": structure_5sop["metadata"],
+        "extra_info": structure_5sop["extra_info"],
+        "ligand_info": structure_5sop["ligand_info"],
     }
 
 
-@pytest.fixture
-def modified_residue_structure(resources_dir: Path) -> dict[str, Any]:
-    """Parse the carved 1VME protein chain containing selenomethionine (MSE)."""
-    return parse(
-        filename=resources_dir / "1vme" / "1vme_final_carved_edited_0.5occA_0.5occB.cif",
-        hydrogen_policy="remove",
-        add_missing_atoms=False,
-    )
-
-
-@pytest.fixture(params=[False, True], ids=["observed-atoms", "with-unresolved-atoms"])
-def missing_atoms_structure(resources_dir: Path, request: pytest.FixtureRequest) -> dict[str, Any]:
-    """Parse the damaged 5I09 prediction with and without atom completion."""
-    return parse(
-        filename=resources_dir / "5I09" / "5I09_prediction_deleted_atoms.cif",
-        hydrogen_policy="remove",
-        add_missing_atoms=request.param,
-    )
+@pytest.fixture(scope="function")
+def protein_chain_1vme(structure_1vme: dict[str, Any]) -> dict[str, Any]:
+    """Copy shared 1VME data and select chain A, which contains seven MSE residues."""
+    structure = copy.deepcopy(structure_1vme)
+    atoms = structure["asym_unit"]
+    structure["asym_unit"] = atoms[:, atoms.chain_id == "A"]
+    structure["chain_info"] = {"A": structure["chain_info"]["A"]}
+    return structure
