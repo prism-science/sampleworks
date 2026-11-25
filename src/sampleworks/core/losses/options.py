@@ -245,6 +245,41 @@ class BondGeometryOptions:
                 raise ValueError(f"{name} must be a finite, non-negative distance; got {value!r}.")
 
 
+@dataclass(frozen=True)
+class CCDBoundsOptions:
+    """Options for the CCD bound-violation penalty.
+
+    See :class:`~sampleworks.core.losses.ccd_bounds.CCDBoundsLossFunction`. Defaults are
+    Boltz-2's ``PoseBustersPotential`` buffers.
+    """
+
+    bond_buffer: float = opt(0.125, help="Relative widening of CCD bond-length bounds")
+    angle_buffer: float = opt(0.125, help="Relative widening of CCD 1-3 distance bounds")
+    clash_buffer: float = opt(
+        0.10, help="Relative lowering of the lower bound of other intra-residue pairs"
+    )
+
+
+@dataclass(frozen=True)
+class MolProbityOptions:
+    """Options for the soft MolProbity score.
+
+    See :class:`~sampleworks.core.losses.molprobity.MolProbityLossFunction`.
+    """
+
+    outlier_softness: float = opt(
+        0.5,
+        help="Width, in natural-log units of the contour value, of the soft rotamer and "
+        "Ramachandran outlier indicators",
+    )
+    clash_chunk_size: int = opt(
+        2048, help="Rows of the pairwise-distance matrix searched for clashes at a time"
+    )
+    skip_polar_pairs: bool = opt(
+        False, help="Leave N/O pairs (hydrogen bonds, without hydrogens) out of the clashscore"
+    )
+
+
 def option_type(options_cls: type, name: str) -> Any:
     """Return the declared type of one option, with ``None`` stripped from unions.
 

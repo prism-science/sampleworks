@@ -64,6 +64,8 @@ class Losses(StrEnum):
     STRUCTURE_FACTOR = "structure_factor"
     DIFFUSE_BRAGG = "diffuse_bragg"
     BOND_GEOMETRY = "bond_geometry"
+    CCD_BOUNDS = "ccd_bounds"
+    MOLPROBITY = "molprobity"
 
 
 class Boltz2Method(StrEnum):

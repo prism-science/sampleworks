@@ -23,7 +23,9 @@ from typing import Any, TYPE_CHECKING
 
 from sampleworks.core.losses.options import (
     BondGeometryOptions,
+    CCDBoundsOptions,
     DiffuseBraggOptions,
+    MolProbityOptions,
     option_type,
     RealSpaceDensityOptions,
     StructureFactorOptions,
@@ -157,6 +159,18 @@ LOSS_SPECS: dict[Losses, LossSpec] = {
         options_cls=BondGeometryOptions,
         builder_path="sampleworks.core.losses.geometry:build_bond_geometry_loss",
         description="Bond-length and steric-clash penalty; combine with a data loss.",
+    ),
+    Losses.CCD_BOUNDS: LossSpec(
+        name=Losses.CCD_BOUNDS,
+        options_cls=CCDBoundsOptions,
+        builder_path="sampleworks.core.losses.ccd_bounds:build_ccd_bounds_loss",
+        description="Flat-bottom penalty on distances outside CCD (RDKit) bounds (no data).",
+    ),
+    Losses.MOLPROBITY: LossSpec(
+        name=Losses.MOLPROBITY,
+        options_cls=MolProbityOptions,
+        builder_path="sampleworks.core.losses.molprobity:build_molprobity_loss",
+        description="Soft heavy-atom MolProbity score: clashes, rotamers, Ramachandran (no data).",
     ),
 }
 
