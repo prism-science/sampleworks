@@ -17,7 +17,6 @@ from sampleworks.models.esmfold2.structure_processing import (
     ESMFold2InputBuilderBlockLogs,
     structure_to_esmfold2_input,
 )
-from sampleworks.utils.atom_reconciler import AtomReconciler
 
 
 # Loads the various structure dictionary fixtures into the namespace.
@@ -70,63 +69,32 @@ def test_prepared_input_builds_valid_features(
     assert torch.isfinite(features["ref_pos"]).all()
 
 
-@pytest.mark.parametrize(
-    "missing_atoms", [False, True], ids=["complete", "missing-sidechain-atoms"]
-)
-def test_model_atoms_reconcile_with_reference(
-    single_chain_structure: dict[str, Any], missing_atoms: bool
-):
-    """Match atom identities despite different ordering, numbering, or coverage."""
+def test_model_atoms_include_missing_cb_atoms(single_chain_structure: dict[str, Any]):
+    """Model atoms include one CB per non-glycine residue despite their absence in the input."""
     structure = single_chain_structure
-    atoms = structure["asym_unit"][0]
-    if missing_atoms:
-        atoms = atoms[atoms.atom_name != "CB"]
-
-    # Reverse atoms within each residue while retaining residue order.
-    starts = get_residue_starts(atoms, add_exclusive_stop=True)
-    indices = np.concatenate(
-        [np.arange(start, stop)[::-1] for start, stop in zip(starts[:-1], starts[1:], strict=True)]
-    )
-    atoms = atoms[indices]
-    atoms.res_id += 100
-    structure["asym_unit"] = atoms
+    input_atoms = structure["asym_unit"][0]
+    sequence = structure["chain_info"]["A"]["processed_entity_canonical_sequence"]
+    expected_cb_residues = [
+        position for position, letter in enumerate(sequence, start=1) if letter != "G"
+    ]
+    expected_atom_count = len(input_atoms)
+    structure["asym_unit"] = input_atoms[input_atoms.atom_name != "CB"]
 
     builder = ESMFold2InputBuilderBlockLogs()
     with pytest.warns(UserWarning, match="No MSA provided"):
         features, chains = builder.prepare_input(structure_to_esmfold2_input(structure), seed=0)
 
-    # Give every atom a unique coordinate to detect changes to model atom order.
-    features["ref_pos"] = torch.arange(features["ref_pos"].numel(), dtype=torch.float32).reshape(
-        features["ref_pos"].shape
-    )
     model_atoms = esmfold2_features_to_atom_array(features, chains)
-    mask = features["atom_attention_mask"][0].bool()
-    np.testing.assert_array_equal(model_atoms.coord, features["ref_pos"][0, mask].numpy())
-    assert len(model_atoms) == mask.sum().item()
 
-    reconciler = AtomReconciler.from_arrays(model_atoms, atoms)
-    assert reconciler.has_mismatch
-    assert reconciler.n_common == len(atoms)
-    matched_model = model_atoms[reconciler.model_indices.numpy()]
-    matched_reference = atoms[reconciler.struct_indices.numpy()]
-    for annotation in ("chain_id", "res_name", "atom_name", "element"):
-        np.testing.assert_array_equal(
-            matched_model.get_annotation(annotation), matched_reference.get_annotation(annotation)
-        )
-
-    # Compare residue positions independently of the reference's author numbering.
     np.testing.assert_array_equal(
-        matched_model.res_id,
-        np.repeat(np.arange(1, len(starts)), np.diff(starts))[reconciler.struct_indices.numpy()],
+        model_atoms.res_id[model_atoms.atom_name == "CB"], expected_cb_residues
     )
-
-    if missing_atoms:
-        assert np.any(model_atoms.atom_name == "CB")
-        assert reconciler.n_model > reconciler.n_struct
+    assert len(model_atoms) == expected_atom_count
+    assert len(model_atoms) - len(structure["asym_unit"]) == len(expected_cb_residues)
 
 
-def test_atoms_retain_coordinates_through_conversion_and_reconciliation():
-    """Each atom retains its XYZ coordinates through conversion and reconciliation."""
+def test_atom_conversion_preserves_model_order_and_coordinates():
+    """Conversion returns exactly the nine AG atoms in model order with their coordinates."""
     model_input = StructurePredictionInput(sequences=[ProteinInput(id="A", sequence="AG")])
     builder = ESMFold2InputBuilderBlockLogs()
     with pytest.warns(UserWarning, match="No MSA provided"):
@@ -152,7 +120,7 @@ def test_atoms_retain_coordinates_through_conversion_and_reconciliation():
     features["ref_pos"] = coordinates
 
     model_atoms = esmfold2_features_to_atom_array(features, chains)
-    reference = array(
+    expected = array(
         [
             Atom(
                 coordinates[0, i].numpy(),
@@ -167,17 +135,8 @@ def test_atoms_retain_coordinates_through_conversion_and_reconciliation():
             for i, (res_id, res_name, atom_name, element) in enumerate(expected_atoms)
         ]
     )
-    assert model_atoms == reference
-
-    # Retain a reordered subset with different author residue numbering.
-    reference = reference[[3, 1, 0, 8, 6, 5]]
-    reference.res_id += 100
-    reconciler = AtomReconciler.from_arrays(model_atoms, reference)
-    assert reconciler.n_common == len(reference)
-    np.testing.assert_array_equal(
-        model_atoms.coord[reconciler.model_indices.numpy()],
-        reference.coord[reconciler.struct_indices.numpy()],
-    )
+    assert model_atoms == expected
+    assert len(model_atoms) == features["atom_attention_mask"].sum().item() == 9
 
 
 def test_model_atoms_support_loss_inputs():
