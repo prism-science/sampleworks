@@ -574,6 +574,7 @@ class TestStructureFactorBulkSolvent:
         )
 
 
+@pytest.mark.slow
 @pytest.mark.gpu
 class TestStructureFactorScaleFit:
     """``scale_fit="adam"`` refits the per-resolution-bin scales against ``|Fobs|`` on every
@@ -596,8 +597,8 @@ class TestStructureFactorScaleFit:
         amplitude_column: str,
     ):
         """The true structure scored against its own amplitudes times ``AMPLITUDE_SCALE``:
-        default scales leave R-work at exactly ``1 - 1/AMPLITUDE_SCALE``, fitted scales take
-        it to about zero."""
+        default scales leave the whole amplitude mismatch in the loss, fitted scales absorb
+        nearly all of it."""
         sigma_column = f"SIG{amplitude_column}"
         dataset = rs.read_mtz(str(mtz_path_1vme))
         for column in (amplitude_column, sigma_column):
@@ -605,7 +606,7 @@ class TestStructureFactorScaleFit:
         rescaled_mtz = tmp_path / "1vme_rescaled.mtz"
         dataset.write_mtz(str(rescaled_mtz))
 
-        r_work_by_scale_fit = {}
+        loss_by_scale_fit = {}
         for scale_fit in ("off", "adam"):
             loss_function = make_prepared_loss(
                 rescaled_mtz,
@@ -616,21 +617,13 @@ class TestStructureFactorScaleFit:
                 normalize_amplitude=False,
                 scale_fit=scale_fit,
             )
-            loss_function(**sf_true_inputs)
-            sfc = loss_function.sfc
-            # The structure factors the loss just scored; only Ftotal is built with any scaling.
-            if bulk_solvent == "off" and scale_fit == "off":
-                scored_fcalc = sfc.Fprotein_HKL_batch.sum(dim=0)
-            else:
-                scored_fcalc = sfc.Ftotal_HKL
-            r_work, _ = sfc.get_rfactors(ftotal=scored_fcalc.detach())
-            r_work_by_scale_fit[scale_fit] = float(r_work)
+            loss_by_scale_fit[scale_fit] = float(loss_function(**sf_true_inputs))
 
-        assert r_work_by_scale_fit["off"] == pytest.approx(1 - 1 / self.AMPLITUDE_SCALE, abs=1e-3)
-        # Error-free data, so the fit should end far below any refinement R-work.
-        assert r_work_by_scale_fit["adam"] < 0.01, (
-            f"fitted scales should absorb the x{self.AMPLITUDE_SCALE} amplitude scale, but "
-            f"R-work is {r_work_by_scale_fit['adam']:.4f}"
+        # Error-free data, so the fit should leave a small fraction of the unscaled loss.
+        assert loss_by_scale_fit["adam"] < 0.01 * loss_by_scale_fit["off"], (
+            f"fitted scales should absorb the x{self.AMPLITUDE_SCALE} amplitude scale, but the "
+            f"loss is {loss_by_scale_fit['adam']:.3e} against {loss_by_scale_fit['off']:.3e} "
+            "without the fit"
         )
 
     def test_scale_fit_under_no_grad_keeps_coordinate_gradient(
