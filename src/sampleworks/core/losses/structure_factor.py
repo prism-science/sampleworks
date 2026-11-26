@@ -15,8 +15,8 @@ from SFC_Torch import SFcalculator
 from SFC_Torch.io import PDBParser
 
 from sampleworks.core.losses.options import (
-    SFC_BULK_SOLVENT_MODES,
-    SFC_SCALE_FIT_MODES,
+    SFCBulkSolventMode,
+    SFCScaleFitMode,
     StructureFactorOptions,
 )
 from sampleworks.core.losses.registry import LossBuildContext
@@ -222,11 +222,12 @@ class StructureFactorLossFunction:
         self.mtzfile = str(mtzfile)
         self.resolution = resolution
         self.scattering_factor_mode = scattering_factor_mode
-        if bulk_solvent not in SFC_BULK_SOLVENT_MODES:
+        valid_bulk_solvent_modes = [mode.value for mode in SFCBulkSolventMode]
+        if bulk_solvent not in valid_bulk_solvent_modes:
             raise ValueError(
-                f"bulk_solvent must be one of {SFC_BULK_SOLVENT_MODES}, got {bulk_solvent!r}."
+                f"bulk_solvent must be one of {valid_bulk_solvent_modes}, got {bulk_solvent!r}."
             )
-        self.bulk_solvent = bulk_solvent
+        self.bulk_solvent = SFCBulkSolventMode(bulk_solvent)
         self.exclude_free_reflections = exclude_free_reflections
         # bool will pass isinstance(..., int) check but not the type check
         if type(batch_partition) is not int or batch_partition <= 0:
@@ -234,9 +235,12 @@ class StructureFactorLossFunction:
                 f"batch_partition must be a positive integer, got {batch_partition!r}."
             )
         self.batch_partition = batch_partition
-        if scale_fit not in SFC_SCALE_FIT_MODES:
-            raise ValueError(f"scale_fit must be one of {SFC_SCALE_FIT_MODES}, got {scale_fit!r}.")
-        self.scale_fit = scale_fit
+        valid_scale_fit_modes = [mode.value for mode in SFCScaleFitMode]
+        if scale_fit not in valid_scale_fit_modes:
+            raise ValueError(
+                f"scale_fit must be one of {valid_scale_fit_modes}, got {scale_fit!r}."
+            )
+        self.scale_fit = SFCScaleFitMode(scale_fit)
         self.loss: AmplitudeLoss = loss if loss is not None else torch.nn.MSELoss()
         self.normalize_amplitude = normalize_amplitude  # |F| vs resolution-bin normalized |E|
 
@@ -395,7 +399,7 @@ class StructureFactorLossFunction:
         # That would be more similar to how ROCKET initializes scales in initial_SFC.
         # The concern is that model-only atoms placed at arbitrary positions (e.g. origin,
         # COM) would affect the scale, unclear to what extent though.
-        if self.bulk_solvent != "off" and self.scale_fit == "off":
+        if self.bulk_solvent != SFCBulkSolventMode.OFF and self.scale_fit == SFCScaleFitMode.OFF:
             self.sfc._set_scales(requires_grad=False)
         self._scales_initialized = False
 
@@ -581,7 +585,7 @@ class StructureFactorLossFunction:
         )
         Fprotein = Fprotein_batch.sum(dim=0)
 
-        if self.bulk_solvent == "off" and self.scale_fit == "off":
+        if self.bulk_solvent == SFCBulkSolventMode.OFF and self.scale_fit == SFCScaleFitMode.OFF:
             fcalc = Fprotein
         else:
             fcalc = self._compute_ensemble_ftotal(Fprotein)
@@ -644,9 +648,9 @@ class StructureFactorLossFunction:
         """
         assert self.sfc is not None  # prepare() built it; __call__ guards before dispatching here
         self.sfc.Fprotein_HKL = Fprotein_HKL  # drives calc_ftotal on the HKL set
-        if self.bulk_solvent == "off":
+        if self.bulk_solvent == SFCBulkSolventMode.OFF:
             self.sfc.Fmask_HKL = torch.zeros_like(Fprotein_HKL)
-        elif self.bulk_solvent == "per_conformer":
+        elif self.bulk_solvent == SFCBulkSolventMode.PER_CONFORMER:
             # calc_fsolvent_batch masks each conformer (from Fprotein_asu_batch, set by
             # calc_fprotein_batch); the mean applies the 1/batch_size weight -> <mask(rho)>.
             Fmask_HKL_batch = self.sfc.calc_fsolvent_batch(
@@ -658,7 +662,7 @@ class StructureFactorLossFunction:
             # having the Fprotein_asu set, but batch mode only sets Fprotein_asu_batch.
             self.sfc.Fprotein_asu = self.sfc.Fprotein_asu_batch.sum(dim=0)
             self.sfc.calc_fsolvent()  # sets Fmask_HKL
-        if self.scale_fit != "off":
+        if self.scale_fit != SFCScaleFitMode.OFF:
             self._fit_scales()
         # At this point the scaling parameters are either constants (defaults) or frozen, so
         # the gradient of Ftotal reaches the coordinates only.
@@ -690,15 +694,27 @@ class StructureFactorLossFunction:
             else:
                 self.sfc.get_scales_adam()
         self._scales_initialized = True
-        logger.opt(lazy=True).debug(
-            "Scale fit: r_work={:.4f}, r_free={:.4f}; per resolution bin kiso={}, kmask={}, "
-            "uaniso={}",
-            lambda: float(self.sfc.r_work),
-            lambda: float(self.sfc.r_free),
-            lambda: _format_scales_for_log(self.sfc.kisos),
-            lambda: _format_scales_for_log(self.sfc.kmasks),
-            lambda: _format_scales_for_log(self.sfc.uanisos),
-        )
+        # Lazy: loguru calls the method only when a sink accepts debug records, which keeps
+        # the GPU-to-CPU copies of the scales out of ordinary runs.
+        logger.opt(lazy=True).debug("Scale fit: {}", self._summarize_fitted_scales)
+
+    def _summarize_fitted_scales(self) -> dict[str, float | list]:
+        """Collect the R-factors and scales of the latest fit as Python numbers for logging.
+
+        Returns
+        -------
+        dict[str, float | list]
+            ``r_work`` and ``r_free`` rounded to four decimals, and ``kiso`` / ``kmask`` /
+            ``uaniso`` with one entry per resolution bin.
+        """
+        assert self.sfc is not None  # only called after a fit, which needs the prepared sfc
+        return {
+            "r_work": round(float(self.sfc.r_work), 4),
+            "r_free": round(float(self.sfc.r_free), 4),
+            "kiso": _format_scales_for_log(self.sfc.kisos),
+            "kmask": _format_scales_for_log(self.sfc.kmasks),
+            "uaniso": _format_scales_for_log(self.sfc.uanisos),
+        }
 
 
 def _format_scales_for_log(scales_per_bin: list[torch.Tensor]) -> list:
