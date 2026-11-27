@@ -271,6 +271,11 @@ class TestStructureFactorConstruction:
         with pytest.raises(ValueError, match="bulk_solvent must be one of"):
             StructureFactorLossFunction(toy_multi_set_mtz, bulk_solvent="not_off")
 
+    def test_unknown_scale_fit_mode_raises(self, toy_multi_set_mtz: Path):
+        """An unrecognized ``scale_fit`` mode fails fast at construction."""
+        with pytest.raises(ValueError, match="scale_fit must be one of"):
+            StructureFactorLossFunction(toy_multi_set_mtz, scale_fit="not_off")
+
     def test_reserved_sfcalculator_kwargs_raise(self, toy_multi_set_mtz):
         """``sfcalculator_kwargs`` should not override reserved keys for the loss function's
         ``__init__ arguments``."""
@@ -567,6 +572,91 @@ class TestStructureFactorBulkSolvent:
             "coordinate gradients from the Fprotein and Fmask branches do not sum back to "
             f"d(loss)/d(coords) (relative residual norm {residual:.2e})"
         )
+
+
+@pytest.mark.slow
+@pytest.mark.gpu
+class TestStructureFactorScaleFit:
+    """``scale_fit="adam"`` refits the per-resolution-bin scales against ``|Fobs|`` on every
+    call, then scores the coordinates with those scales frozen."""
+
+    AMPLITUDE_SCALE = 2.0  # overall factor applied to the MTZ amplitudes and sigmas
+
+    @pytest.mark.parametrize(
+        ("bulk_solvent", "amplitude_column"),
+        [("off", "Fprotein"), ("combined", "Ftotal")],
+    )
+    def test_scale_fit_absorbs_rescaled_amplitudes(
+        self,
+        mtz_path_1vme: Path,
+        structure_1vme_sf: AtomArray,
+        sf_true_inputs: dict[str, torch.Tensor],
+        device: torch.device,
+        tmp_path: Path,
+        bulk_solvent: str,
+        amplitude_column: str,
+    ):
+        """The true structure scored against its own amplitudes times ``AMPLITUDE_SCALE``:
+        default scales leave the whole amplitude mismatch in the loss, fitted scales absorb
+        nearly all of it."""
+        sigma_column = f"SIG{amplitude_column}"
+        dataset = rs.read_mtz(str(mtz_path_1vme))
+        for column in (amplitude_column, sigma_column):
+            dataset[column] *= self.AMPLITUDE_SCALE
+        rescaled_mtz = tmp_path / "1vme_rescaled.mtz"
+        dataset.write_mtz(str(rescaled_mtz))
+
+        loss_by_scale_fit = {}
+        for scale_fit in ("off", "adam"):
+            loss_function = make_prepared_loss(
+                rescaled_mtz,
+                structure_1vme_sf,
+                device,
+                expcolumns=[amplitude_column, sigma_column],
+                bulk_solvent=bulk_solvent,
+                normalize_amplitude=False,
+                scale_fit=scale_fit,
+            )
+            loss_by_scale_fit[scale_fit] = float(loss_function(**sf_true_inputs))
+
+        # Error-free data, so the fit should leave a small fraction of the unscaled loss.
+        assert loss_by_scale_fit["adam"] < 0.01 * loss_by_scale_fit["off"], (
+            f"fitted scales should absorb the x{self.AMPLITUDE_SCALE} amplitude scale, but the "
+            f"loss is {loss_by_scale_fit['adam']:.3e} against {loss_by_scale_fit['off']:.3e} "
+            "without the fit"
+        )
+
+    def test_scale_fit_under_no_grad_keeps_coordinate_gradient(
+        self,
+        mtz_path_1vme: Path,
+        structure_1vme_sf: AtomArray,
+        sf_true_inputs: dict[str, torch.Tensor],
+        device: torch.device,
+    ):
+        """A first call under ``torch.no_grad()`` still fits the scales, and the warm-started
+        refit of a later call leaves a finite, nonzero gradient on the coordinates.
+
+        Losses are evaluated under ``no_grad`` in production (e.g. for latent optimization),
+        while the scale fit itself needs autograd.
+        """
+        loss_function = make_prepared_loss(
+            mtz_path_1vme,
+            structure_1vme_sf,
+            device,
+            expcolumns=["Ftotal", "SIGFtotal"],
+            bulk_solvent="combined",
+            normalize_amplitude=False,
+            scale_fit="adam",
+        )
+        # check that scale fit runs without raising inside torch.no_grad
+        with torch.no_grad():
+            assert torch.isfinite(loss_function(**sf_true_inputs))
+        # check that with scale fit coordinate gradient is finite non-zero
+        coordinates = sf_true_inputs["coordinates"].clone().requires_grad_(True)
+        loss = loss_function(**{**sf_true_inputs, "coordinates": coordinates})
+        (coordinate_gradient,) = torch.autograd.grad(loss, coordinates)
+        assert torch.isfinite(coordinate_gradient).all()
+        assert coordinate_gradient.norm().item() > 0
 
 
 @pytest.mark.gpu

@@ -26,7 +26,30 @@ import math
 import types
 import typing
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
+
+
+class SFCBulkSolventMode(StrEnum):
+    """Bulk-solvent treatments of the SFcalculator structure-factor loss."""
+
+    OFF = "off"
+    COMBINED = "combined"
+    PER_CONFORMER = "per_conformer"
+
+
+class SFCScaleFitMode(StrEnum):
+    """Per-resolution-bin scale treatments of the SFcalculator structure-factor loss."""
+
+    OFF = "off"
+    ADAM = "adam"
+
+
+class LunusBulkSolventMode(StrEnum):
+    """Bulk-solvent treatments of the LUNUS diffuse-Bragg loss."""
+
+    OFF = "off"
+    PER_CONFORMER = "per_conformer"
 
 
 def opt(
@@ -138,11 +161,18 @@ class StructureFactorOptions:
         "off",
         help="Bulk-solvent treatment: off (score |Fprotein|), combined (one mask from "
         "the combined density), or per_conformer (mean of per-conformer masks)",
-        choices=("off", "combined", "per_conformer"),
+        choices=tuple(mode.value for mode in SFCBulkSolventMode),
     )
     normalize_amplitude: bool = opt(False, help="Score normalized amplitudes (|E|) instead of |F|")
     exclude_free_reflections: bool = opt(False, help="Score the working set only, dropping R-free")
     batch_partition: int = opt(10, help="Ensemble chunk size for the SFcalculator batch")
+    scale_fit: str = opt(
+        "off",
+        help="Per-resolution-bin scale (kiso, kmask, uaniso) treatment: off (SFcalculator's "
+        "default values) or adam (least-squares refit against |Fo| on every loss call; "
+        "always on the working set, ignoring exclude_free_reflections)",
+        choices=tuple(mode.value for mode in SFCScaleFitMode),
+    )
     sfcalculator_kwargs: dict | None = opt(
         None,
         help="Extra SFcalculator keyword arguments as JSON, e.g. '{\"n_bins\": 15}'",
@@ -188,7 +218,7 @@ class DiffuseBraggOptions:
         "off",
         help="Bulk-solvent treatment: off (score |Fprotein|) or per_conformer (a mask from "
         "each configuration's own density)",
-        choices=("off", "per_conformer"),
+        choices=tuple(mode.value for mode in LunusBulkSolventMode),
     )
     solvent_cutoff: float | None = opt(
         None,

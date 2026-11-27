@@ -56,7 +56,7 @@ from lunus.sf import mean_and_diffuse
 from lunus.sf.symmetry_torch import supercell_factors
 
 from sampleworks.core.forward_models.xray import lunus_sf
-from sampleworks.core.losses.options import DiffuseBraggOptions
+from sampleworks.core.losses.options import DiffuseBraggOptions, LunusBulkSolventMode
 from sampleworks.core.losses.protocol import LossInputs
 from sampleworks.core.losses.registry import LossBuildContext
 from sampleworks.synthetic.synthetic_utils import resolve_mtz_column
@@ -66,9 +66,6 @@ if TYPE_CHECKING:
     from lunus.sf import IsotropicBackground
 
 
-# Bulk-solvent treatment, named as in StructureFactorLossFunction. lunus builds
-# its mask per configuration, so there is no "combined" mode here.
-_BULK_SOLVENT_MODES = ("off", "per_conformer")
 # Taper width for an explicit solvent cutoff, in the cutoff's own units (e/A^3; the
 # mask thresholds blurred density), as in generate_synthetic_sf_lunus. The cutoff
 # itself is calibrated by default; see prepare().
@@ -185,16 +182,17 @@ class DiffuseBraggLossFunction:
         self.free_flag_column = free_flag_column
         self.test_set_value = test_set_value
 
-        if bulk_solvent not in _BULK_SOLVENT_MODES:
+        valid_bulk_solvent_modes = [mode.value for mode in LunusBulkSolventMode]
+        if bulk_solvent not in valid_bulk_solvent_modes:
             raise ValueError(
-                f"bulk_solvent must be one of {_BULK_SOLVENT_MODES}, got {bulk_solvent!r}."
+                f"bulk_solvent must be one of {valid_bulk_solvent_modes}, got {bulk_solvent!r}."
             )
-        self.bulk_solvent = bulk_solvent
+        self.bulk_solvent = LunusBulkSolventMode(bulk_solvent)
         self.solvent_cutoff = solvent_cutoff
         # A given cutoff is used as is; None is calibrated in prepare(), which has
         # the grid and the reference configuration the calibration needs.
         self._solvent = None
-        if bulk_solvent == "per_conformer" and solvent_cutoff is not None:
+        if self.bulk_solvent == LunusBulkSolventMode.PER_CONFORMER and solvent_cutoff is not None:
             # Inline: lunus.sf loads submodules on first access (PEP 562), so this
             # loads solvent_torch only when a mask is requested.
             from lunus.sf import SolventModel
@@ -555,7 +553,7 @@ class DiffuseBraggLossFunction:
 
         # Recalibrated on every prepare(): the matched cutoff belongs to the topology
         # and grid prepared here, and prepare() may be re-run for different inputs.
-        if self.bulk_solvent == "per_conformer" and self.solvent_cutoff is None:
+        if self.bulk_solvent == LunusBulkSolventMode.PER_CONFORMER and self.solvent_cutoff is None:
             reference = loss_inputs.to_atom_array()
             target = lunus_sf.geometric_solvent_fraction(
                 reference, reference.coord, self.unit_cell, self.space_group, self.setup.grid_shape
