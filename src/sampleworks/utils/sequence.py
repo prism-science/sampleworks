@@ -15,8 +15,9 @@ from atomworks.io.utils.sequence import get_1_from_3_letter_code
 from biotite.sequence import ProteinSequence
 from biotite.sequence.align import align_optimal, SubstitutionMatrix
 from biotite.sequence.io.fasta import FastaFile
-from biotite.structure import get_residue_starts
+from biotite.structure import AtomArray, AtomArrayStack, get_residue_starts
 from biotite.structure.info import residue as ccd_residue
+from loguru import logger
 
 
 @functools.cache
@@ -216,6 +217,64 @@ def _snap_runs_to_numbering(
             "sequence (e.g. duplicated or reset res_ids in one chain). The CIF may be malformed."
         )
     return snapped
+
+
+def _resolved_residue_count(atom_array: AtomArray | AtomArrayStack, chain_id: str) -> int:
+    """Number of residues with coordinates in one chain of ``atom_array``."""
+    return len(get_residue_starts(atom_array[..., np.asarray(atom_array.chain_id) == chain_id]))
+
+
+def infer_sequence_override(structure: dict[str, Any]) -> str | None:
+    """Return the file's own sequence for a protein chain with unresolved residues.
+
+    Every model wrapper generates the full ``processed_entity_canonical_sequence`` of each
+    chain, so when the structure file states a sequence longer than its resolved residues,
+    the input and model atom arrays only pair correctly after
+    :func:`apply_sequence_override` places each resolved residue in that sequence.
+
+    Parameters
+    ----------
+    structure : dict[str, Any]
+        Atomworks-parsed structure with ``"asym_unit"`` and ``"chain_info"``.
+
+    Returns
+    -------
+    str or None
+        The stated sequence of the single protein chain when it has unresolved residues;
+        ``None`` when no protein chain has unresolved residues, the file states no sequence
+        (atomworks then reads it off the coordinates), or there are several protein chains,
+        which :func:`apply_sequence_override` does not support yet.
+    """
+    protein_chain_info = {
+        chain_id: info
+        for chain_id, info in (structure.get("chain_info") or {}).items()
+        if info["chain_type"].is_protein()
+    }
+    atom_array = structure["asym_unit"]
+    # atomworks sets "unprocessed_entity_canonical_sequence" only for sequences it read from
+    # the entity_poly category rather than from the resolved residues.
+    gapped_chain_ids = [
+        chain_id
+        for chain_id, info in protein_chain_info.items()
+        if "unprocessed_entity_canonical_sequence" in info
+        and len(info["processed_entity_canonical_sequence"])
+        > _resolved_residue_count(atom_array, chain_id)
+    ]
+    if not gapped_chain_ids:
+        return None
+    if len(protein_chain_info) != 1:
+        logger.warning(
+            f"Protein chains {gapped_chain_ids} have unresolved residues, but sequences can only "
+            f"be inferred for single-protein-chain structures; model atoms in these chains may "
+            f"be paired with the wrong input residues."
+        )
+        return None
+
+    logger.info(
+        f"Protein chain {gapped_chain_ids[0]} has unresolved residues; using the sequence stated "
+        f"in the structure file as the sequence override. Pass --sequence to choose another."
+    )
+    return protein_chain_info[gapped_chain_ids[0]]["processed_entity_canonical_sequence"]
 
 
 def apply_sequence_override(structure: dict[str, Any], sequence: str | None) -> dict[str, Any]:

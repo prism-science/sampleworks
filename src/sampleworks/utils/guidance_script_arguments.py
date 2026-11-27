@@ -810,8 +810,9 @@ def add_generic_args(parser: argparse.ArgumentParser | GuidanceConfig):
         default=None,
         help="Reference sequence, e.g. the deposited PDB sequence (amino-acid string or path "
         "to a single-record .fasta/.fa/.faa/.fas file). The structure predictor receives this "
-        "sequence, so unmodeled regions are generated. Only single-protein-chain structures are "
-        "supported currently.",
+        "sequence, so unmodeled regions are generated. Defaults to the sequence stated in the "
+        "structure file's entity_poly category when it has unresolved residues. Only "
+        "single-protein-chain structures are supported currently.",
     )
     parser.add_argument("--output-dir", type=str, default="output", help="Output directory")
     parser.add_argument(

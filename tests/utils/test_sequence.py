@@ -1,9 +1,15 @@
 """Tests for applying sequence conditioning to parsed structures."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
-from sampleworks.utils.atom_array_utils import make_normalized_atom_id
-from sampleworks.utils.sequence import apply_sequence_override, validate_seq_with_error
+from sampleworks.utils.atom_array_utils import make_normalized_atom_id, parse_structure
+from sampleworks.utils.sequence import (
+    apply_sequence_override,
+    infer_sequence_override,
+    validate_seq_with_error,
+)
 
 
 @pytest.mark.parametrize("stacked", [False, True])
@@ -407,55 +413,96 @@ class TestReconcilerWithSequenceOverride:
         numbering is deposited position + 1, so model residue k must pair with
         structure residue k.
         """
-        import biotite.structure as struc
-        from biotite.sequence import ProteinSequence
-        from sampleworks.utils.atom_reconciler import AtomReconciler
-        from sampleworks.utils.structure_utils import get_asym_unit_from_structure
-
-        chain_info = structure_5i09_density["chain_info"]
-        protein_chain = next(
-            cid for cid, info in chain_info.items() if info["chain_type"].is_protein()
-        )
-
-        # Apply override with the real 386-residue deposited sequence.
         struct_overridden = apply_sequence_override(structure_5i09_density, seq_5i09_deposited)
-        struct_arr = get_asym_unit_from_structure(struct_overridden, atom_array_index=0)
 
-        # Build a "model" array: dense residue numbering 1..386,
-        # with just backbone atoms (N, CA, C, O) per residue.
-        backbone = ["N", "CA", "C", "O"]
-        n_res = len(seq_5i09_deposited)
-        n_atoms = n_res * len(backbone)
-        model_arr = struc.AtomArray(n_atoms)
-        atom_names, res_ids, res_names, chain_ids = [], [], [], []
-        for i, aa in enumerate(seq_5i09_deposited):
-            for atom in backbone:
-                atom_names.append(atom)
-                res_ids.append(i + 1)
-                res_names.append(ProteinSequence.convert_letter_1to3(aa))
-                chain_ids.append(protein_chain)
-        model_arr.atom_name = np.array(atom_names)
-        model_arr.res_id = np.array(res_ids, dtype=np.int64)
-        model_arr.res_name = np.array(res_names)
-        model_arr.chain_id = np.array(chain_ids)
-        model_arr.coord = np.zeros((n_atoms, 3), dtype=np.float32)
+        _assert_backbone_pairs_same_residues(struct_overridden, seq_5i09_deposited)
 
-        # Filter struct to backbone only for comparison.
-        backbone_mask = np.isin(struct_arr.atom_name, backbone)
-        chain_mask = np.asarray(struct_arr.chain_id) == protein_chain
-        struct_bb = struct_arr[backbone_mask & chain_mask]
 
-        reconciler = AtomReconciler.from_arrays(model_arr, struct_bb)
+_BACKBONE_ATOM_NAMES = ("N", "CA", "C", "O")
 
-        m_idx = reconciler.model_indices.numpy()  # (n_common,)
-        s_idx = reconciler.struct_indices.numpy()  # (n_common,)
 
-        # Every observed backbone atom has a model counterpart.
-        assert len(s_idx) == struct_bb.array_length()
-        # Each pair is the same residue and atom.
-        np.testing.assert_array_equal(model_arr.res_id[m_idx], struct_bb.res_id[s_idx])
-        np.testing.assert_array_equal(model_arr.res_name[m_idx], struct_bb.res_name[s_idx])
-        np.testing.assert_array_equal(model_arr.atom_name[m_idx], struct_bb.atom_name[s_idx])
+def _backbone_model_array(sequence: str, chain_id: str):
+    """Backbone atoms of ``sequence`` numbered 1..N on one chain, as a model wrapper emits them."""
+    from biotite.sequence import ProteinSequence
+    from biotite.structure import AtomArray
+
+    n_atoms_per_residue = len(_BACKBONE_ATOM_NAMES)
+    model_arr = AtomArray(len(sequence) * n_atoms_per_residue)
+    model_arr.atom_name = np.tile(_BACKBONE_ATOM_NAMES, len(sequence))
+    model_arr.res_id = np.repeat(np.arange(1, len(sequence) + 1), n_atoms_per_residue)
+    model_arr.res_name = np.repeat(
+        [ProteinSequence.convert_letter_1to3(aa) for aa in sequence], n_atoms_per_residue
+    )
+    model_arr.chain_id[:] = chain_id
+    return model_arr
+
+
+def _assert_backbone_pairs_same_residues(structure: dict, model_sequence: str) -> None:
+    """Assert the reconciler pairs every input backbone atom with the same model residue.
+
+    The model array is ``model_sequence`` numbered from 1, so it is the same residue
+    as an input residue with the same ``res_id`` when the input is numbered by
+    sequence position (``label_seq_id`` or 5I09's author numbering).
+    """
+    from sampleworks.utils.atom_reconciler import AtomReconciler
+    from sampleworks.utils.structure_utils import get_asym_unit_from_structure
+
+    protein_chain = next(
+        cid for cid, info in structure["chain_info"].items() if info["chain_type"].is_protein()
+    )
+    struct_arr = get_asym_unit_from_structure(structure, atom_array_index=0)
+    struct_bb = struct_arr[
+        np.isin(struct_arr.atom_name, _BACKBONE_ATOM_NAMES)
+        & (np.asarray(struct_arr.chain_id) == protein_chain)
+    ]
+    model_arr = _backbone_model_array(model_sequence, protein_chain)
+
+    reconciler = AtomReconciler.from_arrays(model_arr, struct_bb)
+    m_idx = reconciler.model_indices.numpy()  # (n_common,)
+    s_idx = reconciler.struct_indices.numpy()  # (n_common,)
+
+    assert len(s_idx) == struct_bb.array_length()
+    np.testing.assert_array_equal(model_arr.res_id[m_idx], struct_bb.res_id[s_idx])
+    np.testing.assert_array_equal(model_arr.res_name[m_idx], struct_bb.res_name[s_idx])
+    np.testing.assert_array_equal(model_arr.atom_name[m_idx], struct_bb.atom_name[s_idx])
+
+
+# ---------------------------------------------------------------------------
+# Inferring the override from the sequence the structure file states (entity_poly)
+# ---------------------------------------------------------------------------
+
+
+def test_inferred_override_pairs_model_with_unresolved_residues(resources_dir: Path):
+    """Without --sequence, a CIF's entity_poly sequence still pairs atoms across its gaps.
+
+    Loaded as guidance loads it, without atomworks adding the unresolved residues back.
+    """
+    structure = parse_structure(resources_dir / "5I09" / "5I09_prediction.cif")
+    stated_sequence = structure["chain_info"]["A"]["processed_entity_canonical_sequence"]
+
+    overridden = apply_sequence_override(structure, infer_sequence_override(structure))
+
+    _assert_backbone_pairs_same_residues(overridden, stated_sequence)
+
+
+def test_no_inferred_override_without_entity_poly(structure_5i09_density: dict):
+    """A sequence read off the coordinates cannot reveal unresolved residues."""
+    assert infer_sequence_override(structure_5i09_density) is None
+
+
+def test_no_inferred_override_without_unresolved_residues():
+    """A stated sequence fully covered by resolved residues needs no override."""
+    structure = _single_chain_structure([1, 2, 3], "MKL")
+    structure["chain_info"]["A"]["unprocessed_entity_canonical_sequence"] = "MKL"
+
+    assert infer_sequence_override(structure) is None
+
+
+def test_no_inferred_override_for_multiple_protein_chains(resources_dir: Path):
+    """Multi-chain overrides are unsupported, so gapped multi-chain inputs are left as is."""
+    structure = parse_structure(resources_dir / "1vme" / "1vme_final.cif")
+
+    assert infer_sequence_override(structure) is None
 
 
 # ---------------------------------------------------------------------------
