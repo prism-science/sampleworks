@@ -12,12 +12,15 @@ is ~0 for the true ensemble, rises as the ensemble is displaced, and puts a
 gradient on every configuration, each at every mixture of the two terms; the
 diffuse gradient points downhill; and a sign-flipped diffuse pattern is not
 mistaken for a match. It also covers the options this loss alone has: the
-convex weight, separate Bragg and diffuse reflection lists, R-free handling and
-bulk solvent.
+convex weight, separate Bragg and diffuse reflection lists, R-free and outlier
+handling and bulk solvent.
 
 The targets are written by the lunus generator in-process rather than read from a
 checked-in file, so the fixtures cannot drift from the generator that made them.
 """
+
+from dataclasses import replace
+from pathlib import Path
 
 import gemmi
 import numpy as np
@@ -25,7 +28,9 @@ import pandas as pd
 import pytest
 import reciprocalspaceship as rs
 import torch
+from biotite.structure import AtomArray
 from sampleworks.core.losses.protocol import LossInputs
+from sampleworks.synthetic.synthetic_utils import resolve_mtz_column
 
 from tests.losses.conftest import DiffuseBraggTargets
 
@@ -66,6 +71,29 @@ def score(loss_function, atom_array, coords, requires_grad=False):
     occ = torch.as_tensor(np.tile(np.asarray(atom_array.occupancy, dtype=np.float32) / n, (n, 1)))
     dummy = torch.zeros_like(occ)
     return loss_function(x, dummy.long(), dummy, occ), x
+
+
+N_OUTLIERS_IN_WORK = 50
+
+
+@pytest.fixture(scope="module")
+def bragg_with_outliers(
+    diffuse_bragg_targets: DiffuseBraggTargets, tmp_path_factory: pytest.TempPathFactory
+) -> Path:
+    """The Bragg target with some working-set amplitudes zeroed, which marks them as outliers.
+
+    The strongest working-set reflections are the ones zeroed, so scoring them moves
+    the loss well clear of its noise floor.
+    """
+    dataset = rs.read_mtz(str(diffuse_bragg_targets.bragg))
+    amplitude_column = resolve_mtz_column(dataset, rs.StructureFactorAmplitudeDtype())
+    amplitudes = dataset[amplitude_column].to_numpy(dtype=np.float64)
+    work_rows = np.flatnonzero(dataset["R-free-flags"].to_numpy() != 1)
+    outlier_rows = work_rows[np.argsort(amplitudes[work_rows])[-N_OUTLIERS_IN_WORK:]]
+    dataset.iloc[outlier_rows, dataset.columns.get_loc(amplitude_column)] = 0.0
+    path = tmp_path_factory.mktemp("outliers") / "bragg_outliers.mtz"
+    dataset.write_mtz(str(path))
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -287,10 +315,10 @@ def test_prepare_without_an_atom_array_is_a_clear_error(
 
 
 class TestFreeReflections:
-    """exclude_free_reflections drops the test set from the Bragg term."""
+    """exclude_free_reflections leaves the test set out of the Bragg term."""
 
-    def test_test_set_is_dropped_from_the_bragg_list(self, diffuse_bragg_targets):
-        """The Bragg list shrinks by the flagged count; the diffuse list is untouched."""
+    def test_test_set_is_left_out_of_the_bragg_residual(self, diffuse_bragg_targets):
+        """The scored count shrinks by the flagged count; both lists stay whole."""
         from sampleworks.core.losses.diffuse_bragg import DiffuseBraggLossFunction
 
         targets = diffuse_bragg_targets
@@ -298,12 +326,13 @@ class TestFreeReflections:
         with_all = DiffuseBraggLossFunction(bragg_weight=0.5, **both)
         working = DiffuseBraggLossFunction(bragg_weight=0.5, exclude_free_reflections=True, **both)
 
-        assert len(with_all._bragg_hkl) == targets.n_reflections
-        assert len(working._bragg_hkl) == targets.n_reflections - targets.n_free
-        assert len(working._diffuse_hkl) == targets.n_reflections
+        assert int(with_all._bragg_mask.sum()) == targets.n_reflections
+        assert int(working._bragg_mask.sum()) == targets.n_reflections - targets.n_free
+        assert len(working._bragg.hkl) == targets.n_reflections
+        assert len(working._diffuse.hkl) == targets.n_reflections
 
     def test_wrong_convention_warns(self, diffuse_bragg_targets, caplog):
-        """test_set_value=0 on a Phenix-convention file keeps only the 10% test set."""
+        """test_set_value=0 on a Phenix-convention file scores only the 10% test set."""
         from sampleworks.core.losses.diffuse_bragg import DiffuseBraggLossFunction
 
         loss_function = DiffuseBraggLossFunction(
@@ -313,7 +342,7 @@ class TestFreeReflections:
             test_set_value=0,
         )
 
-        assert len(loss_function._bragg_hkl) == diffuse_bragg_targets.n_free
+        assert int(loss_function._bragg_mask.sum()) == diffuse_bragg_targets.n_free
         assert "CCP4-convention" in caplog.text
 
     def test_reflection_with_a_missing_flag_stays_in_the_working_set(
@@ -333,18 +362,77 @@ class TestFreeReflections:
         )
 
         n = diffuse_bragg_targets.n_reflections - diffuse_bragg_targets.n_free + 1
-        assert len(loss_function._bragg_hkl) == n
+        assert int(loss_function._bragg_mask.sum()) == n
 
     def test_missing_flag_column_is_a_clear_error(self, diffuse_bragg_targets):
         """A Bragg MTZ without an integer column cannot have its test set excluded."""
         from sampleworks.core.losses.diffuse_bragg import DiffuseBraggLossFunction
 
-        with pytest.raises(ValueError, match="No MTZInt column"):
+        with pytest.raises(ValueError, match="needs R-free flags"):
             DiffuseBraggLossFunction(
                 bragg_target=diffuse_bragg_targets.bragg_single,
                 bragg_weight=1.0,
                 exclude_free_reflections=True,
             )
+
+
+# ---------------------------------------------------------------------------
+# Outlier handling
+# ---------------------------------------------------------------------------
+
+
+class TestOutliers:
+    """exclude_outliers leaves non-positive amplitudes out of the Bragg term."""
+
+    @pytest.mark.parametrize(
+        ("exclude_outliers", "exclude_free_reflections"),
+        [(True, False), (False, False), (True, True)],
+    )
+    def test_scored_count_reflects_both_exclusions(
+        self,
+        diffuse_bragg_targets: DiffuseBraggTargets,
+        bragg_with_outliers: Path,
+        exclude_outliers: bool,
+        exclude_free_reflections: bool,
+    ) -> None:
+        """Outliers are unscored by default, scored on request, and the target stays whole."""
+        from sampleworks.core.losses.diffuse_bragg import DiffuseBraggLossFunction
+
+        targets = diffuse_bragg_targets
+        loss_function = DiffuseBraggLossFunction(
+            bragg_target=bragg_with_outliers,
+            bragg_weight=1.0,
+            exclude_outliers=exclude_outliers,
+            exclude_free_reflections=exclude_free_reflections,
+        )
+
+        n_outliers_in_work = N_OUTLIERS_IN_WORK if exclude_outliers else 0
+        n_free = targets.n_free if exclude_free_reflections else 0
+        n_scored = targets.n_reflections - n_outliers_in_work - n_free
+        assert loss_function._bragg is not None and loss_function._bragg_mask is not None
+        assert int(loss_function._bragg_mask.sum()) == n_scored
+        assert len(loss_function._bragg.hkl) == targets.n_reflections
+
+    def test_outliers_do_not_reach_the_bragg_residual(
+        self,
+        diffuse_bragg_ensemble: tuple[AtomArray, np.ndarray],
+        diffuse_bragg_targets: DiffuseBraggTargets,
+        bragg_with_outliers: Path,
+    ) -> None:
+        """Excluded, the zeroed amplitudes leave the loss at ~0; scored, they raise it."""
+        atom_array, coords = diffuse_bragg_ensemble
+        zeroed = replace(diffuse_bragg_targets, bragg=bragg_with_outliers)
+        loss = {
+            excluded: score(
+                prepared_loss(zeroed, atom_array, 1.0, exclude_outliers=excluded),
+                atom_array,
+                coords,
+            )[0].item()
+            for excluded in (True, False)
+        }
+
+        assert loss[True] < 1e-6
+        assert loss[False] > 1e3 * max(loss[True], 1e-12)
 
 
 # ---------------------------------------------------------------------------
@@ -376,8 +464,8 @@ class TestSeparateReflectionLists:
             bragg_target=diffuse_bragg_targets.bragg, diffuse_target=path, bragg_weight=0.5
         )
 
-        assert len(loss_function._bragg_hkl) == n_full
-        assert len(loss_function._diffuse_hkl) == n_thinned
+        assert len(loss_function._bragg.hkl) == n_full
+        assert len(loss_function._diffuse.hkl) == n_thinned
         assert len(loss_function._hkl) == n_full
 
         atom_array, coords = diffuse_bragg_ensemble
@@ -398,7 +486,7 @@ class TestSeparateReflectionLists:
         loss_function = DiffuseBraggLossFunction(
             bragg_target=odd_bragg, diffuse_target=diffuse_path, bragg_weight=0.5
         )
-        assert len(loss_function._bragg_hkl) == n_full - n_even
+        assert len(loss_function._bragg.hkl) == n_full - n_even
         assert len(loss_function._hkl) == n_full
 
         atom_array, coords = diffuse_bragg_ensemble
@@ -589,19 +677,25 @@ class TestBuilder:
         assert isinstance(loss_function, DiffuseBraggLossFunction)
         assert loss_function.bragg_weight == 0.3
 
-    def test_solvent_and_free_flag_options_reach_the_loss(self, diffuse_bragg_targets):
-        """Solvent and R-free options pass through the builder and take effect."""
+    def test_solvent_and_reflection_exclusion_options_reach_the_loss(
+        self,
+        diffuse_bragg_targets: DiffuseBraggTargets,
+        bragg_with_outliers: Path,
+    ) -> None:
+        """Solvent, R-free and outlier options pass through the builder and take effect."""
         loss_function = self.build(
             diffuse_bragg_targets,
+            bragg_target=str(bragg_with_outliers),
             bulk_solvent="per_conformer",
             solvent_cutoff=0.3,
             exclude_free_reflections=True,
+            exclude_outliers=False,
         )
 
         assert loss_function.bulk_solvent == "per_conformer"
         assert loss_function._solvent.cutoff == 0.3
         n = diffuse_bragg_targets.n_reflections - diffuse_bragg_targets.n_free
-        assert len(loss_function._bragg_hkl) == n
+        assert int(loss_function._bragg_mask.sum()) == n
 
     def test_is_registered(self):
         """The registry knows the loss under its CLI name."""
